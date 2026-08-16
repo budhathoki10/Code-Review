@@ -6,6 +6,7 @@ import {
   type RepositoryDoc,
 } from "@/lib/db/collections";
 import { buttonClasses } from "@/lib/ui";
+import { disconnectRepository } from "./actions";
 
 const PAGE_SIZE = 10;
 
@@ -87,6 +88,31 @@ function ErrorState() {
         </a>
       </div>
     </div>
+  );
+}
+
+function RepoRow({ repo }: { repo: RepositoryDoc }) {
+  return (
+    <li className="group flex items-center justify-between gap-4 px-4 py-3">
+      <span
+        title={repo.fullName}
+        className="min-w-0 truncate text-sm font-medium text-foreground"
+      >
+        {repo.fullName}
+      </span>
+
+      <div className="flex shrink-0 items-center gap-4">
+        <span className="text-xs text-muted">No reviews yet</span>
+        <form action={disconnectRepository.bind(null, repo.githubRepoId)}>
+          <button
+            type="submit"
+            className="rounded-md text-xs text-muted opacity-0 transition-opacity hover:text-red-600 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent group-hover:opacity-100 dark:hover:text-red-400"
+          >
+            Disconnect
+          </button>
+        </form>
+      </div>
+    </li>
   );
 }
 
@@ -182,18 +208,7 @@ export default async function DashboardPage(
 
       <ul className="mt-6 divide-y divide-border rounded-lg border border-border">
         {repos.map((repo) => (
-          <li
-            key={repo.githubRepoId}
-            className="flex items-center justify-between gap-4 px-4 py-3"
-          >
-            <span
-              title={repo.fullName}
-              className="min-w-0 truncate text-sm font-medium text-foreground"
-            >
-              {repo.fullName}
-            </span>
-            <span className="shrink-0 text-xs text-muted">No reviews yet</span>
-          </li>
+          <RepoRow key={repo.githubRepoId} repo={repo} />
         ))}
       </ul>
 
