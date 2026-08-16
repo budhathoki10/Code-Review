@@ -1,0 +1,6 @@
+{
+  "watch": [".env", ".env.local"],
+  "ext": "*",
+  "exec": "node scripts/kill-port.js 3000 && next dev",
+  "delay": 500
+}
