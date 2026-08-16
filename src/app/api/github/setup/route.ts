@@ -62,6 +62,7 @@ export async function GET(request: NextRequest) {
           {
             $set: {
               installationId: String(installationDoc._id),
+              githubInstallationId,
               fullName: repo.fullName,
             },
           },

@@ -12,6 +12,7 @@ export interface InstallationDoc {
 export interface RepositoryDoc {
   _id?: string;
   installationId: string;
+  githubInstallationId: number;
   githubRepoId: number;
   fullName: string;
   config?: {
@@ -45,6 +46,7 @@ export interface ReviewDoc {
   pullRequestId: string;
   headSha: string;
   status: "pending" | "completed" | "failed";
+  verdict?: "approve" | "request_changes" | "comment";
   summary?: string;
   score?: number;
   findings: FindingDoc[];
@@ -78,15 +80,18 @@ let indexesEnsured: Promise<void> | undefined;
 export function ensureIndexes(): Promise<void> {
   if (!indexesEnsured) {
     indexesEnsured = (async () => {
-      const [installationsCol, repositoriesCol, reviewsCol] = await Promise.all([
-        installations(),
-        repositories(),
-        reviews(),
-      ]);
+      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol] =
+        await Promise.all([
+          installations(),
+          repositories(),
+          pullRequests(),
+          reviews(),
+        ]);
 
       await Promise.all([
         installationsCol.createIndex({ githubInstallationId: 1 }, { unique: true }),
         repositoriesCol.createIndex({ githubRepoId: 1 }, { unique: true }),
+        pullRequestsCol.createIndex({ githubPrId: 1 }, { unique: true }),
         reviewsCol.createIndex({ pullRequestId: 1, headSha: 1 }, { unique: true }),
       ]);
     })();

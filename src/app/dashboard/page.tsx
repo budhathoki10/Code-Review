@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { auth } from "@/auth";
 import { getGithubAccountId } from "@/lib/github/account";
 import {
@@ -94,15 +95,21 @@ function ErrorState() {
 function RepoRow({ repo }: { repo: RepositoryDoc }) {
   return (
     <li className="group flex items-center justify-between gap-4 px-4 py-3">
-      <span
+      <Link
+        href={`/dashboard/repos/${repo._id}`}
         title={repo.fullName}
-        className="min-w-0 truncate text-sm font-medium text-foreground"
+        className="min-w-0 truncate text-sm font-medium text-foreground hover:underline"
       >
         {repo.fullName}
-      </span>
+      </Link>
 
       <div className="flex shrink-0 items-center gap-4">
-        <span className="text-xs text-muted">No reviews yet</span>
+        <Link
+          href={`/dashboard/repos/${repo._id}`}
+          className="text-xs text-muted hover:text-foreground hover:underline"
+        >
+          View reviews
+        </Link>
         <form action={disconnectRepository.bind(null, repo.githubRepoId)}>
           <button
             type="submit"
