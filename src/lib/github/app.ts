@@ -48,3 +48,8 @@ export async function getInstallationRepositories(
     fullName: repo.full_name,
   }));
 }
+
+/** An Octokit instance authenticated as a specific installation (server-to-server, not a user token). */
+export function getInstallationOctokit(installationId: number) {
+  return getApp().getInstallationOctokit(installationId);
+}
