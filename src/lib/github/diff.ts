@@ -4,9 +4,15 @@ import { getInstallationOctokit } from "@/lib/github/app";
 export const MAX_DIFF_FILES = 40;
 export const MAX_DIFF_CHARS = 100_000;
 
+export interface PullRequestFile {
+  filename: string;
+  patch?: string;
+}
+
 export interface PullRequestDiff {
   fileCount: number;
   diffText: string;
+  files: PullRequestFile[];
 }
 
 /**
@@ -34,5 +40,9 @@ export async function getPullRequestDiff(
     .map((file) => `--- a/${file.filename}\n+++ b/${file.filename}\n${file.patch}`)
     .join("\n\n");
 
-  return { fileCount: files.length, diffText };
+  return {
+    fileCount: files.length,
+    diffText,
+    files: files.map((file) => ({ filename: file.filename, patch: file.patch })),
+  };
 }

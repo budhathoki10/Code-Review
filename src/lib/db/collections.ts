@@ -51,6 +51,9 @@ export interface ReviewDoc {
   score?: number;
   findings: FindingDoc[];
   createdAt: Date;
+  /** Set only once the Phase 3 summary comment successfully posts. Its absence on a
+   *  "completed" review means generation succeeded but posting to GitHub hasn't (yet). */
+  githubCommentId?: number;
 }
 
 async function db() {
