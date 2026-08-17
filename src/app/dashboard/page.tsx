@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { AlertTriangle, ChevronLeft, ChevronRight, FolderGit2 } from "lucide-react";
 import { auth } from "@/auth";
 import { getGithubAccountId } from "@/lib/github/account";
 import {
@@ -7,7 +8,9 @@ import {
   type RepositoryDoc,
 } from "@/lib/db/collections";
 import { buttonClasses } from "@/lib/ui";
-import { disconnectRepository } from "./actions";
+import { GitHubMark } from "@/components/github-mark";
+import { StatePanel } from "@/components/state-panel";
+import { DisconnectRepoButton } from "./disconnect-repo-button";
 
 const PAGE_SIZE = 10;
 
@@ -45,79 +48,71 @@ async function loadConnectedRepos(
 
 function EmptyState({ installUrl }: { installUrl?: string }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center text-center">
-      <div className="w-full max-w-sm">
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">
-          No repositories connected
-        </h2>
-        <p className="mt-2 text-sm leading-relaxed text-muted">
-          Install the GitHub App on a repository to start getting automated
-          PR reviews.
-        </p>
-
-        {installUrl ? (
-          <a href={installUrl} className={`mt-6 ${buttonClasses("primary")}`}>
+    <StatePanel
+      icon={<FolderGit2 className="h-5 w-5" aria-hidden="true" />}
+      title="No repositories connected"
+      description="Install the GitHub App on a repository to start getting automated PR reviews."
+      action={
+        installUrl ? (
+          <a href={installUrl} className={buttonClasses("primary")}>
+            <GitHubMark className="h-4 w-4" />
             Connect GitHub
           </a>
         ) : (
-          <p className="mt-6 text-sm text-muted">
+          <p className="text-sm text-muted">
             GitHub App isn&apos;t configured yet — set{" "}
-            <code className="rounded bg-card px-1 py-0.5 text-xs">
+            <code className="rounded border border-border bg-card px-1 py-0.5 text-xs">
               GITHUB_APP_SLUG
             </code>{" "}
             to enable the connect flow.
           </p>
-        )}
-      </div>
-    </div>
+        )
+      }
+    />
   );
 }
 
 function ErrorState() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center text-center">
-      <div className="w-full max-w-sm">
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">
-          Couldn&apos;t load your repositories
-        </h2>
-        <p className="mt-2 text-sm leading-relaxed text-muted">
+    <StatePanel
+      icon={<AlertTriangle className="h-5 w-5 text-danger" aria-hidden="true" />}
+      title="Couldn't load your repositories"
+      description={
+        <>
           The database didn&apos;t respond. This is usually a configuration
-          issue with <code className="rounded bg-card px-1 py-0.5 text-xs">MONGODB_URI</code>.
-        </p>
-        <a href="/dashboard" className={`mt-6 ${buttonClasses("secondary")}`}>
+          issue with{" "}
+          <code className="rounded border border-border bg-card px-1 py-0.5 text-xs">
+            MONGODB_URI
+          </code>
+          .
+        </>
+      }
+      action={
+        <a href="/dashboard" className={buttonClasses("secondary")}>
           Retry
         </a>
-      </div>
-    </div>
+      }
+    />
   );
 }
 
 function RepoRow({ repo }: { repo: RepositoryDoc }) {
   return (
-    <li className="group flex items-center justify-between gap-4 px-4 py-3">
+    <li className="group relative flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-surface-hover">
       <Link
         href={`/dashboard/repos/${repo._id}`}
+        className="absolute inset-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+        aria-label={`View reviews for ${repo.fullName}`}
+      />
+      <span
         title={repo.fullName}
-        className="min-w-0 truncate text-sm font-medium text-foreground hover:underline"
+        className="min-w-0 flex-1 truncate text-sm font-medium text-foreground"
       >
         {repo.fullName}
-      </Link>
-
-      <div className="flex shrink-0 items-center gap-4">
-        <Link
-          href={`/dashboard/repos/${repo._id}`}
-          className="text-xs text-muted hover:text-foreground hover:underline"
-        >
-          View reviews
-        </Link>
-        <form action={disconnectRepository.bind(null, repo.githubRepoId)}>
-          <button
-            type="submit"
-            className="rounded-md text-xs text-muted opacity-0 transition-opacity hover:text-red-600 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent group-hover:opacity-100 dark:hover:text-red-400"
-          >
-            Disconnect
-          </button>
-        </form>
+      </span>
+      <div className="relative z-10 flex shrink-0 items-center gap-1">
+        <DisconnectRepoButton githubRepoId={repo.githubRepoId} repoName={repo.fullName} />
+        <ChevronRight className="h-4 w-4 text-subtle" aria-hidden="true" />
       </div>
     </li>
   );
@@ -139,6 +134,7 @@ function Pagination({
     >
       {page > 1 ? (
         <a href={`/dashboard?page=${page - 1}`} className={buttonClasses("secondary")}>
+          <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           Previous
         </a>
       ) : (
@@ -146,6 +142,7 @@ function Pagination({
           aria-disabled="true"
           className={`${buttonClasses("secondary")} pointer-events-none opacity-50`}
         >
+          <ChevronLeft className="h-4 w-4" aria-hidden="true" />
           Previous
         </span>
       )}
@@ -157,6 +154,7 @@ function Pagination({
       {page < totalPages ? (
         <a href={`/dashboard?page=${page + 1}`} className={buttonClasses("secondary")}>
           Next
+          <ChevronRight className="h-4 w-4" aria-hidden="true" />
         </a>
       ) : (
         <span
@@ -164,6 +162,7 @@ function Pagination({
           className={`${buttonClasses("secondary")} pointer-events-none opacity-50`}
         >
           Next
+          <ChevronRight className="h-4 w-4" aria-hidden="true" />
         </span>
       )}
     </nav>
@@ -204,7 +203,8 @@ export default async function DashboardPage(
     <div className="mx-auto w-full max-w-3xl">
       <div className="flex items-center justify-between gap-4">
         <h2 className="text-lg font-semibold tracking-tight text-foreground">
-          Connected repositories
+          Connected repositories{" "}
+          <span className="font-normal tabular-nums text-subtle">· {total}</span>
         </h2>
         {installUrl && (
           <a href={installUrl} className={buttonClasses("secondary")}>

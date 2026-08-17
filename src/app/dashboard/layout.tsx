@@ -1,7 +1,9 @@
 import Image from "next/image";
+import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth, signOut } from "@/auth";
-import { buttonClasses } from "@/lib/ui";
+import { BrandMark } from "@/components/brand-mark";
+import { SubmitButton } from "@/components/submit-button";
 
 export default async function DashboardLayout({
   children,
@@ -15,10 +17,13 @@ export default async function DashboardLayout({
 
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center justify-between border-b border-border px-6 py-4">
-        <span className="text-sm font-semibold tracking-tight text-foreground">
-          AI Code Review
-        </span>
+      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background px-6 py-4 sm:px-10">
+        <Link href="/dashboard" className="flex items-center gap-2">
+          <BrandMark className="h-6 w-6" />
+          <span className="text-sm font-semibold tracking-tight text-foreground">
+            AI Code Review
+          </span>
+        </Link>
 
         <div className="flex items-center gap-3">
           {session.user.image && (
@@ -39,14 +44,14 @@ export default async function DashboardLayout({
               await signOut({ redirectTo: "/" });
             }}
           >
-            <button type="submit" className={buttonClasses("secondary")}>
+            <SubmitButton variant="secondary" pendingLabel="Signing out…">
               Sign out
-            </button>
+            </SubmitButton>
           </form>
         </div>
       </header>
 
-      <main className="flex flex-1 flex-col px-6 py-10">{children}</main>
+      <main className="flex flex-1 flex-col px-6 py-10 sm:px-10">{children}</main>
     </div>
   );
 }

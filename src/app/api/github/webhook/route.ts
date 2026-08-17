@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
-import { getPullRequestDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS } from "@/lib/github/diff";
-import { generateReview } from "@/lib/ai/review";
-import { formatSummaryComment, postSummaryComment } from "@/lib/github/comment";
-import { computeCommentableLines, mapFindingsToInlineComments } from "@/lib/github/diff-lines";
-import { postInlineReview } from "@/lib/github/inline-comments";
+import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
 
 function ok() {
@@ -81,14 +77,16 @@ export async function POST(request: NextRequest) {
   }
 
   const reviewsCol = await reviews();
+  let reviewId: string;
   try {
-    await reviewsCol.insertOne({
+    const insertResult = await reviewsCol.insertOne({
       pullRequestId: String(pullRequestDoc._id),
       headSha,
       status: "pending",
       findings: [],
       createdAt: new Date(),
     });
+    reviewId = String(insertResult.insertedId);
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       // Same PR + head SHA already has a review (in progress or done) —
@@ -98,103 +96,34 @@ export async function POST(request: NextRequest) {
     }
     throw error;
   }
-  console.log(`[webhook] delivery=${deliveryId} review row created, fetching diff...`);
+  console.log(`[webhook] delivery=${deliveryId} review row created, enqueuing job...`);
 
-  // Everything from here on is best-effort: whatever goes wrong (diff fetch,
-  // Claude call, schema validation), the review must end up "failed" with a
-  // reason rather than stuck at "pending" forever or crashing the delivery.
+  // The AI/GitHub work (fetch diff → AI → post comment → inline comments)
+  // runs in the BullMQ worker, not here — this handler only needs to get a
+  // job on the queue and respond, regardless of how long the review takes.
   try {
-    const diff = await getPullRequestDiff(
-      repositoryDoc.githubInstallationId,
-      payload.repository.owner.login,
-      payload.repository.name,
-      payload.number,
-    );
-    console.log(`[webhook] delivery=${deliveryId} diff fetched — ${diff.fileCount} files, ${diff.diffText.length} chars`);
-
-    if (diff.fileCount > MAX_DIFF_FILES || diff.diffText.length > MAX_DIFF_CHARS) {
-      console.log(`[webhook] delivery=${deliveryId} FAILED — diff too large, skipping AI call`);
-      await reviewsCol.updateOne(
-        { pullRequestId: String(pullRequestDoc._id), headSha },
-        {
-          $set: {
-            status: "failed",
-            summary: "PR too large to review automatically.",
-          },
-        },
-      );
-      return ok();
-    }
-
-    console.log(`[webhook] delivery=${deliveryId} calling the model...`);
-    const result = await generateReview(diff.diffText);
-    console.log(
-      `[webhook] delivery=${deliveryId} COMPLETED — ${result.findings.length} finding(s)`,
-    );
-    await reviewsCol.updateOne(
-      { pullRequestId: String(pullRequestDoc._id), headSha },
-      {
-        $set: {
-          status: "completed",
-          verdict: result.verdict,
-          summary: result.summary,
-          findings: result.findings,
-        },
-      },
-    );
-
-    // Posting to GitHub is intentionally a separate try/catch: the review
-    // already generated successfully and is valid in our own dashboard
-    // regardless of whether publishing it back to GitHub also succeeds.
-    try {
-      const owner = payload.repository.owner.login;
-      const repo = payload.repository.name;
-
-      const commentBody = formatSummaryComment({ summary: result.summary, findings: result.findings });
-      const commentId = await postSummaryComment(
-        repositoryDoc.githubInstallationId,
-        owner,
-        repo,
-        payload.number,
-        commentBody,
-      );
-      console.log(`[webhook] delivery=${deliveryId} posted summary comment id=${commentId}`);
-      await reviewsCol.updateOne(
-        { pullRequestId: String(pullRequestDoc._id), headSha },
-        { $set: { githubCommentId: commentId } },
-      );
-
-      const commentableLines = computeCommentableLines(diff.files);
-      const { mappable, unmappable } = mapFindingsToInlineComments(result.findings, commentableLines);
-      console.log(
-        `[webhook] delivery=${deliveryId} inline mapping — ${mappable.length} mappable, ${unmappable.length} unmappable`,
-      );
-
-      if (mappable.length > 0) {
-        await postInlineReview(
-          repositoryDoc.githubInstallationId,
-          owner,
-          repo,
-          payload.number,
-          headSha,
-          mappable,
-        );
-        console.log(`[webhook] delivery=${deliveryId} posted inline review with ${mappable.length} comment(s)`);
-      }
-    } catch (postError) {
-      console.log(`[webhook] delivery=${deliveryId} posting to GitHub FAILED —`, postError);
-    }
+    await enqueueReviewJob({
+      reviewId,
+      pullRequestId: String(pullRequestDoc._id),
+      headSha,
+      githubInstallationId: repositoryDoc.githubInstallationId,
+      owner: payload.repository.owner.login,
+      repo: payload.repository.name,
+      prNumber: payload.number,
+    });
+    console.log(`[webhook] delivery=${deliveryId} job enqueued`);
   } catch (error) {
-    console.log(`[webhook] delivery=${deliveryId} FAILED —`, error);
+    console.log(`[webhook] delivery=${deliveryId} FAILED to enqueue —`, error);
     await reviewsCol.updateOne(
       { pullRequestId: String(pullRequestDoc._id), headSha },
       {
         $set: {
           status: "failed",
-          summary: `Review generation failed: ${error instanceof Error ? error.message : "unknown error"}`,
+          summary: `Failed to enqueue review job: ${error instanceof Error ? error.message : "unknown error"}`,
         },
       },
     );
+    return NextResponse.json({ error: "failed to enqueue review job" }, { status: 500 });
   }
 
   return ok();
