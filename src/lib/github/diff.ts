@@ -7,6 +7,7 @@ export const MAX_DIFF_CHARS = 100_000;
 export interface PullRequestFile {
   filename: string;
   patch?: string;
+  status: string;
 }
 
 export interface PullRequestDiff {
@@ -43,6 +44,6 @@ export async function getPullRequestDiff(
   return {
     fileCount: files.length,
     diffText,
-    files: files.map((file) => ({ filename: file.filename, patch: file.patch })),
+    files: files.map((file) => ({ filename: file.filename, patch: file.patch, status: file.status })),
   };
 }

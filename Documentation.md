@@ -163,6 +163,7 @@ A single **GitHub App** (not an OAuth App) handles both login and repository acc
 **Minimum required permissions:**
 - Repository → Contents: Read-only
 - Repository → Pull requests: Read & write
+- Repository → Checks: Read & write *(Phase 6 — gates PR merges on review severity; existing installations must re-approve permissions after this is added)*
 - Repository → Metadata: Read-only
 
 **Subscribed webhook event:** `pull_request`
