@@ -24,6 +24,18 @@ export function iconButtonClasses() {
 
 export type Tone = "neutral" | "success" | "warning" | "danger" | "info";
 
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
+
+export const SEVERITY_TONE: Record<Severity, Tone> = {
+  critical: "danger",
+  high: "danger",
+  medium: "warning",
+  low: "neutral",
+  info: "neutral",
+};
+
+export const SEVERITY_ORDER: Severity[] = ["critical", "high", "medium", "low", "info"];
+
 const TONE_TEXT: Record<Tone, string> = {
   neutral: "text-muted",
   success: "text-success",
@@ -48,4 +60,9 @@ export function toneTextClasses(tone: Tone) {
 /** A small solid dot in the same tone, meant to sit inline before a label. */
 export function toneDotClasses(tone: Tone) {
   return `h-1.5 w-1.5 shrink-0 rounded-full ${TONE_DOT[tone]}`;
+}
+
+/** Just the background color for a tone, unsized — segments of a bar, swatches, etc. */
+export function toneBgClasses(tone: Tone) {
+  return TONE_DOT[tone];
 }

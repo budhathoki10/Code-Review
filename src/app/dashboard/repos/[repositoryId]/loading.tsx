@@ -1,6 +1,6 @@
 export default function RepositoryReviewsLoading() {
   return (
-    <div className="mx-auto w-full max-w-3xl" role="status" aria-live="polite">
+    <div className="mx-auto w-full max-w-5xl" role="status" aria-live="polite">
       <span className="sr-only">Loading reviews…</span>
       <div className="animate-pulse">
         <div className="h-4 w-24 rounded bg-border" />

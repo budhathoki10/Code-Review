@@ -9,7 +9,15 @@ import {
 } from "@/lib/db/collections";
 import { loadRepoStats, loadUserOverviewStats, type RepoStats, type UserOverviewStats } from "@/lib/db/repo-stats";
 import { formatRelativeTime } from "@/lib/format";
-import { buttonClasses, toneDotClasses, toneTextClasses, type Tone } from "@/lib/ui";
+import {
+  buttonClasses,
+  toneBgClasses,
+  toneDotClasses,
+  toneTextClasses,
+  SEVERITY_ORDER,
+  SEVERITY_TONE,
+  type Tone,
+} from "@/lib/ui";
 import { GitHubMark } from "@/components/github-mark";
 import { StatePanel } from "@/components/state-panel";
 import { DisconnectRepoButton } from "./disconnect-repo-button";
@@ -177,9 +185,32 @@ function HealthChip({ stats }: { stats?: RepoStats }) {
   );
 }
 
-function RepoRow({ repo, stats }: { repo: RepositoryDoc; stats?: RepoStats }) {
-  const criticalHigh = (stats?.severityCounts.critical ?? 0) + (stats?.severityCounts.high ?? 0);
+/** Proportional severity breakdown as thin segments — a glance at a repo's posture, not another number to read. */
+function SeverityBar({ counts }: { counts: RepoStats["severityCounts"] }) {
+  const total = SEVERITY_ORDER.reduce((sum, severity) => sum + (counts[severity] ?? 0), 0);
+  if (total === 0) return null;
 
+  return (
+    <div
+      className="hidden h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-border sm:flex"
+      title={SEVERITY_ORDER.filter((s) => counts[s]).map((s) => `${counts[s]} ${s}`).join(" · ")}
+    >
+      {SEVERITY_ORDER.map((severity) => {
+        const count = counts[severity] ?? 0;
+        if (count === 0) return null;
+        return (
+          <span
+            key={severity}
+            style={{ width: `${(count / total) * 100}%` }}
+            className={`h-full ${toneBgClasses(SEVERITY_TONE[severity])}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function RepoRow({ repo, stats }: { repo: RepositoryDoc; stats?: RepoStats }) {
   return (
     <li className="group relative flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-surface-hover">
       <Link
@@ -203,15 +234,7 @@ function RepoRow({ repo, stats }: { repo: RepositoryDoc; stats?: RepoStats }) {
         </p>
       </div>
       <div className="relative z-10 flex shrink-0 items-center gap-3">
-        {criticalHigh > 0 && (
-          <span
-            className={`hidden items-center gap-1 text-xs font-medium sm:inline-flex ${toneTextClasses("danger")}`}
-            title={`${criticalHigh} critical/high finding${criticalHigh === 1 ? "" : "s"}`}
-          >
-            <span className={toneDotClasses("danger")} />
-            {criticalHigh}
-          </span>
-        )}
+        {stats && <SeverityBar counts={stats.severityCounts} />}
         <span className="hidden sm:inline-flex">
           <HealthChip stats={stats} />
         </span>
@@ -316,7 +339,7 @@ export default async function DashboardPage(
   const repoStats = await loadRepoStats(repos.map((repo) => String(repo._id)));
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
+    <div className="mx-auto w-full max-w-5xl">
       {overview && (
         <div className="grid grid-cols-3 gap-3">
           <StatTile label="Repositories" value={overview.totalRepos} />

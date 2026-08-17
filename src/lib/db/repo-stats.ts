@@ -81,6 +81,46 @@ export async function loadRepoStats(repositoryIds: string[]): Promise<Map<string
   return stats;
 }
 
+export interface RepoSummary {
+  id: string;
+  fullName: string;
+  health: "critical" | "attention" | "clean" | "unreviewed";
+}
+
+function healthFor(stats: RepoStats | undefined): RepoSummary["health"] {
+  if (!stats || stats.totalReviews === 0) return "unreviewed";
+  if ((stats.severityCounts.critical ?? 0) + (stats.severityCounts.high ?? 0) > 0) return "critical";
+  if (stats.latestVerdict === "request_changes") return "attention";
+  return "clean";
+}
+
+/** Full (unpaginated) repo list for the dashboard sidebar's repo switcher — deliberately lightweight, no findings payload. */
+export async function loadRepoSummaries(userId: string): Promise<RepoSummary[]> {
+  const githubUserId = await getGithubAccountId(userId);
+  if (!githubUserId) return [];
+
+  const installationsCol = await installations();
+  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  if (userInstallations.length === 0) return [];
+
+  const repositoriesCol = await repositories();
+  const repos = await repositoriesCol
+    .find(
+      { installationId: { $in: userInstallations.map((i) => String(i._id)) } },
+      { projection: { _id: 1, fullName: 1 } },
+    )
+    .sort({ fullName: 1 })
+    .toArray();
+
+  const stats = await loadRepoStats(repos.map((repo) => String(repo._id)));
+
+  return repos.map((repo) => ({
+    id: String(repo._id),
+    fullName: repo.fullName,
+    health: healthFor(stats.get(String(repo._id))),
+  }));
+}
+
 export interface UserOverviewStats {
   totalRepos: number;
   reviewsLast7Days: number;
