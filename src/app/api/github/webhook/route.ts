@@ -3,6 +3,9 @@ import type { PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { getPullRequestDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS } from "@/lib/github/diff";
 import { generateReview } from "@/lib/ai/review";
+import { formatSummaryComment, postSummaryComment } from "@/lib/github/comment";
+import { computeCommentableLines, mapFindingsToInlineComments } from "@/lib/github/diff-lines";
+import { postInlineReview } from "@/lib/github/inline-comments";
 import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
 
 function ok() {
@@ -139,6 +142,48 @@ export async function POST(request: NextRequest) {
         },
       },
     );
+
+    // Posting to GitHub is intentionally a separate try/catch: the review
+    // already generated successfully and is valid in our own dashboard
+    // regardless of whether publishing it back to GitHub also succeeds.
+    try {
+      const owner = payload.repository.owner.login;
+      const repo = payload.repository.name;
+
+      const commentBody = formatSummaryComment({ summary: result.summary, findings: result.findings });
+      const commentId = await postSummaryComment(
+        repositoryDoc.githubInstallationId,
+        owner,
+        repo,
+        payload.number,
+        commentBody,
+      );
+      console.log(`[webhook] delivery=${deliveryId} posted summary comment id=${commentId}`);
+      await reviewsCol.updateOne(
+        { pullRequestId: String(pullRequestDoc._id), headSha },
+        { $set: { githubCommentId: commentId } },
+      );
+
+      const commentableLines = computeCommentableLines(diff.files);
+      const { mappable, unmappable } = mapFindingsToInlineComments(result.findings, commentableLines);
+      console.log(
+        `[webhook] delivery=${deliveryId} inline mapping — ${mappable.length} mappable, ${unmappable.length} unmappable`,
+      );
+
+      if (mappable.length > 0) {
+        await postInlineReview(
+          repositoryDoc.githubInstallationId,
+          owner,
+          repo,
+          payload.number,
+          headSha,
+          mappable,
+        );
+        console.log(`[webhook] delivery=${deliveryId} posted inline review with ${mappable.length} comment(s)`);
+      }
+    } catch (postError) {
+      console.log(`[webhook] delivery=${deliveryId} posting to GitHub FAILED —`, postError);
+    }
   } catch (error) {
     console.log(`[webhook] delivery=${deliveryId} FAILED —`, error);
     await reviewsCol.updateOne(
