@@ -16,7 +16,8 @@ export interface RepositoryDoc {
   githubRepoId: number;
   fullName: string;
   config?: {
-    severityThreshold?: string;
+    /** Minimum severity that gets posted to GitHub and can fail the check run. Unset = post everything. */
+    severityThreshold?: "info" | "low" | "medium" | "high" | "critical";
     customInstructions?: string[];
   };
 }
@@ -39,6 +40,8 @@ export interface FindingDoc {
   explanation: string;
   suggestion?: string;
   confidence?: string;
+  /** Absent means "ai" — only set for findings produced by the deterministic static-analysis stage. */
+  source?: "ai" | "static-analysis";
 }
 
 export interface ReviewDoc {
@@ -54,6 +57,10 @@ export interface ReviewDoc {
   /** Set only once the Phase 3 summary comment successfully posts. Its absence on a
    *  "completed" review means generation succeeded but posting to GitHub hasn't (yet). */
   githubCommentId?: number;
+  /** Set once a GitHub check run is created, so a retried job PATCHes it instead of creating a duplicate. */
+  checkRunId?: number;
+  /** Populated once retries are exhausted — the durable dead-letter record for a failed review. */
+  error?: { message: string; attempts: number; failedAt: Date };
 }
 
 async function db() {

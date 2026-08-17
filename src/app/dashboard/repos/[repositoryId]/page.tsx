@@ -17,6 +17,7 @@ import { toneDotClasses, toneTextClasses, type Tone } from "@/lib/ui";
 import { StatePanel } from "@/components/state-panel";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
+import { RepoSettingsForm } from "./repo-settings-form";
 
 const SEVERITY_TONE: Record<FindingDoc["severity"], Tone> = {
   critical: "danger",
@@ -126,7 +127,14 @@ function FindingItem({ finding }: { finding: FindingDoc }) {
         </span>
         <span className="text-xs text-subtle">· {finding.category}</span>
       </div>
-      <p className="mt-1.5 text-sm font-medium text-foreground">{finding.title}</p>
+      <p className="mt-1.5 text-sm font-medium text-foreground">
+        {finding.title}
+        {finding.source === "static-analysis" && (
+          <span className="ml-2 rounded border border-border px-1.5 py-0.5 align-middle text-[10px] font-medium tracking-wide text-subtle uppercase">
+            Static analysis
+          </span>
+        )}
+      </p>
       <p className="mt-1 font-mono text-xs text-subtle">
         {finding.file}
         {finding.line ? `:${finding.line}` : ""}
@@ -159,6 +167,15 @@ function ReviewCard({
       {review.summary && (
         <div className="mt-3 border-t border-border pt-3">
           <Markdown content={review.summary} />
+        </div>
+      )}
+
+      {review.status === "failed" && review.error && (
+        <div className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
+          <p className="text-xs font-medium text-danger">
+            Failed after {review.error.attempts} attempt{review.error.attempts === 1 ? "" : "s"}
+          </p>
+          <p className="mt-0.5 font-mono text-xs text-muted">{review.error.message}</p>
         </div>
       )}
 
@@ -199,14 +216,17 @@ export default async function RepositoryReviewsPage({
         Repositories
       </Link>
 
-      <h2 className="mt-3 text-lg font-semibold tracking-tight text-foreground">
-        {repositoryDoc.fullName}
-        {repoReviews.length > 0 && (
-          <span className="ml-1 font-normal tabular-nums text-subtle">
-            · {repoReviews.length} review{repoReviews.length === 1 ? "" : "s"}
-          </span>
-        )}
-      </h2>
+      <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
+        <h2 className="text-lg font-semibold tracking-tight text-foreground">
+          {repositoryDoc.fullName}
+          {repoReviews.length > 0 && (
+            <span className="ml-1 font-normal tabular-nums text-subtle">
+              · {repoReviews.length} review{repoReviews.length === 1 ? "" : "s"}
+            </span>
+          )}
+        </h2>
+        <RepoSettingsForm repositoryId={repositoryId} config={repositoryDoc.config} />
+      </div>
 
       {repoReviews.length === 0 ? (
         <div className="mt-6">

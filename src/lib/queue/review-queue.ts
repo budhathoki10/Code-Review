@@ -11,6 +11,8 @@ export interface ReviewJobData {
   owner: string;
   repo: string;
   prNumber: number;
+  /** The webhook delivery ID that triggered this job — threaded through logs end to end. */
+  requestId: string;
 }
 
 let queue: Queue<ReviewJobData> | undefined;

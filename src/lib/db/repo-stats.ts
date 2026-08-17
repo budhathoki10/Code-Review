@@ -1,0 +1,139 @@
+import {
+  installations,
+  pullRequests,
+  repositories,
+  reviews,
+  type FindingDoc,
+  type ReviewDoc,
+} from "@/lib/db/collections";
+import { getGithubAccountId } from "@/lib/github/account";
+
+export interface RepoStats {
+  lastReviewAt?: Date;
+  totalReviews: number;
+  latestStatus?: ReviewDoc["status"];
+  latestVerdict?: "approve" | "request_changes" | "comment";
+  severityCounts: Partial<Record<FindingDoc["severity"], number>>;
+}
+
+/**
+ * Two bounded queries (not N+1 per repo): pull_requests for the given repos,
+ * then reviews for those PRs, reduced in memory. Cheap at dashboard page
+ * size (PAGE_SIZE repos at a time). Severity counts come from only the
+ * latest review per PR — "current state," not a lifetime total.
+ */
+export async function loadRepoStats(repositoryIds: string[]): Promise<Map<string, RepoStats>> {
+  const stats = new Map<string, RepoStats>();
+  if (repositoryIds.length === 0) return stats;
+
+  const pullRequestsCol = await pullRequests();
+  const prs = await pullRequestsCol
+    .find({ repositoryId: { $in: repositoryIds } }, { projection: { _id: 1, repositoryId: 1 } })
+    .toArray();
+  if (prs.length === 0) return stats;
+
+  const repoIdByPrId = new Map(prs.map((pr) => [String(pr._id), pr.repositoryId]));
+
+  const reviewsCol = await reviews();
+  const allReviews = await reviewsCol
+    .find(
+      { pullRequestId: { $in: [...repoIdByPrId.keys()] } },
+      { projection: { pullRequestId: 1, createdAt: 1, findings: 1, verdict: 1, status: 1 } },
+    )
+    .sort({ createdAt: -1 })
+    .toArray();
+
+  const latestReviewPerPr = new Map<string, (typeof allReviews)[number]>();
+  for (const review of allReviews) {
+    if (!latestReviewPerPr.has(review.pullRequestId)) {
+      latestReviewPerPr.set(review.pullRequestId, review);
+    }
+  }
+
+  for (const review of allReviews) {
+    const repositoryId = repoIdByPrId.get(review.pullRequestId);
+    if (!repositoryId) continue;
+
+    const entry = stats.get(repositoryId) ?? { totalReviews: 0, severityCounts: {} };
+    entry.totalReviews += 1;
+    if (!entry.lastReviewAt || review.createdAt > entry.lastReviewAt) {
+      entry.lastReviewAt = review.createdAt;
+    }
+    stats.set(repositoryId, entry);
+  }
+
+  for (const [pullRequestId, review] of latestReviewPerPr) {
+    const repositoryId = repoIdByPrId.get(pullRequestId);
+    if (!repositoryId) continue;
+
+    const entry = stats.get(repositoryId);
+    if (!entry) continue;
+
+    entry.latestStatus = review.status;
+    if (review.status === "completed" && review.verdict) {
+      entry.latestVerdict = review.verdict;
+    }
+    for (const finding of review.findings) {
+      entry.severityCounts[finding.severity] = (entry.severityCounts[finding.severity] ?? 0) + 1;
+    }
+  }
+
+  return stats;
+}
+
+export interface UserOverviewStats {
+  totalRepos: number;
+  reviewsLast7Days: number;
+  needsAttention: number;
+}
+
+/** Powers the small stat-tile row above the repo list. */
+export async function loadUserOverviewStats(userId: string): Promise<UserOverviewStats> {
+  const empty: UserOverviewStats = { totalRepos: 0, reviewsLast7Days: 0, needsAttention: 0 };
+
+  const githubUserId = await getGithubAccountId(userId);
+  if (!githubUserId) return empty;
+
+  const installationsCol = await installations();
+  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  if (userInstallations.length === 0) return empty;
+
+  const installationIds = userInstallations.map((i) => String(i._id));
+  const repositoriesCol = await repositories();
+  const repoIds = (
+    await repositoriesCol
+      .find({ installationId: { $in: installationIds } }, { projection: { _id: 1 } })
+      .toArray()
+  ).map((r) => String(r._id));
+
+  if (repoIds.length === 0) return { ...empty, totalRepos: 0 };
+
+  const stats = await loadRepoStats(repoIds);
+
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  let reviewsLast7Days = 0;
+  let needsAttention = 0;
+
+  const pullRequestsCol = await pullRequests();
+  const prs = await pullRequestsCol
+    .find({ repositoryId: { $in: repoIds } }, { projection: { _id: 1 } })
+    .toArray();
+  const prIds = prs.map((pr) => String(pr._id));
+
+  if (prIds.length > 0) {
+    const reviewsCol = await reviews();
+    reviewsLast7Days = await reviewsCol.countDocuments({
+      pullRequestId: { $in: prIds },
+      createdAt: { $gte: sevenDaysAgo },
+    });
+  }
+
+  for (const repoStats of stats.values()) {
+    const hasCriticalOrHigh = (repoStats.severityCounts.critical ?? 0) + (repoStats.severityCounts.high ?? 0) > 0;
+    if (repoStats.latestVerdict === "request_changes" || hasCriticalOrHigh) {
+      needsAttention += 1;
+    }
+  }
+
+  return { totalRepos: repoIds.length, reviewsLast7Days, needsAttention };
+}

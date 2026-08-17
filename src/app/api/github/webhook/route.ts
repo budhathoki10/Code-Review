@@ -3,6 +3,12 @@ import type { PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
+import { getRedisConnection } from "@/lib/queue/connection";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { logger } from "@/lib/logger";
+
+const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 20);
+const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_SECONDS ?? 60);
 
 function ok() {
   return NextResponse.json({ ok: true }, { status: 200 });
@@ -11,34 +17,50 @@ function ok() {
 export async function POST(request: NextRequest) {
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
   const eventType = request.headers.get("x-github-event") ?? "unknown";
-  console.log(`[webhook] received delivery=${deliveryId} event=${eventType}`);
+  const log = logger.child({ requestId: deliveryId });
+  log.info({ eventType }, "webhook received");
 
   const rawBody = await request.text();
 
   if (!verifyWebhookSignature(rawBody, request.headers.get("x-hub-signature-256"))) {
-    console.log(`[webhook] delivery=${deliveryId} REJECTED — invalid signature`);
+    log.warn("webhook rejected — invalid signature");
     return NextResponse.json({ error: "invalid signature" }, { status: 401 });
   }
-  console.log(`[webhook] delivery=${deliveryId} signature OK`);
+  log.info("webhook signature OK");
 
   // Every GitHub webhook payload carries a `repository` object regardless of
   // event type, so parse once up front and log which repo it's for before
   // filtering by event type.
-  const rawPayload = JSON.parse(rawBody) as { repository?: { full_name?: string } };
-  console.log(`[webhook] delivery=${deliveryId} repo=${rawPayload.repository?.full_name ?? "unknown"}`);
-// filtering by event type before parsing the payload as a PullRequestEvent, since other event types may not have the same structure and could cause runtime errors if we try to access properties that don't exist.
+  const rawPayload = JSON.parse(rawBody) as { repository?: { id?: number; full_name?: string } };
+  log.info({ repo: rawPayload.repository?.full_name ?? "unknown" }, "webhook payload parsed");
+
+  if (rawPayload.repository?.id !== undefined) {
+    const rateLimitKey = `ratelimit:webhook:${rawPayload.repository.id}`;
+    const withinLimit = await checkRateLimit(
+      getRedisConnection(),
+      rateLimitKey,
+      WEBHOOK_RATE_LIMIT_MAX,
+      WEBHOOK_RATE_LIMIT_WINDOW_SECONDS,
+    );
+    if (!withinLimit) {
+      log.warn({ repo: rawPayload.repository.full_name }, "webhook rate limit exceeded");
+      return NextResponse.json(
+        { error: "rate limit exceeded" },
+        { status: 429, headers: { "Retry-After": String(WEBHOOK_RATE_LIMIT_WINDOW_SECONDS) } },
+      );
+    }
+  }
+
   if (eventType !== "pull_request") {
-    console.log(`[webhook] delivery=${deliveryId} ignoring — not a pull_request event (got "${eventType}")`);
+    log.info({ eventType }, "webhook ignored — not a pull_request event");
     return ok();
   }
 
   const payload = rawPayload as unknown as PullRequestEvent;
-  console.log(
-    `[webhook] delivery=${deliveryId} pull_request action=${payload.action} #${payload.number}`,
-  );
+  log.info({ action: payload.action, prNumber: payload.number }, "pull_request event");
 
   if (payload.action !== "opened" && payload.action !== "synchronize") {
-    console.log(`[webhook] delivery=${deliveryId} ignoring — action "${payload.action}" not tracked`);
+    log.info({ action: payload.action }, "webhook ignored — action not tracked");
     return ok();
   }
 
@@ -51,9 +73,7 @@ export async function POST(request: NextRequest) {
   if (!repositoryDoc?._id) {
     // App installed, but this repo isn't one we're tracking — shouldn't
     // normally happen, but don't fail the delivery over it.
-    console.log(
-      `[webhook] delivery=${deliveryId} ignoring — repo ${payload.repository.full_name} isn't tracked`,
-    );
+    log.info({ repo: payload.repository.full_name }, "webhook ignored — repo isn't tracked");
     return ok();
   }
 
@@ -91,12 +111,12 @@ export async function POST(request: NextRequest) {
     if (isDuplicateKeyError(error)) {
       // Same PR + head SHA already has a review (in progress or done) —
       // this is a duplicate webhook delivery. Nothing to do.
-      console.log(`[webhook] delivery=${deliveryId} ignoring — duplicate delivery for this head SHA`);
+      log.info("webhook ignored — duplicate delivery for this head SHA");
       return ok();
     }
     throw error;
   }
-  console.log(`[webhook] delivery=${deliveryId} review row created, enqueuing job...`);
+  log.info({ reviewId }, "review row created, enqueuing job");
 
   // The AI/GitHub work (fetch diff → AI → post comment → inline comments)
   // runs in the BullMQ worker, not here — this handler only needs to get a
@@ -110,10 +130,11 @@ export async function POST(request: NextRequest) {
       owner: payload.repository.owner.login,
       repo: payload.repository.name,
       prNumber: payload.number,
+      requestId: deliveryId,
     });
-    console.log(`[webhook] delivery=${deliveryId} job enqueued`);
+    log.info({ reviewId }, "job enqueued");
   } catch (error) {
-    console.log(`[webhook] delivery=${deliveryId} FAILED to enqueue —`, error);
+    log.error({ reviewId, err: error }, "failed to enqueue review job");
     await reviewsCol.updateOne(
       { pullRequestId: String(pullRequestDoc._id), headSha },
       {
