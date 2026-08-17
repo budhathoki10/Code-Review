@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ObjectId } from "mongodb";
+import { ArrowLeft, GitPullRequest } from "lucide-react";
 import { auth } from "@/auth";
 import { getGithubAccountId } from "@/lib/github/account";
 import {
@@ -11,13 +13,41 @@ import {
   type PullRequestDoc,
   type ReviewDoc,
 } from "@/lib/db/collections";
+import { toneDotClasses, toneTextClasses, type Tone } from "@/lib/ui";
+import { StatePanel } from "@/components/state-panel";
+import { Markdown } from "@/components/markdown";
+import { DiffBlock } from "@/components/diff-block";
 
-const SEVERITY_STYLES: Record<FindingDoc["severity"], string> = {
-  critical: "text-red-600 dark:text-red-400",
-  high: "text-red-600 dark:text-red-400",
-  medium: "text-amber-600 dark:text-amber-400",
-  low: "text-muted",
-  info: "text-muted",
+const SEVERITY_TONE: Record<FindingDoc["severity"], Tone> = {
+  critical: "danger",
+  high: "danger",
+  medium: "warning",
+  low: "neutral",
+  info: "neutral",
+};
+
+const VERDICT_TONE: Record<NonNullable<ReviewDoc["verdict"]>, Tone> = {
+  approve: "success",
+  request_changes: "danger",
+  comment: "warning",
+};
+
+const VERDICT_LABEL: Record<NonNullable<ReviewDoc["verdict"]>, string> = {
+  approve: "Approve",
+  request_changes: "Request changes",
+  comment: "Comment",
+};
+
+const STATUS_TONE: Record<ReviewDoc["status"], Tone> = {
+  completed: "neutral",
+  pending: "info",
+  failed: "danger",
+};
+
+const STATUS_LABEL: Record<ReviewDoc["status"], string> = {
+  completed: "Completed",
+  pending: "Pending",
+  failed: "Failed",
 };
 
 async function loadRepoAndReviews(userId: string, repositoryId: string) {
@@ -64,31 +94,46 @@ async function loadRepoAndReviews(userId: string, repositoryId: string) {
 }
 
 function StatusBadge({ status }: { status: ReviewDoc["status"] }) {
-  const styles: Record<ReviewDoc["status"], string> = {
-    completed: "text-foreground",
-    pending: "text-muted",
-    failed: "text-red-600 dark:text-red-400",
-  };
+  const tone = STATUS_TONE[status];
   return (
-    <span className={`text-xs font-medium ${styles[status]}`}>{status}</span>
+    <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(tone)}`}>
+      <span className={toneDotClasses(tone)} />
+      {STATUS_LABEL[status]}
+    </span>
   );
 }
 
 function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> }) {
-  const styles: Record<NonNullable<ReviewDoc["verdict"]>, string> = {
-    approve: "text-emerald-600 dark:text-emerald-400",
-    request_changes: "text-red-600 dark:text-red-400",
-    comment: "text-amber-600 dark:text-amber-400",
-  };
-  const labels: Record<NonNullable<ReviewDoc["verdict"]>, string> = {
-    approve: "Approve",
-    request_changes: "Request changes",
-    comment: "Comment",
-  };
+  const tone = VERDICT_TONE[verdict];
   return (
-    <span className={`text-xs font-semibold ${styles[verdict]}`}>
-      {labels[verdict]}
+    <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${toneTextClasses(tone)}`}>
+      <span className={toneDotClasses(tone)} />
+      {VERDICT_LABEL[verdict]}
     </span>
+  );
+}
+
+function FindingItem({ finding }: { finding: FindingDoc }) {
+  const tone = SEVERITY_TONE[finding.severity];
+  return (
+    <li className="py-4 first:pt-0 last:pb-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span
+          className={`inline-flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase ${toneTextClasses(tone)}`}
+        >
+          <span className={toneDotClasses(tone)} />
+          {finding.severity}
+        </span>
+        <span className="text-xs text-subtle">· {finding.category}</span>
+      </div>
+      <p className="mt-1.5 text-sm font-medium text-foreground">{finding.title}</p>
+      <p className="mt-1 font-mono text-xs text-subtle">
+        {finding.file}
+        {finding.line ? `:${finding.line}` : ""}
+      </p>
+      <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
+      {finding.suggestion && <DiffBlock diff={finding.suggestion} className="mt-3" />}
+    </li>
   );
 }
 
@@ -100,45 +145,27 @@ function ReviewCard({
   pullRequest: PullRequestDoc | undefined;
 }) {
   return (
-    <li className="rounded-lg border border-border p-4">
-      <div className="flex items-center justify-between gap-4">
+    <li className="rounded-lg border border-border p-5">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <span className="text-sm font-medium text-foreground">
           {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
         </span>
-        <div className="flex shrink-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-4">
           {review.verdict && <VerdictBadge verdict={review.verdict} />}
           <StatusBadge status={review.status} />
         </div>
       </div>
 
       {review.summary && (
-        <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-sans text-sm leading-relaxed text-muted">
-          {review.summary}
-        </pre>
+        <div className="mt-3 border-t border-border pt-3">
+          <Markdown content={review.summary} />
+        </div>
       )}
 
       {review.findings.length > 0 && (
-        <ul className="mt-4 space-y-3 border-t border-border pt-4">
+        <ul className="mt-4 divide-y divide-border border-t border-border">
           {review.findings.map((finding, i) => (
-            <li key={i} className="text-sm">
-              <p className="font-medium">
-                <span className={SEVERITY_STYLES[finding.severity]}>
-                  {finding.severity}
-                </span>{" "}
-                <span className="text-muted">· {finding.category}</span>{" "}
-                <span className="text-foreground">— {finding.title}</span>
-              </p>
-              <p className="mt-1 text-xs text-muted">
-                {finding.file}
-                {finding.line ? `:${finding.line}` : ""}
-              </p>
-              <p className="mt-1 text-muted">{finding.explanation}</p>
-              {finding.suggestion && (
-                <pre className="mt-2 overflow-x-auto rounded-md bg-card p-2 text-xs">
-                  {finding.suggestion}
-                </pre>
-              )}
-            </li>
+            <FindingItem key={i} finding={finding} />
           ))}
         </ul>
       )}
@@ -164,15 +191,31 @@ export default async function RepositoryReviewsPage({
 
   return (
     <div className="mx-auto w-full max-w-3xl">
-      <h2 className="text-lg font-semibold tracking-tight text-foreground">
+      <Link
+        href="/dashboard"
+        className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+        Repositories
+      </Link>
+
+      <h2 className="mt-3 text-lg font-semibold tracking-tight text-foreground">
         {repositoryDoc.fullName}
+        {repoReviews.length > 0 && (
+          <span className="ml-1 font-normal tabular-nums text-subtle">
+            · {repoReviews.length} review{repoReviews.length === 1 ? "" : "s"}
+          </span>
+        )}
       </h2>
 
       {repoReviews.length === 0 ? (
-        <p className="mt-6 text-sm text-muted">
-          No reviews yet — one will appear here automatically the next time a
-          pull request is opened or updated on this repository.
-        </p>
+        <div className="mt-6">
+          <StatePanel
+            icon={<GitPullRequest className="h-5 w-5" aria-hidden="true" />}
+            title="No reviews yet"
+            description="One will appear here automatically the next time a pull request is opened or updated on this repository."
+          />
+        </div>
       ) : (
         <ul className="mt-6 space-y-4">
           {repoReviews.map((review) => (
