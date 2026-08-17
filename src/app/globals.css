@@ -8,7 +8,7 @@
   --border: #e5e7eb;
   --card: #ffffff;
   --surface-hover: #f9fafb;
-  --accent: #171717;
+  --accent: #7c3aed;
   --accent-foreground: #ffffff;
 
   --success: #059669;
@@ -46,8 +46,8 @@
     --border: #262626;
     --card: #111111;
     --surface-hover: #18181b;
-    --accent: #ededed;
-    --accent-foreground: #0a0a0a;
+    --accent: #8b5cf6;
+    --accent-foreground: #ffffff;
 
     --success: #34d399;
     --warning: #fbbf24;

@@ -1,6 +1,6 @@
 export default function DashboardLoading() {
   return (
-    <div className="mx-auto w-full max-w-3xl" role="status" aria-live="polite">
+    <div className="mx-auto w-full max-w-5xl" role="status" aria-live="polite">
       <span className="sr-only">Loading repositories…</span>
       <div className="animate-pulse">
         <div className="flex items-center justify-between gap-4">

@@ -1,7 +1,6 @@
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ObjectId } from "mongodb";
-import { ArrowLeft, GitPullRequest } from "lucide-react";
+import { ChevronRight, GitPullRequest } from "lucide-react";
 import { auth } from "@/auth";
 import { getGithubAccountId } from "@/lib/github/account";
 import {
@@ -13,19 +12,11 @@ import {
   type PullRequestDoc,
   type ReviewDoc,
 } from "@/lib/db/collections";
-import { toneDotClasses, toneTextClasses, type Tone } from "@/lib/ui";
+import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { StatePanel } from "@/components/state-panel";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { RepoSettingsForm } from "./repo-settings-form";
-
-const SEVERITY_TONE: Record<FindingDoc["severity"], Tone> = {
-  critical: "danger",
-  high: "danger",
-  medium: "warning",
-  low: "neutral",
-  info: "neutral",
-};
 
 const VERDICT_TONE: Record<NonNullable<ReviewDoc["verdict"]>, Tone> = {
   approve: "success",
@@ -145,47 +136,85 @@ function FindingItem({ finding }: { finding: FindingDoc }) {
   );
 }
 
+/** Per-severity counts as compact text, e.g. "2 critical · 1 high · 3 medium" — lets a developer triage a review without reading every finding. */
+function SeverityStrip({ findings }: { findings: FindingDoc[] }) {
+  if (findings.length === 0) return null;
+
+  const counts = SEVERITY_ORDER.map((severity) => ({
+    severity,
+    count: findings.filter((f) => f.severity === severity).length,
+  })).filter((entry) => entry.count > 0);
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+      {counts.map(({ severity, count }) => (
+        <span
+          key={severity}
+          className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(SEVERITY_TONE[severity])}`}
+        >
+          <span className={toneDotClasses(SEVERITY_TONE[severity])} />
+          {count} {severity}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function ReviewCard({
   review,
   pullRequest,
+  defaultOpen,
 }: {
   review: ReviewDoc;
   pullRequest: PullRequestDoc | undefined;
+  defaultOpen: boolean;
 }) {
   return (
-    <li className="rounded-lg border border-border p-5">
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <span className="text-sm font-medium text-foreground">
-          {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
-        </span>
-        <div className="flex shrink-0 items-center gap-4">
-          {review.verdict && <VerdictBadge verdict={review.verdict} />}
-          <StatusBadge status={review.status} />
-        </div>
-      </div>
+    <li>
+      <details open={defaultOpen} className="group rounded-lg border border-border">
+        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-4 [&::-webkit-details-marker]:hidden">
+          <span className="flex min-w-0 items-center gap-2">
+            <ChevronRight
+              className="h-3.5 w-3.5 shrink-0 text-subtle transition-transform group-open:rotate-90"
+              aria-hidden="true"
+            />
+            <span className="truncate text-sm font-medium text-foreground">
+              {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
+            </span>
+          </span>
+          <div className="flex shrink-0 items-center gap-4">
+            {review.verdict && <VerdictBadge verdict={review.verdict} />}
+            <StatusBadge status={review.status} />
+          </div>
+        </summary>
 
-      {review.summary && (
-        <div className="mt-3 border-t border-border pt-3">
-          <Markdown content={review.summary} />
-        </div>
-      )}
+        <div className="border-t border-border px-5 pb-5">
+          <SeverityStrip findings={review.findings} />
 
-      {review.status === "failed" && review.error && (
-        <div className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
-          <p className="text-xs font-medium text-danger">
-            Failed after {review.error.attempts} attempt{review.error.attempts === 1 ? "" : "s"}
-          </p>
-          <p className="mt-0.5 font-mono text-xs text-muted">{review.error.message}</p>
-        </div>
-      )}
+          {review.summary && (
+            <div className="mt-3 pt-1">
+              <Markdown content={review.summary} />
+            </div>
+          )}
 
-      {review.findings.length > 0 && (
-        <ul className="mt-4 divide-y divide-border border-t border-border">
-          {review.findings.map((finding, i) => (
-            <FindingItem key={i} finding={finding} />
-          ))}
-        </ul>
-      )}
+          {review.status === "failed" && review.error && (
+            <div className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
+              <p className="text-xs font-medium text-danger">
+                Failed after {review.error.attempts} attempt{review.error.attempts === 1 ? "" : "s"}
+              </p>
+              <p className="mt-0.5 font-mono text-xs text-muted">{review.error.message}</p>
+            </div>
+          )}
+
+          {review.findings.length > 0 && (
+            <ul className="mt-4 divide-y divide-border border-t border-border">
+              {review.findings.map((finding, i) => (
+                <FindingItem key={i} finding={finding} />
+              ))}
+            </ul>
+          )}
+        </div>
+      </details>
     </li>
   );
 }
@@ -207,16 +236,8 @@ export default async function RepositoryReviewsPage({
   const { repositoryDoc, pullRequestById, repoReviews } = data;
 
   return (
-    <div className="mx-auto w-full max-w-3xl">
-      <Link
-        href="/dashboard"
-        className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-        Repositories
-      </Link>
-
-      <div className="mt-3 flex flex-wrap items-start justify-between gap-4">
+    <div className="mx-auto w-full max-w-5xl">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <h2 className="text-lg font-semibold tracking-tight text-foreground">
           {repositoryDoc.fullName}
           {repoReviews.length > 0 && (
@@ -238,11 +259,12 @@ export default async function RepositoryReviewsPage({
         </div>
       ) : (
         <ul className="mt-6 space-y-4">
-          {repoReviews.map((review) => (
+          {repoReviews.map((review, i) => (
             <ReviewCard
               key={String(review._id)}
               review={review}
               pullRequest={pullRequestById.get(review.pullRequestId)}
+              defaultOpen={i === 0}
             />
           ))}
         </ul>
