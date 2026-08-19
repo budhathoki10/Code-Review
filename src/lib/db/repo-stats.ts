@@ -4,6 +4,7 @@ import {
   repositories,
   reviews,
   type FindingDoc,
+  type PullRequestDoc,
   type ReviewDoc,
 } from "@/lib/db/collections";
 import { getGithubAccountId } from "@/lib/github/account";
@@ -119,6 +120,57 @@ export async function loadRepoSummaries(userId: string): Promise<RepoSummary[]> 
     fullName: repo.fullName,
     health: healthFor(stats.get(String(repo._id))),
   }));
+}
+
+export interface LatestReview {
+  repository: { id: string; fullName: string };
+  pullRequest: PullRequestDoc;
+  review: ReviewDoc;
+}
+
+/** Most recent review across all of the user's repos — powers the dashboard's default "latest review" spotlight. */
+export async function loadLatestReview(userId: string): Promise<LatestReview | null> {
+  const githubUserId = await getGithubAccountId(userId);
+  if (!githubUserId) return null;
+
+  const installationsCol = await installations();
+  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  if (userInstallations.length === 0) return null;
+
+  const repositoriesCol = await repositories();
+  const repos = await repositoriesCol
+    .find(
+      { installationId: { $in: userInstallations.map((i) => String(i._id)) } },
+      { projection: { _id: 1, fullName: 1 } },
+    )
+    .toArray();
+  if (repos.length === 0) return null;
+
+  const repoIds = repos.map((r) => String(r._id));
+  const pullRequestsCol = await pullRequests();
+  const prs = await pullRequestsCol.find({ repositoryId: { $in: repoIds } }).toArray();
+  if (prs.length === 0) return null;
+
+  const prIds = prs.map((pr) => String(pr._id));
+  const reviewsCol = await reviews();
+  const [latestReview] = await reviewsCol
+    .find({ pullRequestId: { $in: prIds } })
+    .sort({ createdAt: -1 })
+    .limit(1)
+    .toArray();
+  if (!latestReview) return null;
+
+  const pullRequest = prs.find((pr) => String(pr._id) === latestReview.pullRequestId);
+  if (!pullRequest) return null;
+
+  const repository = repos.find((r) => String(r._id) === pullRequest.repositoryId);
+  if (!repository) return null;
+
+  return {
+    repository: { id: String(repository._id), fullName: repository.fullName },
+    pullRequest,
+    review: latestReview,
+  };
 }
 
 export interface UserOverviewStats {

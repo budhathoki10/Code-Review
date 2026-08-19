@@ -13,16 +13,17 @@ export function StatePanel({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center">
-      <div className="w-full max-w-sm">
+    <div className="flex flex-1 items-center justify-center py-10">
+      <div className="w-full max-w-xl rounded-lg border border-border bg-card px-6 py-10 text-left sm:px-10">
         {icon && (
-          <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-lg border border-border text-muted">
+          <div className="mb-8 flex h-10 w-10 items-center justify-center border border-border text-muted">
             {icon}
           </div>
         )}
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">{title}</h2>
-        <p className="mt-2 text-sm leading-relaxed text-muted">{description}</p>
-        {action && <div className="mt-6 flex justify-center">{action}</div>}
+        <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle">Workspace status</p>
+        <h2 className="mt-2 text-2xl font-semibold tracking-[-0.035em] text-foreground">{title}</h2>
+        <p className="mt-3 max-w-md text-sm leading-6 text-muted">{description}</p>
+        {action && <div className="mt-7 flex">{action}</div>}
       </div>
     </div>
   );

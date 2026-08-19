@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
-import { Trash2, X } from "lucide-react";
-import { iconButtonClasses } from "@/lib/ui";
-import { SubmitButton } from "@/components/submit-button";
+import { useState, useTransition } from "react";
+import { Loader2, Trash2, X } from "lucide-react";
+import { buttonClasses, iconButtonClasses } from "@/lib/ui";
+import { useToast } from "@/components/toast";
 import { disconnectRepository } from "./actions";
 
 /**
@@ -19,6 +19,8 @@ export function DisconnectRepoButton({
   repoName: string;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [isPending, startTransition] = useTransition();
+  const toast = useToast();
 
   if (confirming) {
     return (
@@ -27,14 +29,27 @@ export function DisconnectRepoButton({
         <button
           type="button"
           onClick={() => setConfirming(false)}
+          disabled={isPending}
           className={iconButtonClasses()}
           aria-label="Cancel disconnect"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
-        <form action={disconnectRepository.bind(null, githubRepoId)}>
-          <SubmitButton variant="destructive">Disconnect</SubmitButton>
-        </form>
+        <button
+          type="button"
+          disabled={isPending}
+          aria-busy={isPending}
+          onClick={() =>
+            startTransition(async () => {
+              await disconnectRepository(githubRepoId);
+              toast({ title: `Disconnected ${repoName}`, variant: "info" });
+            })
+          }
+          className={buttonClasses("destructive")}
+        >
+          {isPending && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+          Disconnect
+        </button>
       </div>
     );
   }

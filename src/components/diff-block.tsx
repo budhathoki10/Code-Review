@@ -1,34 +1,48 @@
-/** Unified-diff lines with GitHub-style per-line +/- coloring — no outer wrapper, so callers can compose their own container. */
-export function DiffLines({ diff }: { diff: string }) {
-  const lines = diff.replace(/\n$/, "").split("\n");
+import { highlightDiffLines } from "@/lib/highlight";
+import { CopyButton } from "@/components/copy-button";
+
+const GUTTER_TONE: Record<"add" | "del" | "ctx", string> = {
+  add: "bg-success/10",
+  del: "bg-danger/10",
+  ctx: "",
+};
+
+const MARKER_TONE: Record<"add" | "del" | "ctx", string> = {
+  add: "text-success",
+  del: "text-danger",
+  ctx: "text-subtle",
+};
+
+const MARKER: Record<"add" | "del" | "ctx", string> = { add: "+", del: "-", ctx: " " };
+
+/**
+ * Syntax-highlighted suggestion diff — file-scoped so language detection and
+ * copy-to-clipboard both know what they're looking at. Highlighting runs
+ * server-side (Shiki); this stays a server component so nothing ships to the
+ * client beyond the small CopyButton island.
+ */
+export async function DiffBlock({ diff, file, className }: { diff: string; file: string; className?: string }) {
+  const lines = await highlightDiffLines(diff, file);
+  const fileName = file.split("/").pop() ?? file;
 
   return (
-    <>
-      {lines.map((line, i) => {
-        const prefix = line[0];
-        const tone =
-          prefix === "+"
-            ? "bg-success/10 text-success"
-            : prefix === "-"
-              ? "bg-danger/10 text-danger"
-              : "text-foreground";
-        return (
-          <span key={i} className={`block px-4 ${tone}`}>
-            {line || " "}
+    <div className={`overflow-hidden rounded-lg border border-border ${className ?? ""}`}>
+      <div className="flex items-center justify-between gap-2 border-b border-border bg-card px-3 py-1.5">
+        <span className="truncate font-mono text-[11px] text-subtle" title={file}>
+          {fileName}
+        </span>
+        <CopyButton text={diff.replace(/^[+\- ]/gm, "")} label="Copy suggestion" />
+      </div>
+      <pre className="overflow-x-auto bg-background py-2 font-mono text-xs leading-relaxed sm:text-[13px]">
+        {lines.map((line, i) => (
+          <span key={i} className={`flex ${GUTTER_TONE[line.kind]}`}>
+            <span className={`w-6 shrink-0 pl-2.5 select-none ${MARKER_TONE[line.kind]}`} aria-hidden="true">
+              {MARKER[line.kind]}
+            </span>
+            <span className="min-w-0 flex-1 pr-4 whitespace-pre" dangerouslySetInnerHTML={{ __html: line.html }} />
           </span>
-        );
-      })}
-    </>
-  );
-}
-
-/** A standalone bordered diff viewer — DiffLines wrapped in the standard card treatment. Used for AI-suggested fixes. */
-export function DiffBlock({ diff, className }: { diff: string; className?: string }) {
-  return (
-    <pre
-      className={`overflow-x-auto rounded-lg border border-border bg-card py-3 font-mono text-xs leading-relaxed sm:text-sm ${className ?? ""}`}
-    >
-      <DiffLines diff={diff} />
-    </pre>
+        ))}
+      </pre>
+    </div>
   );
 }

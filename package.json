@@ -7,6 +7,7 @@
     "dev": "nodemon",
     "dev:next": "next dev",
     "dev:worker": "tsx watch src/worker/review-worker.ts",
+    "dev:all": "concurrently -n next,worker -c blue,red \"npm:dev\" \"npm:dev:worker\"",
     "worker": "tsx src/worker/review-worker.ts",
     "build": "next build",
     "start": "next start",
@@ -31,6 +32,7 @@
     "react-dom": "19.2.8",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "shiki": "^4.4.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -39,6 +41,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "concurrently": "^10.0.5",
     "eslint-config-next": "16.3.1",
     "nodemon": "^3.1.14",
     "pino-pretty": "^13.0.0",
