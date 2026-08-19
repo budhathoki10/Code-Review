@@ -1,8 +1,18 @@
-import { ChevronRight } from "lucide-react";
+import type { CSSProperties } from "react";
+import { Bug, ChevronRight, FlaskConical, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
+import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
+
+const CATEGORY_ICON: Record<FindingDoc["category"], typeof Bug> = {
+  security: ShieldAlert,
+  bug: Bug,
+  performance: Zap,
+  quality: Sparkles,
+  testing: FlaskConical,
+};
 
 const VERDICT_TONE: Record<NonNullable<ReviewDoc["verdict"]>, Tone> = {
   approve: "success",
@@ -50,6 +60,7 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
 
 function FindingItem({ finding }: { finding: FindingDoc }) {
   const tone = SEVERITY_TONE[finding.severity];
+  const CategoryIcon = CATEGORY_ICON[finding.category];
   return (
     <li className="py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -59,22 +70,77 @@ function FindingItem({ finding }: { finding: FindingDoc }) {
           <span className={toneDotClasses(tone)} />
           {finding.severity}
         </span>
-        <span className="text-xs text-subtle">· {finding.category}</span>
+        <span className="inline-flex items-center gap-1 text-xs text-subtle">
+          <CategoryIcon className="h-3 w-3" aria-hidden="true" />
+          {finding.category}
+        </span>
+        {finding.line && <span className="font-mono text-xs text-subtle">· line {finding.line}</span>}
       </div>
       <p className="mt-1.5 text-sm font-medium text-foreground">
         {finding.title}
         {finding.source === "static-analysis" && (
-          <span className="ml-2 rounded border border-border px-1.5 py-0.5 align-middle text-[10px] font-medium tracking-wide text-subtle uppercase">
+          <span className="ml-2 border border-border px-1.5 py-0.5 align-middle text-[10px] font-medium tracking-wide text-subtle uppercase">
             Static analysis
           </span>
         )}
       </p>
-      <p className="mt-1 font-mono text-xs text-subtle">
-        {finding.file}
-        {finding.line ? `:${finding.line}` : ""}
-      </p>
       <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
-      {finding.suggestion && <DiffBlock diff={finding.suggestion} className="mt-3" />}
+      {finding.suggestion && <DiffBlock diff={finding.suggestion} file={finding.file} className="mt-3" />}
+    </li>
+  );
+}
+
+/** Groups findings under the file they belong to, worst-severity file first — turns a flat list into something scannable when a review touches several files. */
+function groupFindingsByFile(findings: FindingDoc[]) {
+  const order: string[] = [];
+  const byFile = new Map<string, FindingDoc[]>();
+  for (const finding of findings) {
+    if (!byFile.has(finding.file)) order.push(finding.file);
+    byFile.set(finding.file, [...(byFile.get(finding.file) ?? []), finding]);
+  }
+  return order
+    .map((file) => {
+      const items = [...byFile.get(file)!].sort(
+        (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity),
+      );
+      return { file, findings: items, worst: SEVERITY_ORDER.indexOf(items[0].severity) };
+    })
+    .sort((a, b) => a.worst - b.worst);
+}
+
+/** One file's findings behind a native disclosure — open by default only when it contains a critical/high finding, so a large review still lands scannable. */
+function FindingGroup({
+  file,
+  findings,
+  defaultOpen,
+  index,
+}: {
+  file: string;
+  findings: FindingDoc[];
+  defaultOpen: boolean;
+  index: number;
+}) {
+  const worstTone = SEVERITY_TONE[findings[0].severity];
+  return (
+    <li className="stagger-in" style={{ "--index": index } as CSSProperties}>
+      <details open={defaultOpen} className="group/file">
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-2.5 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+          <ChevronRight
+            className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/file:rotate-90"
+            aria-hidden="true"
+          />
+          <span className={toneDotClasses(worstTone)} aria-hidden="true" />
+          <span className="truncate font-mono text-xs text-foreground" title={file}>
+            {file}
+          </span>
+          <span className="shrink-0 text-xs tabular-nums text-subtle">{findings.length}</span>
+        </summary>
+        <ul className="divide-y divide-border border-t border-border pl-5">
+          {findings.map((finding, i) => (
+            <FindingItem key={i} finding={finding} />
+          ))}
+        </ul>
+      </details>
     </li>
   );
 }
@@ -107,32 +173,64 @@ export function ReviewCard({
   review,
   pullRequest,
   defaultOpen,
+  accordionName,
+  repositoryId,
 }: {
   review: ReviewDoc;
   pullRequest: PullRequestDoc | undefined;
   defaultOpen: boolean;
+  /** Cards with the same name behave as an exclusive native accordion. */
+  accordionName?: string;
+  /** Omit to hide the delete action (e.g. contexts without ownership scoping already established). */
+  repositoryId?: string;
 }) {
+  const hasReviewDetails = Boolean(
+    review.summary ||
+      review.findings.length > 0 ||
+      (review.status === "failed" && review.error),
+  );
+  const prLabel = pullRequest ? `#${pullRequest.githubPrNumber}` : "this review";
+
   return (
     <li>
-      <details open={defaultOpen} className="group rounded-lg border border-border">
-        <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-4 [&::-webkit-details-marker]:hidden">
+      <details
+        name={accordionName}
+        open={defaultOpen}
+        className="group overflow-hidden rounded-lg border border-border bg-card transition-[border-color,box-shadow] open:border-foreground/25 open:shadow-[0_8px_28px_rgba(25,24,20,0.05)]"
+      >
+        <summary className="flex min-h-16 cursor-pointer list-none flex-wrap items-center justify-between gap-x-4 gap-y-2 px-5 py-3.5 transition-colors hover:bg-surface-hover/55 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent group-open:bg-surface-hover/35 [&::-webkit-details-marker]:hidden">
           <span className="flex min-w-0 items-center gap-2">
             <ChevronRight
-              className="h-3.5 w-3.5 shrink-0 text-subtle transition-transform group-open:rotate-90"
+              className="h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-200 group-open:rotate-90 group-open:text-foreground"
               aria-hidden="true"
             />
             <span className="truncate text-sm font-medium text-foreground">
               {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
             </span>
           </span>
-          <div className="flex shrink-0 items-center gap-4">
+          <div className="flex shrink-0 items-center gap-3">
             {review.verdict && <VerdictBadge verdict={review.verdict} />}
             <StatusBadge status={review.status} />
+            {repositoryId && (
+              <DeleteReviewButton
+                reviewId={String(review._id)}
+                repositoryId={repositoryId}
+                prLabel={prLabel}
+              />
+            )}
           </div>
         </summary>
 
         <div className="border-t border-border px-5 pb-5">
           <SeverityStrip findings={review.findings} />
+
+          {!hasReviewDetails && (
+            <p className="py-5 text-sm leading-6 text-muted">
+              {review.status === "pending"
+                ? "This review is still being processed. Results will appear here when it completes."
+                : "This review completed without additional findings or summary details."}
+            </p>
+          )}
 
           {review.summary && (
             <div className="mt-3 pt-1">
@@ -151,8 +249,14 @@ export function ReviewCard({
 
           {review.findings.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
-              {review.findings.map((finding, i) => (
-                <FindingItem key={i} finding={finding} />
+              {groupFindingsByFile(review.findings).map((group, i) => (
+                <FindingGroup
+                  key={group.file}
+                  file={group.file}
+                  findings={group.findings}
+                  defaultOpen={group.worst <= 1}
+                  index={i}
+                />
               ))}
             </ul>
           )}

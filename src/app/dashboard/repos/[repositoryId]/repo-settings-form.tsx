@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Settings2, X } from "lucide-react";
 import { buttonClasses, iconButtonClasses } from "@/lib/ui";
 import { SubmitButton } from "@/components/submit-button";
+import { useToast } from "@/components/toast";
 import { updateRepositoryConfig } from "@/app/dashboard/actions";
 import type { RepositoryDoc } from "@/lib/db/collections";
 
@@ -29,6 +30,7 @@ export function RepoSettingsForm({
   config?: RepositoryDoc["config"];
 }) {
   const [open, setOpen] = useState(false);
+  const toast = useToast();
 
   if (!open) {
     return (
@@ -49,10 +51,12 @@ export function RepoSettingsForm({
       .filter((line) => line.length > 0);
 
     await updateRepositoryConfig(repositoryId, { severityThreshold, customInstructions });
+    toast({ title: "Review settings saved" });
+    setOpen(false);
   }
 
   return (
-    <div className="w-full rounded-lg border border-border bg-card p-4 sm:w-96">
+    <div className="w-full rounded-lg border border-border bg-card p-5 sm:w-96">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-foreground">Review settings</h3>
         <button
@@ -74,7 +78,7 @@ export function RepoSettingsForm({
             id="severityThreshold"
             name="severityThreshold"
             defaultValue={config?.severityThreshold ?? "info"}
-            className="mt-1.5 h-9 w-full rounded-md border border-border bg-background px-2.5 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="mt-1.5 h-9 w-full rounded-[2px] border border-border bg-background px-2.5 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           >
             {SEVERITIES.map((severity) => (
               <option key={severity} value={severity}>
@@ -98,7 +102,7 @@ export function RepoSettingsForm({
             rows={3}
             defaultValue={(config?.customInstructions ?? []).join("\n")}
             placeholder="e.g. Flag any use of `any` in TypeScript"
-            className="mt-1.5 w-full rounded-md border border-border bg-background px-2.5 py-2 text-sm text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+            className="mt-1.5 w-full rounded-[2px] border border-border bg-background px-2.5 py-2 text-sm text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
           />
         </div>
 

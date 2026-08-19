@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { AnimatePresence, motion } from "motion/react";
 import { ChevronLeft, ChevronRight, FolderGit2, Menu, Search, X } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
+import { CommandPalette, type CommandPaletteHandle } from "@/components/command-palette";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { buttonClasses, iconButtonClasses, toneDotClasses } from "@/lib/ui";
 import type { RepoSummary } from "@/lib/db/repo-stats";
+
+const SIDEBAR_COLLAPSED_KEY = "sidebar-collapsed";
 
 const HEALTH_TONE: Record<RepoSummary["health"], Parameters<typeof toneDotClasses>[0]> = {
   critical: "danger",
@@ -33,7 +37,7 @@ function RepoList({ repos, activeId, onNavigate }: { repos: RepoSummary[]; activ
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="relative px-3 pt-3">
+      <div className="relative px-4 pt-4">
         <Search className="pointer-events-none absolute top-1/2 left-6 h-3.5 w-3.5 -translate-y-1/2 text-subtle" aria-hidden="true" />
         <input
           type="search"
@@ -44,7 +48,7 @@ function RepoList({ repos, activeId, onNavigate }: { repos: RepoSummary[]; activ
           }}
           placeholder="Find a repository…"
           aria-label="Find a repository"
-          className="h-9 w-full rounded-md border border-border bg-background pr-2 pl-8 text-xs text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+          className="h-9 w-full rounded-[2px] border border-border bg-background pr-2 pl-8 text-xs text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
         />
       </div>
 
@@ -66,7 +70,7 @@ function RepoList({ repos, activeId, onNavigate }: { repos: RepoSummary[]; activ
                     href={`/dashboard/repos/${repo.id}`}
                     onClick={onNavigate}
                     title={repo.fullName}
-                    className={`flex items-center gap-2 rounded-md border-l-2 py-1.5 pr-2 pl-2.5 text-xs transition-colors ${
+                    className={`flex items-center gap-2 border-l-2 py-2 pr-2 pl-2.5 text-xs transition-colors ${
                       active
                         ? "border-accent bg-accent/8 font-medium text-foreground"
                         : "border-transparent text-muted hover:bg-surface-hover hover:text-foreground"
@@ -127,8 +131,8 @@ function SidebarContent({
   onNavigate?: () => void;
 }) {
   return (
-    <div className="flex h-full w-64 flex-col">
-      <Link href="/dashboard" className="flex items-center gap-2 px-4 py-4" onClick={onNavigate}>
+    <div className="flex h-full w-[272px] flex-col bg-card">
+      <Link href="/dashboard" className="flex h-16 items-center gap-2.5 border-b border-border px-4" onClick={onNavigate}>
         <BrandMark className="h-5 w-5" />
         <span className="text-sm font-semibold tracking-tight text-foreground">AI Code Review</span>
       </Link>
@@ -152,9 +156,9 @@ function CollapseToggle({ collapsed, onClick }: { collapsed: boolean; onClick: (
     <motion.button
       type="button"
       onClick={onClick}
-      animate={{ left: collapsed ? 12 : 256 - 12 }}
+      animate={{ left: collapsed ? 12 : 272 - 12 }}
       transition={{ duration: 0.22, ease: "easeInOut" }}
-      className="absolute top-16 z-20 flex h-6 w-6 items-center justify-center rounded-full border border-border bg-card text-subtle shadow-sm transition-colors hover:border-accent/50 hover:text-foreground active:bg-surface-hover"
+      className="absolute top-16 z-20 flex h-6 w-6 items-center justify-center rounded-[2px] border border-border bg-card text-subtle transition-colors hover:border-accent hover:text-foreground active:bg-surface-hover"
       aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
     >
       <ChevronLeft
@@ -182,8 +186,12 @@ export function DashboardShell({
 }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [desktopCollapsed, setDesktopCollapsed] = useState(false);
+  const [desktopCollapsed, setDesktopCollapsed] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  });
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const paletteRef = useRef<CommandPaletteHandle>(null);
 
   const activeId = pathname.startsWith("/dashboard/repos/") ? pathname.split("/")[3] : undefined;
 
@@ -194,11 +202,33 @@ export function DashboardShell({
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileOpen]);
 
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, desktopCollapsed ? "1" : "0");
+  }, [desktopCollapsed]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        !!target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        paletteRef.current?.open();
+      } else if (e.key === "/" && !typing) {
+        e.preventDefault();
+        paletteRef.current?.open();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   return (
     <div className="flex flex-1">
+      <CommandPalette ref={paletteRef} repos={repos} installUrl={installUrl} />
       <div className="relative hidden lg:flex">
         <motion.aside
-          animate={{ width: desktopCollapsed ? 0 : 256 }}
+          animate={{ width: desktopCollapsed ? 0 : 272 }}
           transition={{ duration: 0.22, ease: "easeInOut" }}
           className={`shrink-0 overflow-hidden ${desktopCollapsed ? "" : "border-r border-border"}`}
         >
@@ -217,7 +247,7 @@ export function DashboardShell({
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               transition={{ duration: 0.15 }}
-              className="fixed inset-0 z-40 bg-foreground/20 lg:hidden"
+              className="fixed inset-0 z-40 bg-black/35 lg:hidden"
               onClick={() => setMobileOpen(false)}
               aria-hidden="true"
             />
@@ -227,7 +257,7 @@ export function DashboardShell({
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}
               transition={{ duration: 0.2, ease: "easeOut" }}
-              className="fixed inset-y-0 left-0 z-50 w-72 border-r border-border bg-background lg:hidden"
+              className="fixed inset-y-0 left-0 z-50 w-[272px] border-r border-border bg-card lg:hidden"
             >
               <div className="flex items-center justify-end px-2 pt-2">
                 <button
@@ -251,7 +281,7 @@ export function DashboardShell({
       </AnimatePresence>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-border bg-background px-4 py-3 sm:px-6">
+        <header className="sticky top-0 z-10 flex h-16 items-center justify-between gap-4 border-b border-border bg-card/95 px-4 backdrop-blur-md sm:px-6">
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
@@ -263,11 +293,23 @@ export function DashboardShell({
 
           <div className="flex-1" />
 
+          <button
+            type="button"
+            onClick={() => paletteRef.current?.open()}
+            className="hidden items-center gap-2 border border-border px-2.5 py-1.5 text-xs text-subtle transition-colors hover:border-accent hover:text-foreground sm:flex"
+          >
+            <Search className="h-3.5 w-3.5" aria-hidden="true" />
+            Jump to…
+            <kbd className="border border-border px-1 font-mono text-[10px]">⌘K</kbd>
+          </button>
+
+          <ThemeToggle />
+
           <div className="relative">
             <button
               type="button"
               onClick={() => setUserMenuOpen((v) => !v)}
-              className="flex items-center gap-2 rounded-md p-1 transition-colors hover:bg-surface-hover"
+              className="flex items-center gap-2 rounded-[2px] p-1 transition-colors hover:bg-surface-hover"
               aria-haspopup="menu"
               aria-expanded={userMenuOpen}
             >
@@ -288,7 +330,7 @@ export function DashboardShell({
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: -4 }}
                     transition={{ duration: 0.15, ease: "easeOut" }}
-                    className="absolute top-full right-0 z-30 mt-2 w-56 rounded-lg border border-border bg-card p-1.5 shadow-sm"
+                    className="absolute top-full right-0 z-30 mt-2 w-56 rounded-[2px] border border-border bg-card p-1.5 shadow-[0_18px_48px_rgba(20,20,16,0.14)]"
                     role="menu"
                   >
                     <a
@@ -301,7 +343,7 @@ export function DashboardShell({
                       Manage GitHub App
                     </a>
                     <div className="my-1 border-t border-border" />
-                    {signOutForm}
+                    <div key="sign-out">{signOutForm}</div>
                   </motion.div>
                 </>
               )}
@@ -309,7 +351,7 @@ export function DashboardShell({
           </div>
         </header>
 
-        <main className="flex flex-1 flex-col px-4 py-8 sm:px-6 lg:px-10">{children}</main>
+        <main className="flex flex-1 flex-col px-4 py-10 sm:px-8 lg:px-12">{children}</main>
       </div>
     </div>
   );

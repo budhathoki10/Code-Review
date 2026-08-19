@@ -1,19 +1,22 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Bot, CheckCircle2, Download, GitPullRequest, ListChecks, Sparkles, ShieldCheck } from "lucide-react";
+import { ArrowRight, Check, GitPullRequest } from "lucide-react";
 import { auth, signIn } from "@/auth";
 import type { ButtonVariant } from "@/lib/ui";
 import { BrandMark } from "@/components/brand-mark";
 import { GitHubMark } from "@/components/github-mark";
 import { SubmitButton } from "@/components/submit-button";
-import { CapabilityGrid } from "@/components/capability-grid";
-import { Reveal } from "@/components/motion/reveal";
-import { StaggerGroup, StaggerItem } from "@/components/motion/stagger-group";
-import { HoverLift } from "@/components/motion/hover-lift";
-import { AnimatedDiffDemo } from "@/components/motion/animated-diff-demo";
-import { HeroFlow } from "@/components/motion/hero-flow";
+import { ThemeToggle } from "@/components/theme-toggle";
+import { ReviewFlowDemo } from "@/components/motion/review-flow-demo";
+import { ReviewWorkspaceDemo } from "@/components/motion/review-workspace-demo";
 
-function SignInButton({ variant = "primary" }: { variant?: ButtonVariant }) {
+function SignInButton({
+  variant = "primary",
+  compactOnMobile = false,
+}: {
+  variant?: ButtonVariant;
+  compactOnMobile?: boolean;
+}) {
   return (
     <form
       action={async () => {
@@ -21,54 +24,48 @@ function SignInButton({ variant = "primary" }: { variant?: ButtonVariant }) {
         await signIn("github", { redirectTo: "/dashboard" });
       }}
     >
-      <SubmitButton variant={variant} pendingLabel="Redirecting…">
+      <SubmitButton variant={variant} pendingLabel="Opening GitHub…">
         <GitHubMark className="h-4 w-4" />
-        <span className={variant === "secondary" ? "sr-only sm:not-sr-only" : undefined}>
-          Sign in with GitHub
-        </span>
+        <span className={compactOnMobile ? "sr-only sm:not-sr-only" : undefined}>Sign in with GitHub</span>
       </SubmitButton>
     </form>
   );
 }
 
-const capabilities = [
+const workflow = [
   {
-    icon: <ListChecks className="h-4 w-4" />,
-    title: "Findings, not vibes",
-    body: "Every issue is tagged with a severity (critical → info) and a category (security, bug, performance, quality, testing) — not a wall of undifferentiated comments.",
+    number: "1",
+    title: "Connect a repository",
+    body: "Install the GitHub App and choose exactly which repositories it can access.",
   },
   {
-    icon: <GitPullRequest className="h-4 w-4" />,
-    title: "Mapped to the exact line",
-    body: "Findings are attached inline to the file and line they apply to, alongside a PR-level summary of what changed and what to test.",
+    number: "2",
+    title: "Open a pull request",
+    body: "Every new pull request and commit automatically starts a review in the background.",
   },
   {
-    icon: <ShieldCheck className="h-4 w-4" />,
-    title: "Gated, not just advisory",
-    body: "A GitHub check run passes or fails based on what the review actually found — configurable per repo, so noisy nits never block a merge by default.",
-  },
-  {
-    icon: <GitHubMark className="h-4 w-4" />,
-    title: "GitHub-native, nothing extra",
-    body: "Installs as a GitHub App. Sign in with the same GitHub account — no separate login, no extra dashboard to babysit.",
+    number: "3",
+    title: "Review and merge",
+    body: "Findings appear on the relevant lines and the merge check reflects your severity rules.",
   },
 ];
 
-const steps = [
+const capabilities = [
   {
-    icon: Download,
-    title: "Install the GitHub App",
-    body: "Grant access to the repos you want reviewed. Nothing to configure to get started.",
+    title: "Repository context",
+    body: "Reviews use the changed lines and surrounding source instead of judging an isolated diff.",
   },
   {
-    icon: GitPullRequest,
-    title: "Open a pull request",
-    body: "The webhook fires the moment a PR opens or gets a new commit — no manual trigger.",
+    title: "Prioritized findings",
+    body: "Security, correctness, performance, quality, and testing issues are ranked by severity.",
   },
   {
-    icon: Sparkles,
-    title: "Get a reviewed result",
-    body: "Severity-ranked findings post as inline comments, with a check run that gates the merge.",
+    title: "GitHub-native feedback",
+    body: "Comments are attached to the affected lines with a single pull-request summary.",
+  },
+  {
+    title: "Configurable merge gates",
+    body: "Each repository controls which severity level should block a merge.",
   },
 ];
 
@@ -79,151 +76,194 @@ export default async function Home() {
   }
 
   return (
-    <div className="flex flex-1 flex-col">
-      <header className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-background/80 px-6 py-5 backdrop-blur-sm sm:px-10">
-        <Link href="/" className="flex items-center gap-2">
-          <BrandMark className="h-6 w-6" />
-          <span className="text-sm font-semibold tracking-tight text-foreground">
-            AI Code Review
-          </span>
-        </Link>
-        <nav className="flex items-center gap-6">
-          <a
-            href="#how-it-works"
-            className="hidden text-sm text-muted transition-colors hover:text-foreground sm:inline"
-          >
-            How it works
-          </a>
-          <a
-            href="#features"
-            className="hidden text-sm text-muted transition-colors hover:text-foreground sm:inline"
-          >
-            Features
-          </a>
-          <SignInButton variant="secondary" />
-        </nav>
+    <div className="min-h-screen bg-background text-foreground">
+      <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-5 sm:px-8">
+          <Link href="/" className="flex items-center gap-2.5" aria-label="AI Code Review home">
+            <BrandMark className="h-7 w-7" />
+            <span className="text-sm font-semibold tracking-[-0.01em]">AI Code Review</span>
+          </Link>
+
+          <nav className="flex items-center gap-6" aria-label="Primary navigation">
+            <a
+              href="#product"
+              className="hidden text-sm text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent sm:block"
+            >
+              Product
+            </a>
+            <a
+              href="#how-it-works"
+              className="hidden text-sm text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent sm:block"
+            >
+              How it works
+            </a>
+            <ThemeToggle />
+            <SignInButton variant="secondary" compactOnMobile />
+          </nav>
+        </div>
       </header>
 
-      <main className="flex-1">
-        <StaggerGroup className="mx-auto max-w-3xl px-6 pt-16 pb-20 text-center sm:px-10 sm:pt-24">
-          <StaggerItem
-            as="span"
-            className="inline-flex items-center gap-1.5 rounded-full border border-border px-3 py-1 text-xs font-medium text-muted"
-          >
-            <GitHubMark className="h-3.5 w-3.5" />
-            Runs as a GitHub App
-          </StaggerItem>
-          <StaggerItem
-            as="h1"
-            className="mt-5 text-4xl font-semibold tracking-tight text-balance text-foreground sm:text-5xl"
-          >
-            Code review that lands the moment you open a PR
-          </StaggerItem>
-          <StaggerItem as="p" className="mx-auto mt-5 max-w-xl text-lg leading-relaxed text-muted">
-            Every pull request gets structured, severity-ranked feedback —
-            posted directly to GitHub, mapped to the exact lines that changed.
-          </StaggerItem>
-          <StaggerItem as="div" className="mt-8 flex justify-center">
-            <HoverLift>
-              <SignInButton />
-            </HoverLift>
-          </StaggerItem>
-          <StaggerItem as="div" className="mt-14">
-            <HeroFlow />
-          </StaggerItem>
-        </StaggerGroup>
+      <main>
+        <section className="mx-auto grid max-w-7xl items-center gap-12 px-5 py-16 sm:px-8 sm:py-20 lg:grid-cols-[0.72fr_1.28fr] lg:gap-12 lg:py-24">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium text-muted">
+              <span className="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
+              Automated reviews for GitHub pull requests
+            </div>
 
-        <Reveal className="mx-auto max-w-2xl px-6 pb-20 sm:px-10">
-          <div className="overflow-x-auto rounded-lg border border-border bg-card font-mono text-xs leading-relaxed sm:text-sm">
-            <AnimatedDiffDemo diff={"- const users = await User.find();\n+ const users = await User.find().limit(20).skip(page * 20);"} />
-            {/* Delays are hand-tuned to land after the process strip + diff-line stagger inside AnimatedDiffDemo finish, so the finding reads as a result of that process rather than appearing simultaneously. */}
-            <Reveal delay={1.6} className="border-t border-border p-4 font-sans text-sm">
-              <p className="flex items-center gap-1.5 font-medium text-foreground">
-                <Bot className="h-4 w-4 text-muted" aria-hidden="true" />
-                AI Reviewer — Performance · Medium
-              </p>
-              <p className="mt-1 leading-relaxed text-muted">
-                This query retrieves every user in the collection. Consider
-                pagination to avoid loading large datasets into memory on
-                every request.
-              </p>
-            </Reveal>
-          </div>
-          <Reveal delay={1.9} className="mt-4 flex flex-col items-center gap-2">
-            <p className="text-xs text-muted">
-              An inline comment, posted directly on the changed line.
+            <h1 className="mt-5 max-w-xl text-4xl font-semibold leading-[1.08] tracking-[-0.045em] sm:text-5xl lg:text-[3.5rem]">
+              Catch review issues before they reach production.
+            </h1>
+
+            <p className="mt-6 max-w-xl text-lg leading-8 text-muted">
+              Inspect every pull-request diff, leave feedback on the relevant lines, and update a merge
+              check without moving your team out of GitHub.
             </p>
-            <span className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted">
-              <CheckCircle2 className="h-3.5 w-3.5 text-success" aria-hidden="true" />
-              AI Code Review — passed · 1 finding below threshold
-            </span>
-          </Reveal>
-        </Reveal>
 
-        <section id="how-it-works" className="border-t border-border scroll-mt-16">
-          <div className="mx-auto max-w-4xl px-6 py-16 sm:px-10 sm:py-20">
-            <Reveal>
-              <h2 className="text-center text-xs font-semibold tracking-wide text-subtle uppercase">
-                How it works
-              </h2>
-            </Reveal>
-            <StaggerGroup className="mt-8 grid gap-8 sm:grid-cols-3">
-              {steps.map((step, i) => (
-                <StaggerItem key={step.title} as="div" className="text-center sm:text-left">
-                  <div className="flex items-center justify-center gap-3 sm:justify-start">
-                    <span className="font-mono text-xs tabular-nums text-subtle" aria-hidden="true">
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <div
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-foreground"
-                      aria-hidden="true"
-                    >
-                      <step.icon className="h-4 w-4" />
-                    </div>
+            <div className="mt-8 flex flex-wrap items-center gap-4">
+              <SignInButton />
+              <a
+                href="#product"
+                className="inline-flex h-11 items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-info focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent"
+              >
+                See an example review
+                <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </a>
+            </div>
+
+            <div className="mt-8 flex flex-wrap gap-x-5 gap-y-2 text-xs text-subtle">
+              <span>GitHub App</span>
+              <span aria-hidden="true">·</span>
+              <span>No workflow file</span>
+              <span aria-hidden="true">·</span>
+              <span>Repository-level controls</span>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-[0_16px_40px_rgba(24,26,24,0.08)]">
+            <div className="border-b border-border bg-background px-6 py-5 sm:px-8">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-base font-semibold">From pull request to posted review</p>
+                  <p className="mt-1 text-sm text-muted">Five changed files become one focused review.</p>
+                </div>
+                <span className="hidden items-center gap-1.5 text-xs text-success sm:inline-flex">
+                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                  Automatic
+                </span>
+              </div>
+            </div>
+            <ReviewFlowDemo />
+          </div>
+        </section>
+
+        <section className="border-y border-border bg-card">
+          <div className="mx-auto grid max-w-6xl grid-cols-2 divide-x divide-y divide-border px-5 sm:grid-cols-4 sm:divide-y-0 sm:px-8">
+            {[
+              ["Line-level", "Inline review comments"],
+              ["Severity-aware", "Critical through informational"],
+              ["Asynchronous", "Reviews run in the background"],
+              ["Configurable", "Rules set per repository"],
+            ].map(([title, body]) => (
+              <div key={title} className="px-4 py-5 first:pl-0 sm:px-6 sm:first:pl-0">
+                <p className="text-sm font-semibold">{title}</p>
+                <p className="mt-1 text-xs leading-5 text-muted">{body}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section id="product" className="scroll-mt-24">
+          <div className="mx-auto max-w-6xl px-5 py-16 sm:px-8 sm:py-24">
+            <div className="grid items-end gap-4 sm:grid-cols-[1fr_420px]">
+              <div>
+                <p className="text-sm font-semibold text-success">Review example</p>
+                <h2 className="mt-2 text-3xl font-semibold tracking-[-0.035em] sm:text-4xl">
+                  Useful feedback, attached to the code.
+                </h2>
+              </div>
+              <p className="text-sm leading-6 text-muted">
+                The reviewer follows the changed code, creates prioritized findings, and posts one coherent
+                result instead of flooding the pull request with unrelated comments.
+              </p>
+            </div>
+
+            <div className="mt-10">
+              <ReviewWorkspaceDemo />
+            </div>
+          </div>
+        </section>
+
+        <section id="how-it-works" className="scroll-mt-24 border-y border-border bg-card">
+          <div className="mx-auto max-w-6xl px-5 py-16 sm:px-8 sm:py-20">
+            <div className="max-w-2xl">
+              <h2 className="text-3xl font-semibold tracking-[-0.035em]">Set it up once. Keep working in GitHub.</h2>
+              <p className="mt-3 text-base leading-7 text-muted">
+                The application handles installation, review processing, and result delivery in the background.
+              </p>
+            </div>
+
+            <ol className="mt-10 grid gap-8 border-t border-border pt-8 md:grid-cols-3">
+              {workflow.map((step) => (
+                <li key={step.number} className="grid grid-cols-[32px_1fr] gap-3">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-background text-xs font-semibold">
+                    {step.number}
+                  </span>
+                  <div>
+                    <h3 className="text-base font-semibold">{step.title}</h3>
+                    <p className="mt-2 text-sm leading-6 text-muted">{step.body}</p>
                   </div>
-                  <h3 className="mt-3 text-sm font-semibold text-foreground">{step.title}</h3>
-                  <p className="mt-1.5 text-sm leading-relaxed text-muted">{step.body}</p>
-                </StaggerItem>
+                </li>
               ))}
-            </StaggerGroup>
+            </ol>
           </div>
         </section>
 
-        <section id="features" className="border-t border-border scroll-mt-16">
-          <div className="mx-auto max-w-4xl px-6 py-16 sm:px-10 sm:py-20">
-            <CapabilityGrid items={capabilities} />
-          </div>
-        </section>
-
-        <Reveal className="border-t border-border bg-foreground">
-          <div className="mx-auto flex max-w-3xl flex-col items-center gap-5 px-6 py-16 text-center sm:px-10 sm:py-20">
-            <h2 className="text-2xl font-semibold tracking-tight text-balance text-background sm:text-3xl">
-              Wire it into your first repo in under a minute
-            </h2>
-            <p className="max-w-md text-sm leading-relaxed text-background/70">
-              No config required to start. Sign in, pick a repo, open a PR.
+        <section className="mx-auto grid max-w-6xl gap-12 px-5 py-16 sm:px-8 sm:py-24 lg:grid-cols-[0.72fr_1.28fr]">
+          <div>
+            <h2 className="text-3xl font-semibold tracking-[-0.035em]">Built around the review workflow.</h2>
+            <p className="mt-4 max-w-md text-base leading-7 text-muted">
+              Review results stay attached to the pull request, with enough context to act on each finding
+              without opening another tool.
             </p>
-            <HoverLift>
-              <SignInButton />
-            </HoverLift>
           </div>
-        </Reveal>
+
+          <dl className="grid gap-x-10 sm:grid-cols-2">
+            {capabilities.map((capability) => (
+              <div key={capability.title} className="border-t border-border py-5">
+                <dt className="flex items-center gap-2 text-sm font-semibold">
+                  <Check className="h-4 w-4 text-success" aria-hidden="true" />
+                  {capability.title}
+                </dt>
+                <dd className="mt-2 text-sm leading-6 text-muted">{capability.body}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="border-t border-border bg-card">
+          <div className="mx-auto flex max-w-6xl flex-col gap-6 px-5 py-14 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+            <div>
+              <h2 className="text-2xl font-semibold tracking-[-0.025em]">Connect your first repository.</h2>
+              <p className="mt-2 text-sm text-muted">Install the GitHub App and run the first review on your next pull request.</p>
+            </div>
+            <SignInButton />
+          </div>
+        </section>
       </main>
 
-      <Reveal>
-        <footer className="border-t border-border px-6 py-6 sm:px-10">
-          <div className="mx-auto flex max-w-4xl flex-col items-center gap-3 text-center sm:flex-row sm:justify-between sm:text-left">
-            <Link href="/" className="flex items-center gap-2">
-              <BrandMark className="h-5 w-5" />
-              <span className="text-sm font-medium text-foreground">AI Code Review</span>
-            </Link>
-            <p className="max-w-md text-xs text-muted">
-              Built on the GitHub App platform. Your source code is only read
-              to generate a review — never stored indefinitely by default.
-            </p>
-          </div>
-        </footer>
-      </Reveal>
+      <footer className="border-t border-border bg-background">
+        <div className="mx-auto flex max-w-6xl flex-col gap-4 px-5 py-7 sm:flex-row sm:items-center sm:justify-between sm:px-8">
+          <Link href="/" className="flex items-center gap-2.5">
+            <BrandMark className="h-6 w-6" />
+            <span className="text-sm font-semibold">AI Code Review</span>
+          </Link>
+          <p className="flex items-center gap-2 text-xs text-muted">
+            <GitPullRequest className="h-3.5 w-3.5" aria-hidden="true" />
+            Built for GitHub pull-request workflows
+          </p>
+        </div>
+      </footer>
     </div>
   );
 }

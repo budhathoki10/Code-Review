@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import { AlertTriangle, ChevronLeft, ChevronRight, FolderGit2, Search } from "lucide-react";
 import { auth } from "@/auth";
@@ -127,7 +128,7 @@ function SearchForm({ query }: { query: string }) {
         defaultValue={query}
         placeholder="Search repositories…"
         aria-label="Search repositories"
-        className="h-10 w-full rounded-md border border-border bg-background pr-3 pl-9 text-sm text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+        className="h-10 w-full rounded-[2px] border border-border bg-card pr-3 pl-9 text-sm text-foreground placeholder:text-subtle focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
       />
     </form>
   );
@@ -195,15 +196,18 @@ function SeverityBar({ counts }: { counts: RepoStats["severityCounts"] }) {
   );
 }
 
-function RepoRow({ repo, stats }: { repo: RepositoryDoc; stats?: RepoStats }) {
+function RepoRow({ repo, stats, index }: { repo: RepositoryDoc; stats?: RepoStats; index: number }) {
   return (
-    <li className="group relative flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-surface-hover">
+    <li
+      className="group stagger-in relative flex items-center gap-4 px-4 py-3.5 transition-colors hover:bg-surface-hover"
+      style={{ "--index": index } as CSSProperties}
+    >
       <Link
         href={`/dashboard/repos/${repo._id}`}
         className="absolute inset-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
         aria-label={`View reviews for ${repo.fullName}`}
       />
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border text-subtle">
+      <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-border bg-card text-subtle">
         <FolderGit2 className="h-4 w-4" aria-hidden="true" />
       </div>
       <div className="min-w-0 flex-1">
@@ -220,9 +224,7 @@ function RepoRow({ repo, stats }: { repo: RepositoryDoc; stats?: RepoStats }) {
       </div>
       <div className="relative z-10 flex shrink-0 items-center gap-3">
         {stats && <SeverityBar counts={stats.severityCounts} />}
-        <span className="hidden sm:inline-flex">
-          <HealthChip stats={stats} />
-        </span>
+        <HealthChip stats={stats} />
         <DisconnectRepoButton githubRepoId={repo.githubRepoId} repoName={repo.fullName} />
         <ChevronRight className="h-4 w-4 text-subtle" aria-hidden="true" />
       </div>
@@ -324,7 +326,7 @@ export default async function RepositoriesPage(
   return (
     <div className="mx-auto w-full max-w-5xl">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="text-lg font-semibold tracking-tight text-foreground">
+        <h2 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">
           Connected repositories{" "}
           <span className="font-normal tabular-nums text-subtle">· {total}</span>
         </h2>
@@ -347,9 +349,9 @@ export default async function RepositoriesPage(
           />
         </div>
       ) : (
-        <ul className="mt-6 divide-y divide-border rounded-lg border border-border">
-          {repos.map((repo) => (
-            <RepoRow key={repo.githubRepoId} repo={repo} stats={repoStats.get(String(repo._id))} />
+        <ul className="mt-6 divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+          {repos.map((repo, i) => (
+            <RepoRow key={repo.githubRepoId} repo={repo} stats={repoStats.get(String(repo._id))} index={i} />
           ))}
         </ul>
       )}

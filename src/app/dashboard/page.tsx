@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import { AlertTriangle, FolderGit2, GitPullRequest } from "lucide-react";
 import { auth } from "@/auth";
@@ -57,12 +58,25 @@ function ErrorState() {
   );
 }
 
-function StatTile({ label, value, tone = "neutral" }: { label: string; value: number; tone?: Tone }) {
+function StatTile({
+  label,
+  value,
+  tone = "neutral",
+  index,
+}: {
+  label: string;
+  value: number;
+  tone?: Tone;
+  index: number;
+}) {
   return (
-    <div className="rounded-lg border border-border px-4 py-3">
-      <p className="text-xs font-medium text-muted">{label}</p>
+    <div
+      className="stagger-in border-t border-border px-4 py-4 first:border-t-0 sm:border-t-0 sm:border-l sm:first:border-l-0 sm:px-6"
+      style={{ "--index": index } as CSSProperties}
+    >
+      <p className="font-mono text-[10px] font-medium uppercase tracking-[0.12em] text-muted">{label}</p>
       <p
-        className={`mt-1 text-2xl font-semibold tracking-tight tabular-nums ${
+        className={`mt-3 text-3xl font-semibold tracking-[-0.04em] tabular-nums ${
           tone === "neutral" ? "text-foreground" : toneTextClasses(tone)
         }`}
       >
@@ -75,14 +89,16 @@ function StatTile({ label, value, tone = "neutral" }: { label: string; value: nu
 function Overview({ stats }: { stats: UserOverviewStats }) {
   return (
     <section>
-      <h1 className="text-2xl font-semibold tracking-tight text-foreground">Dashboard</h1>
-      <div className="mt-4 grid grid-cols-3 gap-3">
-        <StatTile label="Repositories" value={stats.totalRepos} />
-        <StatTile label="Reviews (7d)" value={stats.reviewsLast7Days} />
+      <p className="font-mono text-[10px] uppercase tracking-[0.16em] text-subtle">Workspace overview</p>
+      <h1 className="mt-2 text-3xl font-semibold tracking-[-0.045em] text-foreground">Review activity</h1>
+      <div className="mt-7 grid grid-cols-1 overflow-hidden rounded-lg border border-border bg-card sm:grid-cols-3">
+        <StatTile label="Repositories" value={stats.totalRepos} index={0} />
+        <StatTile label="Reviews (7d)" value={stats.reviewsLast7Days} index={1} />
         <StatTile
           label="Needs attention"
           value={stats.needsAttention}
           tone={stats.needsAttention > 0 ? "danger" : "neutral"}
+          index={2}
         />
       </div>
     </section>
@@ -91,11 +107,14 @@ function Overview({ stats }: { stats: UserOverviewStats }) {
 
 function LatestReviewSpotlight({ latest }: { latest: LatestReview | null }) {
   return (
-    <section className="mt-8">
-      <h2 className="text-lg font-semibold tracking-tight text-foreground">Latest review</h2>
+    <section className="mt-12">
+      <div className="flex items-end justify-between border-b border-border pb-3">
+        <h2 className="text-lg font-semibold tracking-[-0.025em] text-foreground">Latest review</h2>
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-subtle">Most recent</span>
+      </div>
 
       {latest ? (
-        <div className="mt-4">
+        <div className="mt-5">
           <Link
             href={`/dashboard/repos/${latest.repository.id}`}
             className="inline-flex items-center gap-1.5 text-sm font-medium text-foreground hover:text-accent"
@@ -104,7 +123,12 @@ function LatestReviewSpotlight({ latest }: { latest: LatestReview | null }) {
             {latest.repository.fullName}
           </Link>
           <ul className="mt-3">
-            <ReviewCard review={latest.review} pullRequest={latest.pullRequest} defaultOpen />
+            <ReviewCard
+              review={latest.review}
+              pullRequest={latest.pullRequest}
+              defaultOpen
+              repositoryId={latest.repository.id}
+            />
           </ul>
         </div>
       ) : (

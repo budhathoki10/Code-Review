@@ -2,18 +2,18 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "destructive";
 
 export function buttonClasses(variant: ButtonVariant = "primary") {
   const base =
-    "inline-flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50";
+    "inline-flex h-11 items-center justify-center gap-2 rounded-[3px] text-sm font-semibold transition-[background-color,color,border-color,transform] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-50 active:translate-y-px";
 
   switch (variant) {
     case "secondary":
-      return `${base} border border-border px-4 text-foreground hover:bg-surface-hover active:bg-border`;
+      return `${base} border border-current px-4 text-foreground hover:bg-foreground hover:text-background`;
     case "ghost":
-      return `${base} px-3 text-muted hover:bg-surface-hover hover:text-foreground active:bg-border`;
+      return `${base} px-3 text-muted hover:bg-surface-hover hover:text-foreground`;
     case "destructive":
-      return `${base} bg-danger px-4 text-white hover:opacity-90 active:opacity-80`;
+      return `${base} bg-danger px-4 text-white hover:brightness-95`;
     case "primary":
     default:
-      return `${base} bg-accent px-5 text-accent-foreground hover:opacity-90 active:opacity-80`;
+      return `${base} bg-accent px-5 text-accent-foreground hover:brightness-95`;
   }
 }
 
