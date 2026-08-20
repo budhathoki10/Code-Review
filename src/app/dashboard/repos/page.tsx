@@ -33,15 +33,15 @@ async function loadConnectedRepos(
   userId: string,
   requestedPage: number,
   query: string,
-): Promise<{ repos: RepositoryDoc[]; total: number; page: number }> {
+): Promise<{ repos: RepositoryDoc[]; total: number; page: number; stats: Map<string, RepoStats> }> {
   const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return { repos: [], total: 0, page: 1 };
+  if (!githubUserId) return { repos: [], total: 0, page: 1, stats: new Map() };
 
   const installationsCol = await installations();
   const userInstallations = await installationsCol
     .find({ githubUserId })
     .toArray();
-  if (userInstallations.length === 0) return { repos: [], total: 0, page: 1 };
+  if (userInstallations.length === 0) return { repos: [], total: 0, page: 1, stats: new Map() };
 
   const repositoriesCol = await repositories();
   const filter: Record<string, unknown> = {
@@ -51,18 +51,29 @@ async function loadConnectedRepos(
     filter.fullName = { $regex: escapeRegExp(query.trim()), $options: "i" };
   }
 
-  const total = await repositoriesCol.countDocuments(filter);
+  // Sorted by latest activity (most recent review, which fires on every PR
+  // open/commit push), not name — so a repo you just pushed to jumps to the
+  // top. That means pulling every matching repo's stats up front rather than
+  // paginating in the DB, mirroring loadRepoSummaries' approach for the
+  // sidebar switcher.
+  const allRepos = await repositoriesCol.find(filter).toArray();
+  const stats = await loadRepoStats(allRepos.map((repo) => String(repo._id)));
+
+  allRepos.sort((a, b) => {
+    const aTime = stats.get(String(a._id))?.lastReviewAt;
+    const bTime = stats.get(String(b._id))?.lastReviewAt;
+    if (aTime && bTime) return bTime.getTime() - aTime.getTime();
+    if (aTime) return -1;
+    if (bTime) return 1;
+    return a.fullName.localeCompare(b.fullName);
+  });
+
+  const total = allRepos.length;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const page = Math.min(requestedPage, totalPages);
+  const repos = allRepos.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
-  const repos = await repositoriesCol
-    .find(filter)
-    .sort({ fullName: 1 })
-    .skip((page - 1) * PAGE_SIZE)
-    .limit(PAGE_SIZE)
-    .toArray();
-
-  return { repos, total, page };
+  return { repos, total, page, stats };
 }
 
 function EmptyState({ installUrl }: { installUrl?: string }) {
@@ -304,13 +315,15 @@ export default async function RepositoriesPage(
   let repos: RepositoryDoc[];
   let total: number;
   let currentPage: number;
+  let repoStats: Map<string, RepoStats>;
   try {
     if (session?.user?.id) {
-      ({ repos, total, page: currentPage } = await loadConnectedRepos(session.user.id, page, query));
+      ({ repos, total, page: currentPage, stats: repoStats } = await loadConnectedRepos(session.user.id, page, query));
     } else {
       repos = [];
       total = 0;
       currentPage = 1;
+      repoStats = new Map();
     }
   } catch {
     return <ErrorState />;
@@ -321,7 +334,6 @@ export default async function RepositoriesPage(
   }
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const repoStats = await loadRepoStats(repos.map((repo) => String(repo._id)));
 
   return (
     <div className="mx-auto w-full max-w-5xl">
