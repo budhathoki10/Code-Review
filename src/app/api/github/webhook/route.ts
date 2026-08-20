@@ -18,8 +18,8 @@ export async function POST(request: NextRequest) {
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
   const eventType = request.headers.get("x-github-event") ?? "unknown";
   const log = logger.child({ requestId: deliveryId });
-  log.info({ eventType }, "webhook received");
-
+  log.info({ eventType }, "webhook received successfully");
+  log.info({ eventType }, "Messiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii");
   const rawBody = await request.text();
 
   if (!verifyWebhookSignature(rawBody, request.headers.get("x-hub-signature-256"))) {

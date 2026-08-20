@@ -15,6 +15,7 @@ const ibmPlexMono = IBM_Plex_Mono({
   subsets: ["latin"],
 });
 
+
 export const metadata: Metadata = {
   title: "AI Code Review — Signal before merge",
   description: "GitHub-native pull request reviews with line-level findings and configurable merge gates.",
