@@ -2,7 +2,7 @@ import { Skeleton } from "@/components/skeleton";
 
 export default function DashboardLoading() {
   return (
-    <div className="mx-auto w-full max-w-5xl" role="status" aria-live="polite">
+    <div className="w-full max-w-5xl" role="status" aria-live="polite">
       <span className="sr-only">Loading dashboard…</span>
 
       <Skeleton className="h-2.5 w-32" />

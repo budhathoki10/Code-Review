@@ -21,7 +21,7 @@ function SignInButton({
     <form
       action={async () => {
         "use server";
-        await signIn("github", { redirectTo: "/dashboard" });
+        await signIn("github", { redirectTo: "/api/github/connect" });
       }}
     >
       <SubmitButton variant={variant} pendingLabel="Opening GitHub…">

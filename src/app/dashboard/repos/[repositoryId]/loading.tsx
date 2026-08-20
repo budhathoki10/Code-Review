@@ -2,7 +2,7 @@ import { Skeleton } from "@/components/skeleton";
 
 export default function RepositoryReviewsLoading() {
   return (
-    <div className="mx-auto w-full max-w-5xl" role="status" aria-live="polite">
+    <div className="w-full max-w-5xl" role="status" aria-live="polite">
       <span className="sr-only">Loading reviews…</span>
 
       <Skeleton className="h-8 w-72" />

@@ -171,7 +171,7 @@ export default async function DashboardPage() {
   }
 
   return (
-    <div className="mx-auto w-full max-w-5xl">
+    <div className="w-full max-w-5xl">
       <Overview stats={overview} />
       <LatestReviewSpotlight latest={latest} />
     </div>

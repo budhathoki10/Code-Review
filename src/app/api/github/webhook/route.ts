@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { PullRequestEvent } from "@octokit/webhooks-types";
+import type { InstallationEvent, InstallationRepositoriesEvent, PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
-import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
+import { ensureIndexes, installations, pullRequests, repositories, reviews } from "@/lib/db/collections";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+import type pino from "pino";
 
 const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 20);
 const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_SECONDS ?? 60);
@@ -49,6 +50,16 @@ export async function POST(request: NextRequest) {
         { status: 429, headers: { "Retry-After": String(WEBHOOK_RATE_LIMIT_WINDOW_SECONDS) } },
       );
     }
+  }
+
+  if (eventType === "installation") {
+    await handleInstallationEvent(rawPayload as unknown as InstallationEvent, log);
+    return ok();
+  }
+
+  if (eventType === "installation_repositories") {
+    await handleInstallationRepositoriesEvent(rawPayload as unknown as InstallationRepositoriesEvent, log);
+    return ok();
   }
 
   if (eventType !== "pull_request") {
@@ -148,6 +159,87 @@ export async function POST(request: NextRequest) {
   }
 
   return ok();
+}
+
+/**
+ * Keeps our DB in sync when a user uninstalls the GitHub App entirely.
+ * Without this, a revoked installation leaves its repositories (and the
+ * installation row itself) behind forever — they just silently stop
+ * receiving webhooks while still showing up in the dashboard.
+ */
+async function handleInstallationEvent(payload: InstallationEvent, log: pino.Logger) {
+  if (payload.action !== "deleted") {
+    log.info({ action: payload.action }, "installation event ignored — action not tracked");
+    return;
+  }
+
+  await ensureIndexes();
+
+  const installationsCol = await installations();
+  const installationDoc = await installationsCol.findOneAndDelete({
+    githubInstallationId: payload.installation.id,
+  });
+  if (!installationDoc?._id) {
+    log.info({ githubInstallationId: payload.installation.id }, "installation deleted — no matching installation on file");
+    return;
+  }
+
+  const repositoriesCol = await repositories();
+  const { deletedCount } = await repositoriesCol.deleteMany({
+    installationId: String(installationDoc._id),
+  });
+  log.info(
+    { githubInstallationId: payload.installation.id, reposRemoved: deletedCount },
+    "installation uninstalled — installation and repositories removed",
+  );
+}
+
+/**
+ * Keeps the tracked repo list in sync when a user adds/removes individual
+ * repos from an existing installation, without uninstalling the whole app.
+ */
+async function handleInstallationRepositoriesEvent(payload: InstallationRepositoriesEvent, log: pino.Logger) {
+  await ensureIndexes();
+
+  const repositoriesCol = await repositories();
+
+  if (payload.repositories_removed.length > 0) {
+    const { deletedCount } = await repositoriesCol.deleteMany({
+      githubRepoId: { $in: payload.repositories_removed.map((repo) => repo.id) },
+    });
+    log.info({ githubInstallationId: payload.installation.id, deletedCount }, "repositories removed from installation");
+  }
+
+  if (payload.repositories_added.length > 0) {
+    const installationsCol = await installations();
+    const installationDoc = await installationsCol.findOne({
+      githubInstallationId: payload.installation.id,
+    });
+    if (!installationDoc?._id) {
+      log.warn({ githubInstallationId: payload.installation.id }, "repositories added — no matching installation on file");
+      return;
+    }
+
+    await Promise.all(
+      payload.repositories_added.map((repo) =>
+        repositoriesCol.updateOne(
+          { githubRepoId: repo.id },
+          {
+            $set: {
+              installationId: String(installationDoc._id),
+              githubInstallationId: payload.installation.id,
+              fullName: repo.full_name,
+            },
+          },
+          { upsert: true },
+        ),
+      ),
+    );
+    log.info(
+      { githubInstallationId: payload.installation.id, added: payload.repositories_added.length },
+      "repositories added to installation",
+    );
+  }
 }
 
 function isDuplicateKeyError(error: unknown): boolean {

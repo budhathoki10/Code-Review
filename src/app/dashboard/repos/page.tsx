@@ -324,7 +324,7 @@ export default async function RepositoriesPage(
   const repoStats = await loadRepoStats(repos.map((repo) => String(repo._id)));
 
   return (
-    <div className="mx-auto w-full max-w-5xl">
+    <div className="w-full max-w-5xl">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-2xl font-semibold tracking-[-0.035em] text-foreground">
           Connected repositories{" "}
