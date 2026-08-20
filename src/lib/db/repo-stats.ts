@@ -86,6 +86,7 @@ export interface RepoSummary {
   id: string;
   fullName: string;
   health: "critical" | "attention" | "clean" | "unreviewed";
+  lastActivityAt?: Date;
 }
 
 function healthFor(stats: RepoStats | undefined): RepoSummary["health"] {
@@ -115,11 +116,22 @@ export async function loadRepoSummaries(userId: string): Promise<RepoSummary[]> 
 
   const stats = await loadRepoStats(repos.map((repo) => String(repo._id)));
 
-  return repos.map((repo) => ({
-    id: String(repo._id),
-    fullName: repo.fullName,
-    health: healthFor(stats.get(String(repo._id))),
-  }));
+  return repos
+    .map((repo) => {
+      const repoStats = stats.get(String(repo._id));
+      return {
+        id: String(repo._id),
+        fullName: repo.fullName,
+        health: healthFor(repoStats),
+        lastActivityAt: repoStats?.lastReviewAt,
+      };
+    })
+    .sort((a, b) => {
+      if (a.lastActivityAt && b.lastActivityAt) return b.lastActivityAt.getTime() - a.lastActivityAt.getTime();
+      if (a.lastActivityAt) return -1;
+      if (b.lastActivityAt) return 1;
+      return a.fullName.localeCompare(b.fullName);
+    });
 }
 
 export interface LatestReview {
