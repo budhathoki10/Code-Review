@@ -1,0 +1,27 @@
+name: Cron - process reviews
+
+# Netlify can't hold a process open for the BullMQ worker
+# (src/worker/review-worker.ts), so instead we hit the drain-and-exit sweep
+# route (src/app/api/cron/process-reviews) on a schedule. See that route for
+# details on how it processes whatever's queued and returns.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call review sweep endpoint
+        run: |
+          status=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ vars.APP_URL }}/api/cron/process-reviews")
+          echo "HTTP status: $status"
+          cat /tmp/response.json
+          if [ "$status" -ge 300 ]; then
+            echo "Sweep request failed"
+            exit 1
+          fi
