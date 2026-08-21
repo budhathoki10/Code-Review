@@ -7,6 +7,9 @@ let connection: IORedis | undefined;
  * (consumer, a separate process) — both need `maxRetriesPerRequest: null`,
  * which BullMQ requires for its blocking connections.
  */
+
+//connect to the redis connection via REDIS_URl 
+
 export function getRedisConnection(): IORedis {
   if (!connection) {
     const url = process.env.REDIS_URL;

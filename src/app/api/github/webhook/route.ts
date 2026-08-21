@@ -1,3 +1,4 @@
+// this file is the heart of the project
 import { NextRequest, NextResponse } from "next/server";
 import type { PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
@@ -15,13 +16,14 @@ function ok() {
 }
 
 export async function POST(request: NextRequest) {
+  // verifying the signature 
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
   const eventType = request.headers.get("x-github-event") ?? "unknown";
   const log = logger.child({ requestId: deliveryId });
   log.info({ eventType }, "webhook received");
 
   const rawBody = await request.text();
-
+// checking the signature if webhook is really from the github or not 
   if (!verifyWebhookSignature(rawBody, request.headers.get("x-hub-signature-256"))) {
     log.warn("webhook rejected — invalid signature");
     return NextResponse.json({ error: "invalid signature" }, { status: 401 });
@@ -51,6 +53,7 @@ export async function POST(request: NextRequest) {
     }
   }
 
+  //only cares about the pull request
   if (eventType !== "pull_request") {
     log.info({ eventType }, "webhook ignored — not a pull_request event");
     return ok();
@@ -80,6 +83,7 @@ export async function POST(request: NextRequest) {
   const headSha = payload.pull_request.head.sha;
 
   const pullRequestsCol = await pullRequests();
+  //saves the meta data of the github webhook
   const pullRequestDoc = await pullRequestsCol.findOneAndUpdate(
     { githubPrId: payload.pull_request.id },
     {
@@ -99,6 +103,7 @@ export async function POST(request: NextRequest) {
   const reviewsCol = await reviews();
   let reviewId: string;
   try {
+    // creates the pending status of the pr 
     const insertResult = await reviewsCol.insertOne({
       pullRequestId: String(pullRequestDoc._id),
       headSha,
@@ -106,6 +111,7 @@ export async function POST(request: NextRequest) {
       findings: [],
       createdAt: new Date(),
     });
+    //  extract the object of the document 
     reviewId = String(insertResult.insertedId);
   } catch (error) {
     if (isDuplicateKeyError(error)) {

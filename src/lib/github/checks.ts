@@ -2,6 +2,7 @@ import { getInstallationOctokit } from "@/lib/github/app";
 
 export type CheckConclusion = "success" | "failure" | "neutral";
 
+//marking the status of  the review
 /**
  * Requires the GitHub App's "Checks: Read & write" permission. Callers must
  * treat this as fallible (a missing permission 403s) and never let a failure

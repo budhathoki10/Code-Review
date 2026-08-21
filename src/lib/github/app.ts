@@ -34,6 +34,7 @@ export async function getInstallationAccountLogin(installationId: number): Promi
   return "login" in account ? account.login : account.slug;
 }
 
+//access all the repos
 export async function getInstallationRepositories(
   installationId: number,
 ): Promise<{ githubRepoId: number; fullName: string }[]> {

@@ -1,6 +1,7 @@
 import { getInstallationOctokit } from "@/lib/github/app";
 import type { FindingDoc } from "@/lib/db/collections";
 
+// this write the comment in the github
 const SEVERITY_EMOJI: Record<FindingDoc["severity"], string> = {
   critical: "🔴",
   high: "🔴",
