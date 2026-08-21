@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: ai-code-review-worker
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install
+    startCommand: npm run worker
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: AI_RATE_LIMIT_MAX
+        value: "10"
+      - key: AI_RATE_LIMIT_DURATION_MS
+        value: "60000"
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_BASE_URL
+        sync: false
+      - key: NVIDIA_MODEL
+        sync: false
+      - key: NVIDIA_TEMPERATURE
+        sync: false
+      - key: NVIDIA_TOP_P
+        sync: false
+      - key: NVIDIA_MAX_TOKENS
+        sync: false
+      - key: GITHUB_APP_ID
+        sync: false
+      - key: GITHUB_APP_PRIVATE_KEY
+        sync: false
