@@ -28,6 +28,7 @@ if (process.env.PORT) {
     res.end(JSON.stringify({ ok: true }));
   }).listen(port, () => {
     logger.info({ port }, "keep-awake health server listening (unrelated to job processing)");
+     logger.info({ port }, "Mesiiiiiiiii workingggggggggggggggg");
   });
 }
 
