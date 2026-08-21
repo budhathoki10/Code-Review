@@ -38,11 +38,20 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
 
   /**
    * BullMQ fires "failed" after every failed attempt, not just the last one —
-   * only mark the review doc "failed" once retries are exhausted, so a
-   * transient error mid-backoff doesn't show as a dead review in the
-   * dashboard while it's still going to retry. Once exhausted, the failure is
-   * written as a structured `error` field on the review doc — this doubles as
-   * the dead-letter record, durable in Mongo independent of Redis's TTL on
+   * only mark the review doc "failed" once BullMQ is actually done with the
+   * job, so a transient error mid-backoff doesn't show as a dead review in
+   * the dashboard while it's still going to retry. `job.attemptsMade >=
+   * maxAttempts` alone isn't a reliable "done" signal: a job that stalls
+   * (its lock expires because the worker process died/was killed mid-job —
+   * expected on serverless hosts where a run can outlive the invocation)
+   * gets moved to the failed set by BullMQ once it exceeds maxStalledCount,
+   * independent of the attempts/backoff counter — attemptsMade can still be
+   * well under maxAttempts when that happens. Ask BullMQ directly via
+   * `job.isFailed()` whether it's actually in the terminal failed state
+   * instead of inferring it from the attempt counter, so a stalled review
+   * doesn't sit at "pending" forever. Once terminal, the failure is written
+   * as a structured `error` field on the review doc — this doubles as the
+   * dead-letter record, durable in Mongo independent of Redis's TTL on
    * failed jobs.
    */
   worker.on("failed", async (job, err) => {
@@ -52,7 +61,7 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
     const maxAttempts = job.opts.attempts ?? 1;
     log.error({ attempt: job.attemptsMade, maxAttempts, err }, "job failed");
 
-    if (job.attemptsMade < maxAttempts) {
+    if (!(await job.isFailed())) {
       return;
     }
 
