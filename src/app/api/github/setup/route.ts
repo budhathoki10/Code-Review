@@ -1,3 +1,4 @@
+// this file to connect to the repo 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { getGithubAccountId } from "@/lib/github/account";
@@ -15,6 +16,7 @@ function appUrl(path: string, request: NextRequest): URL {
 }
 
 export async function GET(request: NextRequest) {
+  //check if the user is login 
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.redirect(appUrl("/", request));
@@ -54,6 +56,7 @@ export async function GET(request: NextRequest) {
   }
 
   if (repos.length > 0) {
+    //saving all the repo
     const repositoriesCol = await repositories();
     await Promise.all(
       repos.map((repo) =>

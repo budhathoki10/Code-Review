@@ -1,3 +1,4 @@
+// this is the main heart of the code
 import { ObjectId } from "mongodb";
 import type { Logger } from "pino";
 import { getPullRequestDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS } from "@/lib/github/diff";
@@ -132,6 +133,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   const commentableLines = computeCommentableLines(diff.files);
 
   log.info({ reviewId }, "calling the model and running static analysis...");
+  // calling the Ai model to generate  the review
   const [aiResult, staticFindings] = await Promise.all([
     generateReview(diff.diffText, { customInstructions: repoConfig?.customInstructions }),
     runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines).catch(
@@ -147,7 +149,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   );
 
   const allFindings = [...aiResult.findings, ...staticFindings];
-
+// saves  the review in mongo db 
   await reviewsCol.updateOne(
     { pullRequestId, headSha },
     {

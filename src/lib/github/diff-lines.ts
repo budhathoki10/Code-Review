@@ -3,6 +3,9 @@ import type { PullRequestFile } from "@/lib/github/diff";
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
+//Its only job is to decide where an AI finding can be placed as a GitHub inline comment.
+
+
 /**
  * Walks each file's unified-diff patch to find which new-file line numbers
  * are actually part of the diff (context or added lines) — GitHub only

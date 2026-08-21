@@ -37,7 +37,7 @@ export async function enqueueReviewJob(data: ReviewJobData): Promise<void> {
     jobId: `${data.pullRequestId}-${data.headSha}`,
     attempts: 3,
     backoff: { type: "exponential", delay: 5_000 },
-    removeOnComplete: { age: 86_400 },
+    removeOnComplete: { age: 300 },
     removeOnFail: { age: 604_800 },
   });
 }
