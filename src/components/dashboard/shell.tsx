@@ -12,8 +12,6 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { buttonClasses, iconButtonClasses, toneDotClasses } from "@/lib/ui";
 import type { RepoSummary } from "@/lib/db/repo-stats";
 
-const SIDEBAR_COLLAPSED_KEY = "sidebar-collapsed";
-
 const HEALTH_TONE: Record<RepoSummary["health"], Parameters<typeof toneDotClasses>[0]> = {
   critical: "danger",
   attention: "warning",
@@ -150,25 +148,6 @@ function SidebarContent({
   );
 }
 
-/** Docked toggle handle riding the sidebar's edge — same screen position whether expanded or collapsed, so it's never lost. */
-function CollapseToggle({ collapsed, onClick }: { collapsed: boolean; onClick: () => void }) {
-  return (
-    <motion.button
-      type="button"
-      onClick={onClick}
-      animate={{ left: collapsed ? 12 : 272 - 12 }}
-      transition={{ duration: 0.22, ease: "easeInOut" }}
-      className="absolute top-16 z-20 flex h-6 w-6 items-center justify-center rounded-[2px] border border-border bg-card text-subtle transition-colors hover:border-accent hover:text-foreground active:bg-surface-hover"
-      aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-    >
-      <ChevronLeft
-        className={`h-3.5 w-3.5 transition-transform duration-200 ${collapsed ? "rotate-180" : ""}`}
-        aria-hidden="true"
-      />
-    </motion.button>
-  );
-}
-
 export function DashboardShell({
   repos,
   installUrl,
@@ -186,10 +165,6 @@ export function DashboardShell({
 }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [desktopCollapsed, setDesktopCollapsed] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
-  });
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const paletteRef = useRef<CommandPaletteHandle>(null);
 
@@ -201,10 +176,6 @@ export function DashboardShell({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileOpen]);
-
-  useEffect(() => {
-    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, desktopCollapsed ? "1" : "0");
-  }, [desktopCollapsed]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -226,17 +197,9 @@ export function DashboardShell({
   return (
     <div className="flex flex-1">
       <CommandPalette ref={paletteRef} repos={repos} installUrl={installUrl} />
-      <div className="relative hidden lg:flex">
-        <motion.aside
-          animate={{ width: desktopCollapsed ? 0 : 272 }}
-          transition={{ duration: 0.22, ease: "easeInOut" }}
-          className={`shrink-0 overflow-hidden ${desktopCollapsed ? "" : "border-r border-border"}`}
-        >
-          <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} />
-        </motion.aside>
-
-        <CollapseToggle collapsed={desktopCollapsed} onClick={() => setDesktopCollapsed((v) => !v)} />
-      </div>
+      <aside className="hidden shrink-0 border-r border-border lg:flex">
+        <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} />
+      </aside>
 
       <AnimatePresence>
         {mobileOpen && (
