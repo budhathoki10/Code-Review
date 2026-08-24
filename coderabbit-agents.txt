@@ -1,0 +1,132 @@
+CodeRabbit — Agents / Features, Re-verified
+(Original version compiled 2026-08-24 contained real errors — corrected
+after re-checking against CodeRabbit's own docs and search results. See
+CORRECTIONS section at the bottom for exactly what changed and why.)
+
+IMPORTANT: "7 agents running per review" was NOT something CodeRabbit
+publishes as an official architecture list. That framing was this
+document's own synthesis from scattered sources. What follows is organized
+by confidence: confirmed via CodeRabbit's own docs/blog, vs. less certain
+(one third-party source, unconfirmed on re-check).
+
+===========================================================
+CONFIRMED — CodeRabbit's own docs/blog
+===========================================================
+
+REVIEW
+   Agentic code review that uses repository context (not just the diff) to
+   evaluate intent and cross-file impact across the codebase.
+   Source: coderabbit.ai/guides/agentic-code-review
+
+CHAT
+   Agentic chat, built into the PR thread — a developer can reply to a
+   finding or ask a question and get a response, including feedback that
+   can become a stored "learning."
+   Source: coderabbit.ai/guides/agentic-code-review
+
+PRE-MERGE CHECKS
+   "Agentic" pass/fail validation — docstring coverage thresholds, PR title
+   validation, PR description validation, linked-issue verification, plus
+   custom org-defined rules. "Agentic" implies real reasoning (e.g. judging
+   whether a PR description actually matches its diff), not pure threshold
+   math — this project's original cost estimate ("near zero, rule-based")
+   was wrong.
+   Source: docs.coderabbit.ai/pr-reviews/pre-merge-checks,
+   coderabbit.ai/blog/pre-merge-checks-built-in-and-custom-pr-enforced
+
+FINISHING TOUCHES
+   Post-review polish actions: docstring generation (scans with ast-grep,
+   matches your codebase's existing doc format), unit test generation,
+   merge conflict resolution, and code simplification. Configurable per-repo
+   in .coderabbit.yaml (finishing_touches.docstrings, etc). Available at
+   Pro+ tier.
+   CORRECTION: earlier version of this file wrongly described this as the
+   PR summary/walkthrough/sequence-diagram feature. That is a different,
+   separate feature — not Finishing Touches.
+   Source: docs.coderabbit.ai/finishing-touches/docstrings,
+   coderabbit.ai/blog/why-do-that-stuff-manually-when-you-have-custom-
+   finishing-touch-recipes
+
+INVESTIGATION (cross-repo)
+   An autonomous research agent that actively explores linked repositories
+   in real time — explicitly framed by CodeRabbit as "code review across
+   repository boundaries is an investigation problem, not a retrieval
+   problem" (their stated argument against pre-indexed RAG).
+   Source: coderabbit.ai/blog/agentic-code-review-vs-rag-multi-repo-analysis
+
+ISSUE PLANNER ("Planning")
+   A separate product surface, not a per-review internal step: turns
+   Jira/Linear tickets into a structured coding plan (research, design
+   choices with rationale, phased tasks, agent-ready prompts), built on
+   Claude.
+   CORRECTION: earlier version of this file wrongly described "Planning" as
+   an internal step that decomposes every PR review into a task graph
+   before investigation starts. What's actually documented is this
+   ticket-to-plan product feature — a different thing.
+   Source: coderabbit.ai/blog/how-coderabbit-built-a-planning-layer-on-claude
+
+40+ STATIC ANALYSIS TOOLS
+   Bundled linters/SAST (shellcheck, markdownlint, biome, hadolint,
+   yamllint, and more), configured under reviews.tools in .coderabbit.yaml,
+   running alongside the AI review. Not LLM agents — deterministic tools
+   whose output merges into the same review.
+   Source: dev.to/rahulxsingh/coderabbit-configuration-coderabbityaml-
+   reference-5493 (config reference), coderabbit.ai docs
+
+===========================================================
+LESS CERTAIN — one third-party source, could not re-confirm
+===========================================================
+
+"VERIFICATION AGENT" / judge pass
+   A prior pass through this document described a dedicated step that
+   checks each candidate finding against gathered evidence before it's
+   allowed to post — framed as CodeRabbit's fix for single-model "echo
+   chamber" false positives. This came from one independent technical
+   write-up (not CodeRabbit's own docs), which could not be re-fetched this
+   session to confirm the exact wording. Treat this as a plausible
+   interpretation by that author, not confirmed vendor architecture.
+   Status: UNCONFIRMED on re-check.
+
+===========================================================
+TOKEN COST
+===========================================================
+CodeRabbit does not publish a per-feature token/cost breakdown anywhere.
+Any per-agent cost rating (as in the prior version of this file) is a
+guess, not a disclosed number.
+
+The one real, published number: peak accepted throughput of roughly 666
+tokens/sec (~40K tokens/min) at the GPT-4 tier, and the admission that
+50+ file PRs during peak hours hit their AI provider's rate limits hard
+enough to require building Aperture (a global token-bucket rate limiter
+with request prioritization) instead of just buying more capacity.
+Source: CodeRabbit engineering blog, "Squeezing Water from Stone."
+
+What's safe to say directionally: Review (repo-context-aware) and Chat are
+real LLM calls; Pre-Merge Checks is "agentic" so likely also an LLM call,
+just smaller; Finishing Touches actions (docstrings, tests, conflict
+resolution) are each their own generation calls, triggered on-demand rather
+than on every PR. A CodeRabbit-style review is doing more LLM work per PR
+than this project's single call — just not precisely quantifiable from
+public information.
+
+===========================================================
+CORRECTIONS LOG
+===========================================================
+On re-verification (this session), three claims in the original version of
+this file were found to be wrong or unconfirmed and have been corrected
+above:
+1. "Finishing Touches" — was described as PR summary/walkthrough/diagrams;
+   actually means docstrings/tests/conflict-resolution/simplification.
+2. "Planning model" — was described as an internal per-review task-graph
+   step; actually refers to the separate Issue Planner product (tickets to
+   coding plans).
+3. "7 agents running in parallel" — presented as if this were CodeRabbit's
+   own architecture diagram; it was this document's own synthesis, not a
+   list CodeRabbit publishes.
+The "Verification agent / judge pass" claim has been downgraded from
+stated-as-fact to explicitly unconfirmed, since its only source could not
+be re-checked this session.
+
+Sources referenced above: coderabbit.ai/docs, coderabbit.ai/blog,
+coderabbit.ai/guides, dev.to (community config reference). Re-verified
+2026-08-24.
