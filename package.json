@@ -11,7 +11,10 @@
     "worker": "tsx src/worker/review-worker.ts",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@auth/mongodb-adapter": "^3.11.3",
@@ -38,6 +41,7 @@
   },
   "devDependencies": {
     "@octokit/webhooks-types": "^7.6.1",
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
@@ -47,6 +51,8 @@
     "nodemon": "^3.1.14",
     "pino-pretty": "^13.0.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.11"
   }
 }

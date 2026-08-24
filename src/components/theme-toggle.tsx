@@ -29,7 +29,11 @@ export function ThemeToggle() {
   const [choice, setChoice] = useState<ThemeChoice>("system");
 
   useEffect(() => {
+    // Reading localStorage during the initial render (instead of here) would
+    // desync from the server-rendered HTML and trigger a hydration mismatch,
+    // since the server can't see the client's stored preference.
     const stored = window.localStorage.getItem("theme");
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (stored === "light" || stored === "dark") setChoice(stored);
   }, []);
 
