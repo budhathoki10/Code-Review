@@ -211,7 +211,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     // partially available. Bounded by STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS below
     // rather than awaited unconditionally, so a slow static-analysis run
     // degrades gracefully instead of blocking the AI call indefinitely.
-    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines).catch(
+    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines, log).catch(
       (staticError) => {
         log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
         return [] as FindingDoc[];

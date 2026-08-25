@@ -8,10 +8,11 @@ import stylelint from "stylelint";
 import stylelintStandardConfig from "stylelint-config-standard";
 import htmlhintPkg from "htmlhint";
 import { createLinter as createActionLinter, type RunActionlint } from "actionlint";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { Logger } from "pino";
 import type { FindingDoc } from "@/lib/db/collections";
 import type { PullRequestFile } from "@/lib/github/diff";
 import { getFileContent } from "@/lib/github/file-content";
@@ -282,22 +283,102 @@ function extractFirstJsonValue<T>(text: string): T | undefined {
   return undefined;
 }
 
-/** Writes content to a real temp file (most CLI linters need a file path, not stdin) and runs a Node-launcher CLI tool against it. */
-function runCliTool(binPath: string, args: string[], content: string, extension: string): string {
+const MAX_CLI_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Writes content to a real temp file (most CLI linters need a file path,
+ * not stdin) and runs a Node-launcher CLI tool against it — via async
+ * `spawn`, not `spawnSync`. This runs inside a long-lived BullMQ worker
+ * that also has to keep responding to BullMQ's own stall-detection
+ * heartbeat; `spawnSync` freezes the entire process (all timers, all other
+ * async work) for as long as the subprocess takes, and two of these calls
+ * back-to-back on a slow file can add up past BullMQ's stall window even
+ * though each one individually finishes fine — the job then looks "dead"
+ * to BullMQ and can get picked up by a second worker while the first is
+ * still quietly finishing. `spawn` lets the event loop — and that
+ * heartbeat — keep running while the subprocess works in the background.
+ */
+/** Removes the per-call temp dir, swallowing (but logging) any failure — a cleanup error must never leak past a caller expecting a settled promise, and must never mask the original result. */
+function safeCleanup(dir: string, log: Logger): void {
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (err) {
+    log.warn({ err, dir }, "failed to clean up linter temp directory");
+  }
+}
+
+function runCliTool(binPath: string, args: string[], content: string, extension: string, log: Logger): Promise<string> {
   const dir = mkdtempSync(path.join(tmpdir(), "review-lint-"));
   const tempFile = path.join(dir, `file${extension}`);
-  try {
-    writeFileSync(tempFile, content, "utf-8");
+
+  return new Promise<string>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+    let settled = false;
+
+    const finish = (result: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      safeCleanup(dir, log);
+      resolve(result);
+    };
+
+    try {
+      writeFileSync(tempFile, content, "utf-8");
+    } catch (err) {
+      log.warn({ err, binPath }, "failed to write linter temp file");
+      safeCleanup(dir, log);
+      resolve("");
+      return;
+    }
+
     const finalArgs = args.map((a) => (a === "__FILE__" ? tempFile : a));
-    const result = spawnSync(process.execPath, [binPath, ...finalArgs], {
-      encoding: "utf-8",
-      timeout: 10_000,
-      maxBuffer: 10 * 1024 * 1024,
+    const child = spawn(process.execPath, [binPath, ...finalArgs]);
+
+    // Manual timeout — spawn() has no built-in equivalent to spawnSync's
+    // `timeout` option. Same 10s ceiling as before: a safety net for a
+    // hung/pathological run, not the expected duration.
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(stdout);
+    }, 10_000);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < MAX_CLI_OUTPUT_BYTES) {
+        stdout += chunk.toString("utf-8");
+      } else if (!truncated) {
+        truncated = true;
+        log.warn({ binPath }, "linter stdout exceeded the buffer cap, output truncated");
+      }
     });
-    return result.stdout ?? "";
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    // Captured for diagnostics only — never merged into stdout, since that
+    // would risk corrupting the JSON extractFirstJsonValue expects to find.
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8");
+    });
+    child.on("close", (code, signal) => {
+      // Most of these tools use 0 = clean, 1 = findings reported — both
+      // normal, but only if stdout actually has content: since every call
+      // here is `spawn(process.execPath, [binPath, ...])`, a binPath that
+      // doesn't resolve is Node's own "Cannot find module" error, not the
+      // linter's — and Node exits with code 1 for that too, indistinguishable
+      // from "the linter ran and found something" by code alone. Requiring
+      // non-empty stdout for the code-1 case catches that: a real
+      // module-not-found produces no stdout at all, just a stack trace on
+      // stderr.
+      const looksLikeNormalFindingsExit = code === 1 && stdout.trim().length > 0;
+      if (code !== 0 && !looksLikeNormalFindingsExit) {
+        log.warn({ binPath, code, signal, stderr: stderr.slice(0, 2000) }, "linter exited non-cleanly");
+      }
+      finish(stdout);
+    });
+    child.on("error", (err) => {
+      log.warn({ err, binPath }, "linter subprocess failed to spawn");
+      finish("");
+    });
+  });
 }
 
 function scanForSecrets(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
@@ -352,9 +433,15 @@ interface BiomeOutput {
   diagnostics: { severity: string; message: string; category: string; location: { start: { line: number } } }[];
 }
 
-function scanBiome(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
+async function scanBiome(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
   const ext = path.extname(filename);
-  const output = runCliTool(nodeModulesBin("@biomejs/biome/bin/biome"), ["lint", "--reporter=json", "__FILE__"], content, ext);
+  const output = await runCliTool(
+    nodeModulesBin("@biomejs/biome/bin/biome"),
+    ["lint", "--reporter=json", "__FILE__"],
+    content,
+    ext,
+    log,
+  );
   const parsed = extractFirstJsonValue<BiomeOutput>(output);
   if (!parsed) return [];
 
@@ -380,9 +467,9 @@ interface OxlintOutput {
   diagnostics: { message: string; code: string; severity: string; labels: { span: { line: number } }[] }[];
 }
 
-function scanOxlint(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
+async function scanOxlint(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
   const ext = path.extname(filename);
-  const output = runCliTool(nodeModulesBin("oxlint/bin/oxlint"), ["--format=json", "__FILE__"], content, ext);
+  const output = await runCliTool(nodeModulesBin("oxlint/bin/oxlint"), ["--format=json", "__FILE__"], content, ext, log);
   const parsed = extractFirstJsonValue<OxlintOutput>(output);
   if (!parsed) return [];
 
@@ -468,8 +555,8 @@ async function scanCss(content: string, filename: string, commentableLines: Set<
 }
 
 /** Biome also lints JSON — the only tool in this file that covers that file type. */
-function scanJson(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
-  return scanBiome(content, filename, commentableLines);
+function scanJson(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
+  return scanBiome(content, filename, commentableLines, log);
 }
 
 /**
@@ -538,8 +625,14 @@ interface SquawkFinding {
 }
 
 /** Squawk — Postgres migration linter (lock timeouts, unsafe NOT NULL additions, missing IF NOT EXISTS, etc). */
-function scanSql(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
-  const output = runCliTool(nodeModulesBin("squawk-cli/js/bin/squawk"), ["--reporter", "json", "__FILE__"], content, ".sql");
+async function scanSql(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
+  const output = await runCliTool(
+    nodeModulesBin("squawk-cli/js/bin/squawk"),
+    ["--reporter", "json", "__FILE__"],
+    content,
+    ".sql",
+    log,
+  );
   const parsed = extractFirstJsonValue<SquawkFinding[]>(output);
   if (!parsed) return [];
 
@@ -578,12 +671,13 @@ interface BufFinding {
  * subset — same "use the vendor's default" posture as everywhere else in
  * this file — but worth knowing if buf findings look off.
  */
-function scanProto(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
-  const output = runCliTool(
+async function scanProto(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
+  const output = await runCliTool(
     nodeModulesBin("@bufbuild/buf/bin/buf"),
     ["lint", "__FILE__", "--error-format=json"],
     content,
     ".proto",
+    log,
   );
 
   const findings: FindingDoc[] = [];
@@ -623,25 +717,30 @@ function isSupportedFile(filename: string): boolean {
   );
 }
 
-async function scanFile(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
+async function scanFile(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
   if (WORKFLOW_FILE.test(filename)) return scanWorkflow(content, filename, commentableLines);
   if (MARKDOWN_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanMarkdown(content, filename, commentableLines);
   if (CSS_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanCss(content, filename, commentableLines);
   if (HTML_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanHtml(content, filename, commentableLines);
-  if (JSON_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanJson(content, filename, commentableLines);
-  if (SQL_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanSql(content, filename, commentableLines);
-  if (PROTO_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanProto(content, filename, commentableLines);
+  if (JSON_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanJson(content, filename, commentableLines, log);
+  if (SQL_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanSql(content, filename, commentableLines, log);
+  if (PROTO_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanProto(content, filename, commentableLines, log);
   if (JS_EXTENSIONS.some((ext) => filename.endsWith(ext))) {
     // Three JS/TS linters run on the same file, as explicitly requested —
     // real overlap exists (all three can flag the same == vs === issue),
     // but each also has rules the others don't (Biome's own rule set,
     // oxlint's, ESLint+typescript-eslint's), so no single one subsumes the
-    // others.
-    return [
-      ...scanJs(content, filename, commentableLines),
-      ...scanBiome(content, filename, commentableLines),
-      ...scanOxlint(content, filename, commentableLines),
-    ];
+    // others. ESLint runs in-process (cheap, no need to parallelize);
+    // Biome and oxlint each spawn a subprocess, so they run concurrently
+    // via Promise.all rather than one after another — halving the
+    // event-loop-blocked window for this file versus running them in
+    // sequence.
+    const eslintFindings = scanJs(content, filename, commentableLines);
+    const [biomeFindings, oxlintFindings] = await Promise.all([
+      scanBiome(content, filename, commentableLines, log),
+      scanOxlint(content, filename, commentableLines, log),
+    ]);
+    return [...eslintFindings, ...biomeFindings, ...oxlintFindings];
   }
   return [];
 }
@@ -667,6 +766,7 @@ export async function runStaticAnalysis(
   headSha: string,
   files: PullRequestFile[],
   commentableLines: Map<string, Set<number>>,
+  log: Logger,
 ): Promise<FindingDoc[]> {
   const candidates = files
     .filter((file) => file.status !== "removed")
@@ -693,7 +793,7 @@ export async function runStaticAnalysis(
       }
       if (findings.length >= MAX_FINDINGS) break;
 
-      for (const finding of await scanFile(content, file.filename, lines)) {
+      for (const finding of await scanFile(content, file.filename, lines, log)) {
         if (findings.length >= MAX_FINDINGS) break;
         findings.push(finding);
       }
