@@ -8,7 +8,7 @@ import stylelint from "stylelint";
 import stylelintStandardConfig from "stylelint-config-standard";
 import htmlhintPkg from "htmlhint";
 import { createLinter as createActionLinter, type RunActionlint } from "actionlint";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -282,22 +282,64 @@ function extractFirstJsonValue<T>(text: string): T | undefined {
   return undefined;
 }
 
-/** Writes content to a real temp file (most CLI linters need a file path, not stdin) and runs a Node-launcher CLI tool against it. */
-function runCliTool(binPath: string, args: string[], content: string, extension: string): string {
+const MAX_CLI_OUTPUT_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Writes content to a real temp file (most CLI linters need a file path,
+ * not stdin) and runs a Node-launcher CLI tool against it — via async
+ * `spawn`, not `spawnSync`. This runs inside a long-lived BullMQ worker
+ * that also has to keep responding to BullMQ's own stall-detection
+ * heartbeat; `spawnSync` freezes the entire process (all timers, all other
+ * async work) for as long as the subprocess takes, and two of these calls
+ * back-to-back on a slow file can add up past BullMQ's stall window even
+ * though each one individually finishes fine — the job then looks "dead"
+ * to BullMQ and can get picked up by a second worker while the first is
+ * still quietly finishing. `spawn` lets the event loop — and that
+ * heartbeat — keep running while the subprocess works in the background.
+ */
+function runCliTool(binPath: string, args: string[], content: string, extension: string): Promise<string> {
   const dir = mkdtempSync(path.join(tmpdir(), "review-lint-"));
   const tempFile = path.join(dir, `file${extension}`);
-  try {
-    writeFileSync(tempFile, content, "utf-8");
+
+  return new Promise<string>((resolve) => {
+    let stdout = "";
+    let settled = false;
+
+    const cleanup = () => rmSync(dir, { recursive: true, force: true });
+
+    const finish = (result: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(result);
+    };
+
+    try {
+      writeFileSync(tempFile, content, "utf-8");
+    } catch {
+      cleanup();
+      resolve("");
+      return;
+    }
+
     const finalArgs = args.map((a) => (a === "__FILE__" ? tempFile : a));
-    const result = spawnSync(process.execPath, [binPath, ...finalArgs], {
-      encoding: "utf-8",
-      timeout: 10_000,
-      maxBuffer: 10 * 1024 * 1024,
+    const child = spawn(process.execPath, [binPath, ...finalArgs]);
+
+    // Manual timeout — spawn() has no built-in equivalent to spawnSync's
+    // `timeout` option. Same 10s ceiling as before: a safety net for a
+    // hung/pathological run, not the expected duration.
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(stdout);
+    }, 10_000);
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (stdout.length < MAX_CLI_OUTPUT_BYTES) stdout += chunk.toString("utf-8");
     });
-    return result.stdout ?? "";
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+    child.on("close", () => finish(stdout));
+    child.on("error", () => finish(""));
+  });
 }
 
 function scanForSecrets(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
@@ -352,9 +394,9 @@ interface BiomeOutput {
   diagnostics: { severity: string; message: string; category: string; location: { start: { line: number } } }[];
 }
 
-function scanBiome(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
+async function scanBiome(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
   const ext = path.extname(filename);
-  const output = runCliTool(nodeModulesBin("@biomejs/biome/bin/biome"), ["lint", "--reporter=json", "__FILE__"], content, ext);
+  const output = await runCliTool(nodeModulesBin("@biomejs/biome/bin/biome"), ["lint", "--reporter=json", "__FILE__"], content, ext);
   const parsed = extractFirstJsonValue<BiomeOutput>(output);
   if (!parsed) return [];
 
@@ -380,9 +422,9 @@ interface OxlintOutput {
   diagnostics: { message: string; code: string; severity: string; labels: { span: { line: number } }[] }[];
 }
 
-function scanOxlint(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
+async function scanOxlint(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
   const ext = path.extname(filename);
-  const output = runCliTool(nodeModulesBin("oxlint/bin/oxlint"), ["--format=json", "__FILE__"], content, ext);
+  const output = await runCliTool(nodeModulesBin("oxlint/bin/oxlint"), ["--format=json", "__FILE__"], content, ext);
   const parsed = extractFirstJsonValue<OxlintOutput>(output);
   if (!parsed) return [];
 
@@ -468,7 +510,7 @@ async function scanCss(content: string, filename: string, commentableLines: Set<
 }
 
 /** Biome also lints JSON — the only tool in this file that covers that file type. */
-function scanJson(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
+function scanJson(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
   return scanBiome(content, filename, commentableLines);
 }
 
@@ -538,8 +580,8 @@ interface SquawkFinding {
 }
 
 /** Squawk — Postgres migration linter (lock timeouts, unsafe NOT NULL additions, missing IF NOT EXISTS, etc). */
-function scanSql(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
-  const output = runCliTool(nodeModulesBin("squawk-cli/js/bin/squawk"), ["--reporter", "json", "__FILE__"], content, ".sql");
+async function scanSql(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
+  const output = await runCliTool(nodeModulesBin("squawk-cli/js/bin/squawk"), ["--reporter", "json", "__FILE__"], content, ".sql");
   const parsed = extractFirstJsonValue<SquawkFinding[]>(output);
   if (!parsed) return [];
 
@@ -578,8 +620,8 @@ interface BufFinding {
  * subset — same "use the vendor's default" posture as everywhere else in
  * this file — but worth knowing if buf findings look off.
  */
-function scanProto(content: string, filename: string, commentableLines: Set<number>): FindingDoc[] {
-  const output = runCliTool(
+async function scanProto(content: string, filename: string, commentableLines: Set<number>): Promise<FindingDoc[]> {
+  const output = await runCliTool(
     nodeModulesBin("@bufbuild/buf/bin/buf"),
     ["lint", "__FILE__", "--error-format=json"],
     content,
@@ -636,12 +678,17 @@ async function scanFile(content: string, filename: string, commentableLines: Set
     // real overlap exists (all three can flag the same == vs === issue),
     // but each also has rules the others don't (Biome's own rule set,
     // oxlint's, ESLint+typescript-eslint's), so no single one subsumes the
-    // others.
-    return [
-      ...scanJs(content, filename, commentableLines),
-      ...scanBiome(content, filename, commentableLines),
-      ...scanOxlint(content, filename, commentableLines),
-    ];
+    // others. ESLint runs in-process (cheap, no need to parallelize);
+    // Biome and oxlint each spawn a subprocess, so they run concurrently
+    // via Promise.all rather than one after another — halving the
+    // event-loop-blocked window for this file versus running them in
+    // sequence.
+    const eslintFindings = scanJs(content, filename, commentableLines);
+    const [biomeFindings, oxlintFindings] = await Promise.all([
+      scanBiome(content, filename, commentableLines),
+      scanOxlint(content, filename, commentableLines),
+    ]);
+    return [...eslintFindings, ...biomeFindings, ...oxlintFindings];
   }
   return [];
 }
