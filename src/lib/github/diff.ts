@@ -77,6 +77,8 @@ export async function getIncrementalDiff(
 ): Promise<PullRequestDiff> {
   const octokit = await getInstallationOctokit(installationId);
 
+  console.log(`testing incremental review: comparing ${baseSha}...${headSha}`);
+
   const { data } = await octokit.request("GET /repos/{owner}/{repo}/compare/{basehead}", {
     owner,
     repo,
