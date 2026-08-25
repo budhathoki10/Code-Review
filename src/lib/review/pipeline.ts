@@ -136,7 +136,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   // calling the Ai model to generate  the review
   const [aiResult, staticFindings] = await Promise.all([
     generateReview(diff.diffText, { customInstructions: repoConfig?.customInstructions }),
-    runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines).catch(
+    runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines, log).catch(
       (staticError) => {
         log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
         return [] as FindingDoc[];
