@@ -19,6 +19,18 @@ import type { ReviewJobData } from "@/lib/queue/review-queue";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
+/**
+ * How long the AI call waits for static analysis to finish before giving up
+ * on including its findings as context (see runReviewPipeline). Bounds the
+ * cost of the Phase 1 context-build change: without this cap, a slow
+ * static-analysis run (multiple CLI-tool subprocess spawns) would fully
+ * serialize in front of the AI call and regress PR #34's parallelism win.
+ * A review that misses this window still gets its static findings in the
+ * final posted list — it just didn't have them available for the AI's own
+ * "don't repeat these" context that one time.
+ */
+const STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS = Number(process.env.STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS ?? 8_000);
+
 function meetsThreshold(severity: FindingDoc["severity"], threshold: FindingDoc["severity"]): boolean {
   return SEVERITY_ORDER.indexOf(severity) >= SEVERITY_ORDER.indexOf(threshold);
 }
@@ -82,8 +94,9 @@ function buildCheckSummary(findings: FindingDoc[]): string {
 }
 
 /**
- * The Phase 2–6 pipeline (fetch diff → static analysis + AI in parallel →
- * post comment → inline comments → check run), run by the BullMQ worker for
+ * The Phase 2–6 pipeline (fetch diff → static analysis (bounded wait) → AI,
+ * fed the static findings + PR title/description as context → post comment
+ * → inline comments → check run), run by the BullMQ worker for
  * a single job. Diff fetch and AI generation failures are left to throw —
  * the caller (the worker) lets BullMQ retry those. A too-large diff is a
  * permanent, non-retryable failure, so it's written straight to the review
@@ -96,7 +109,7 @@ function buildCheckSummary(findings: FindingDoc[]): string {
  * fails the job/retries the whole pipeline.
  */
 export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promise<void> {
-  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber } = data;
+  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber, prTitle, prBody } = data;
   const reviewsCol = await reviews();
 
   const [repoConfig, existingReview] = await Promise.all([
@@ -132,17 +145,37 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
 
   const commentableLines = computeCommentableLines(diff.files);
 
-  log.info({ reviewId }, "calling the model and running static analysis...");
-  // calling the Ai model to generate  the review
-  const [aiResult, staticFindings] = await Promise.all([
-    generateReview(diff.diffText, { customInstructions: repoConfig?.customInstructions }),
-    runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines).catch(
-      (staticError) => {
-        log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
-        return [] as FindingDoc[];
-      },
-    ),
+  log.info({ reviewId }, "running static analysis, then calling the model...");
+
+  // Not run inside the same Promise.all as the AI call below: the AI call
+  // now wants static analysis's findings as context (see generateReview's
+  // staticFindings option), so it has to start after they're at least
+  // partially available. Bounded by STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS below
+  // rather than awaited unconditionally, so a slow static-analysis run
+  // degrades gracefully instead of blocking the AI call indefinitely.
+  const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines).catch(
+    (staticError) => {
+      log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
+      return [] as FindingDoc[];
+    },
+  );
+
+  const staticFindingsForContext = await Promise.race([
+    staticFindingsPromise,
+    new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
   ]);
+
+  const aiResult = await generateReview(diff.diffText, {
+    customInstructions: repoConfig?.customInstructions,
+    staticFindings: staticFindingsForContext,
+    prTitle,
+    prBody: prBody ?? undefined,
+  });
+
+  // Always wait for the real result for the final merged findings list —
+  // posting/gating correctness is unaffected even when the race above timed
+  // out and the AI call proceeded without seeing static findings that time.
+  const staticFindings = await staticFindingsPromise;
   log.info(
     { reviewId, aiFindings: aiResult.findings.length, staticFindings: staticFindings.length },
     "model + static analysis returned",

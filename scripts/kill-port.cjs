@@ -19,7 +19,6 @@ for (const line of output.split("\n")) {
     pids.add(parts[parts.length - 1]);
   }
 }
-
 for (const pid of pids) {
   try {
     execSync(`taskkill /PID ${pid} /F /T`, { stdio: "ignore" });

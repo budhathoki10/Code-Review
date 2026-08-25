@@ -139,4 +139,60 @@ describe("generateReview", () => {
       expect(userMessage?.content).toContain("ignore generated files");
     }
   });
+
+  it("includes static-analysis findings in both calls' context, framed as already-reported", async () => {
+    const generateReview = await loadGenerateReview();
+    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+
+    await generateReview("diff --git a/x b/x", {
+      staticFindings: [
+        {
+          severity: "medium",
+          category: "quality",
+          file: "src/foo.ts",
+          line: 12,
+          title: "ESLint: eqeqeq",
+          explanation: "Expected '===' and instead saw '=='.",
+        },
+      ],
+    });
+
+    for (const call of createMock.mock.calls) {
+      const params = call[0] as { messages: { role: string; content: string }[] };
+      const userMessage = params.messages.find((m) => m.role === "user");
+      expect(userMessage?.content).toContain("AUTOMATED LINT/STATIC-ANALYSIS FINDINGS");
+      expect(userMessage?.content).toContain("src/foo.ts:12 — ESLint: eqeqeq");
+    }
+  });
+
+  it("includes PR title and description in both calls' context", async () => {
+    const generateReview = await loadGenerateReview();
+    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+
+    await generateReview("diff --git a/x b/x", {
+      prTitle: "Fix login button on mobile",
+      prBody: "The submit button was unreachable below the fold on small screens.",
+    });
+
+    for (const call of createMock.mock.calls) {
+      const params = call[0] as { messages: { role: string; content: string }[] };
+      const userMessage = params.messages.find((m) => m.role === "user");
+      expect(userMessage?.content).toContain("PR TITLE: Fix login button on mobile");
+      expect(userMessage?.content).toContain("unreachable below the fold");
+    }
+  });
+
+  it("omits the static-findings and PR-metadata sections entirely when not provided", async () => {
+    const generateReview = await loadGenerateReview();
+    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+
+    await generateReview("diff --git a/x b/x");
+
+    for (const call of createMock.mock.calls) {
+      const params = call[0] as { messages: { role: string; content: string }[] };
+      const userMessage = params.messages.find((m) => m.role === "user");
+      expect(userMessage?.content).not.toContain("AUTOMATED LINT/STATIC-ANALYSIS FINDINGS");
+      expect(userMessage?.content).not.toContain("PR TITLE:");
+    }
+  });
 });

@@ -1,0 +1,169 @@
+CodeRabbit Architecture — Source Notes + Proportionate Adaptation Plan
+(Compiled 2026-08-25, sourced from "How CodeRabbit Actually Works," The AI
+Engineer / Substack — Medium original blocked fetch with 403, mirror used
+instead, same author/content. Cross-reference: coderabbit-agents.txt for the
+earlier, separately-verified feature-level research.)
+
+===========================================================
+PART 1 — WHAT THE ARTICLE ACTUALLY SAYS (source notes)
+===========================================================
+
+Five-stage pipeline, in order:
+
+1. WEBHOOK + QUEUE
+   PR opens (GitHub/GitLab/Azure DevOps/Bitbucket) -> webhook hits a Cloud Run
+   service -> checks subscription -> enqueues on Google Cloud Tasks. Absorbs
+   burst traffic. Peak: 10 review requests/sec across 200+ Cloud Run instances.
+
+2. SANDBOX
+   A separate service clones the repo into a disposable microVM: 1-hour
+   timeout, 8 vCPUs, 32 GiB RAM, repo held in memory. Builds the project,
+   runs 20+ linters/static-analysis tools simultaneously. Two-layer
+   isolation (microVM + Jailkit-confined processes) because the repo may
+   contain untrusted external-contributor code.
+
+3. CONTEXT BUILD (where most compute goes — sets review quality)
+   Assembles 10-15 data points: diff, a fresh structural code graph (built
+   per review, not pre-indexed), linked Jira/Linear tickets, CI failure
+   logs, lint output, team's accumulated review preferences (LanceDB vector
+   store — used for cross-PR natural-language memory, not primary context).
+   Cheap models (GPT-4.1 nano/mini) compress each input before the frontier
+   model sees it: a 4,000-line file -> just the touched functions; a long
+   ticket thread -> its one requirement; verbose logs -> the failing lines.
+
+4. AGENTIC REVIEW (investigative core)
+   A frontier reasoning model plans a task graph from the diff (e.g. "check
+   migration backward-compat," "verify endpoint handles auth," "trace
+   function across the repo") — these tasks run as parallel branches. Each
+   branch investigates by having the model WRITE AND RUN SHELL COMMANDS in
+   the sandbox directly (cat, grep, ast-grep, curl to vuln databases, gh
+   CLI) — no predefined tool schemas or MCP. Recursion capped at a fixed
+   (undisclosed) depth. Can run tests against the change, search the web to
+   verify unfamiliar libraries.
+
+5. JUDGE + POST
+   A separate judge model scores each finding against the gathered context
+   and drops findings it can't ground in evidence — the primary
+   false-positive filter. Exact scoring mechanism is NOT disclosed publicly
+   beyond this description. Surviving findings post as: summary, inline
+   comments, one-click fixes, an analysis trail of the commands behind each
+   finding.
+
+MODEL ENSEMBLE: "seven or eight models per review," routing hidden from
+users — cheap models for compression, frontier models for investigation,
+a judge model for verification. Specific model identities undisclosed.
+Cost discipline: routing cheap subtasks to cheap models keeps flat
+per-seat pricing viable — requires in-house eval infra to know which model
+wins which subtask (also undisclosed in detail).
+
+LATENCY: 1-5 minutes before first comment — stated as INTENTIONAL, not a
+limitation to fix: "reviews run in CI, no one waits at chat... extra passes
+reduce noise." Explicitly ruled out for live pair-programming latency
+requirements.
+
+SCALE: 100,000+ daily users, 8,000+ paying customers, $15M+ ARR. Groupon:
+review-to-production time dropped from 86 hours to 39 minutes after
+adoption.
+
+HONESTY CHECK — even this doesn't produce clean output. An independent
+audit cited in the article classified CodeRabbit's actual comments as:
+  35% genuine improvements
+  21% nitpicks
+  15% useless
+  remainder split between thoughtful notes and wrong assumptions
+So a full, correctly-built version of this architecture still produces
+real noise. It is not a ceiling we'd cleanly hit by copying the shape.
+
+STATED DESIGN TARGET (their own scoping, not universal): "high PR volume
+and a codebase where changes routinely reach across files." Not
+necessarily this project's current profile.
+
+===========================================================
+PART 2 — WHY "IMPLEMENT EXACTLY LIKE THIS" ISN'T THE RIGHT GOAL
+===========================================================
+
+1. It's not fully possible. The judge model's exact scoring rubric, the
+   code-graph construction algorithm, and the exact model-routing logic
+   are explicitly undisclosed in the source article. We can copy the
+   *stage shape*, not the internals — those were never public.
+
+2. Infra scale mismatch. Their sandbox stage alone is a fleet of
+   disposable microVMs (8 vCPU/32GiB each) behind 200+ Cloud Run instances,
+   funded by $15M+ ARR and 8,000+ paying customers. This project runs a
+   single BullMQ worker on a free-tier host with one NVIDIA API key. A
+   literal port isn't a coding task, it's a different infrastructure
+   budget.
+
+3. Security. "The model writes and executes its own shell commands"
+   requires the two-layer isolation (microVM + Jailkit) they built
+   specifically because it's genuinely dangerous otherwise — letting an
+   LLM run arbitrary commands against a live checkout without that
+   isolation is a real vulnerability class, not a corner to cut casually.
+
+4. Cost. 7-8 model calls per review vs. our current 2 is a real multiplier
+   on NVIDIA API spend — that's a budget decision, not a free upgrade.
+
+5. Their own numbers say it's still noisy. 15% "useless," 21% "nitpicks."
+   Chasing an exact replica doesn't buy a clean result even in principle.
+
+None of this means "don't learn from it" — the STAGE SHAPE (gather context
+seriously before reasoning; investigate across files, not just the diff;
+verify findings before they're shown) is genuinely good design and worth
+adopting. The SCALE and the UNDISCLOSED INTERNALS are what make "exactly"
+the wrong word.
+
+===========================================================
+PART 3 — PROPORTIONATE ADAPTATION PLAN (phased, do NOT build all at once)
+===========================================================
+
+Already have (no change needed):
+  - Webhook + queue -> src/app/api/github/webhook/route.ts + BullMQ
+    (review-queue.ts). Structurally equivalent already.
+  - A form of "investigation fan-out / judge fan-in" -> src/lib/ai/review.ts
+    generateReview's findings/verdict split + reconcileVerdict. Same
+    *shape* as their fan-out/Judge, far smaller scale (2 branches vs N
+    dynamically-planned tasks; 1 deterministic rule vs a model).
+
+PHASE 1 — Context Build (highest quality lever, lowest risk/cost, no
+sandbox needed). Directly closes the earlier AI/linter duplicate-finding
+gap as a side effect.
+  a) Feed runStaticAnalysis's findings into the AI findings-call prompt as
+     input context (not just concatenated after the fact as today) — this
+     is our version of "lint output" being part of the context bundle, and
+     it's the same fix that would prevent the "Kathmandu" duplicate-finding
+     problem discussed earlier.
+  b) Fetch full content of touched files (getFileContent already exists in
+     src/lib/github/file-content.ts, currently only used by
+     static-analysis.ts) so the AI sees surrounding function context, not
+     just diff hunks — a single-file approximation of their "code graph,"
+     no repo-wide graph construction needed.
+  c) Include the PR title/description (already in the webhook payload,
+     currently discarded) as context — our equivalent of "linked tickets,"
+     with zero new integration needed.
+  d) Explicitly OUT for now: CI failure logs (no CI log access wired),
+     team-learnings vector store (no LanceDB-equivalent, no stored
+     feedback loop yet).
+
+PHASE 2 — Bounded tool-calling investigation (medium effort/risk, NO raw
+shell execution).
+  Instead of a sandboxed shell, give the findings-call model a small
+  whitelisted set of tool functions via OpenAI tool-calling (e.g.
+  fetch_file(path), search_repo(pattern)), backed by the existing GitHub
+  API file-content fetcher, capped at a fixed number of calls per review.
+  Gets the "investigate beyond the diff" benefit without arbitrary command
+  execution or sandbox infrastructure.
+
+PHASE 3 — Optional verification/judge pass (cost-gated, not automatic).
+  Extend reconcileVerdict from a pure deterministic rule into an actual
+  lightweight verification call — but only trigger it conditionally (e.g.
+  more than N findings, or any critical/high severity present) to bound
+  the added cost, rather than a third call on every single review.
+
+PHASE 4 — Explicitly out of scope until usage/funding justifies it:
+  full sandboxed shell execution, real repo-wide code-graph construction,
+  hidden multi-model ensemble/routing, a LanceDB-style team-learning store.
+
+Rule for executing this plan: tackle ONE phase at a time, with explicit
+sign-off before starting the next — do not build phases speculatively
+ahead of actual need (matches this project's own stated engineering
+philosophy against over-engineering).

@@ -137,6 +137,8 @@ export async function POST(request: NextRequest) {
       repo: payload.repository.name,
       prNumber: payload.number,
       requestId: deliveryId,
+      prTitle: payload.pull_request.title,
+      prBody: payload.pull_request.body,
     });
     log.info({ reviewId }, "job enqueued");
   } catch (error) {
