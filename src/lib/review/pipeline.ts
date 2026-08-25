@@ -1,9 +1,9 @@
 // this is the main heart of the code
 import { ObjectId } from "mongodb";
 import type { Logger } from "pino";
-import { getPullRequestDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS } from "@/lib/github/diff";
+import { getPullRequestDiff, getIncrementalDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS, type PullRequestDiff } from "@/lib/github/diff";
 import { generateReview, type ReviewResult } from "@/lib/ai/review";
-import { formatSummaryComment, postSummaryComment } from "@/lib/github/comment";
+import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
 import { computeCommentableLines, mapFindingsToInlineComments } from "@/lib/github/diff-lines";
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
@@ -18,6 +18,18 @@ import {
 import type { ReviewJobData } from "@/lib/queue/review-queue";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
+
+/**
+ * How long the AI call waits for static analysis to finish before giving up
+ * on including its findings as context (see runReviewPipeline). Bounds the
+ * cost of the Phase 1 context-build change: without this cap, a slow
+ * static-analysis run (multiple CLI-tool subprocess spawns) would fully
+ * serialize in front of the AI call and regress PR #34's parallelism win.
+ * A review that misses this window still gets its static findings in the
+ * final posted list — it just didn't have them available for the AI's own
+ * "don't repeat these" context that one time.
+ */
+const STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS = Number(process.env.STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS ?? 8_000);
 
 function meetsThreshold(severity: FindingDoc["severity"], threshold: FindingDoc["severity"]): boolean {
   return SEVERITY_ORDER.indexOf(severity) >= SEVERITY_ORDER.indexOf(threshold);
@@ -72,6 +84,18 @@ function conclusionTitle(conclusion: CheckConclusion): string {
   return "No blocking issues";
 }
 
+/**
+ * Findings on files this delta didn't touch are still valid from the
+ * previous review — carried forward verbatim rather than re-scanned. A
+ * finding on a file the delta DID touch is dropped in favor of whatever a
+ * fresh scan of that file's new hunks finds (no attempt to track whether
+ * the old finding's exact line survived the edit — a deliberate v1
+ * simplification, not a correctness guarantee).
+ */
+export function filterCarriedForwardFindings(previousFindings: FindingDoc[], touchedFiles: Set<string>): FindingDoc[] {
+  return previousFindings.filter((f) => !touchedFiles.has(f.file));
+}
+
 function buildCheckSummary(findings: FindingDoc[]): string {
   if (findings.length === 0) return "No issues found.";
   const bySeverity = SEVERITY_ORDER.filter((severity) => findings.some((f) => f.severity === severity))
@@ -82,12 +106,22 @@ function buildCheckSummary(findings: FindingDoc[]): string {
 }
 
 /**
- * The Phase 2–6 pipeline (fetch diff → static analysis + AI in parallel →
- * post comment → inline comments → check run), run by the BullMQ worker for
+ * The Phase 2–6 pipeline (fetch diff → static analysis (bounded wait) → AI,
+ * fed the static findings + PR title/description as context → post comment
+ * → inline comments → check run), run by the BullMQ worker for
  * a single job. Diff fetch and AI generation failures are left to throw —
  * the caller (the worker) lets BullMQ retry those. A too-large diff is a
  * permanent, non-retryable failure, so it's written straight to the review
  * doc and returned instead of thrown.
+ *
+ * Incremental reviews: if a previous *completed* review exists for this PR,
+ * the diff is computed from that review's headSha forward (just the delta
+ * since last time) instead of against the PR's base branch — see
+ * getIncrementalDiff. Findings on files outside that delta carry forward
+ * from the previous review's findings list unchanged; only files actually
+ * touched since the last review get re-scanned. Falls back to the full
+ * base-diff behavior whenever there's no previous review, or the
+ * incremental compare call itself fails (e.g. after a force-push).
  *
  * Posting to GitHub (summary comment, inline comments, check run) is
  * intentionally isolated in its own try/catch blocks: the review is already
@@ -96,16 +130,35 @@ function buildCheckSummary(findings: FindingDoc[]): string {
  * fails the job/retries the whole pipeline.
  */
 export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promise<void> {
-  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber } = data;
+  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber, prTitle, prBody } = data;
   const reviewsCol = await reviews();
 
-  const [repoConfig, existingReview] = await Promise.all([
+  // first finding the most recent document
+  const [repoConfig, existingReview, previousReview] = await Promise.all([
     loadRepositoryConfig(pullRequestId),
     reviewsCol.findOne({ pullRequestId, headSha }),
+    reviewsCol.findOne({ pullRequestId, status: "completed" }, { sort: { createdAt: -1 } }),
   ]);
 
-  const diff = await getPullRequestDiff(githubInstallationId, owner, repo, prNumber);
-  log.info({ reviewId, fileCount: diff.fileCount, chars: diff.diffText.length }, "diff fetched");
+  let diff: PullRequestDiff;
+  // if there is previous diff then submit it to getIncrementalDiff else review normally 
+  if (previousReview) {
+    
+    //get the head id  and pass the previous heasha and current headsha
+    const incrementalDiff = await getIncrementalDiff(githubInstallationId, owner, repo, previousReview.headSha, headSha).catch(
+      (incrementalError) => {
+        log.warn({ reviewId, err: incrementalError }, "incremental diff failed, falling back to full PR diff");
+        return null;
+      },
+    );
+    diff = incrementalDiff ?? (await getPullRequestDiff(githubInstallationId, owner, repo, prNumber));
+  } else {
+    diff = await getPullRequestDiff(githubInstallationId, owner, repo, prNumber);
+  }
+  log.info(
+    { reviewId, fileCount: diff.fileCount, chars: diff.diffText.length, incremental: Boolean(previousReview) },
+    "diff fetched",
+  );
 
   if (diff.fileCount > MAX_DIFF_FILES || diff.diffText.length > MAX_DIFF_CHARS) {
     log.info({ reviewId }, "diff too large, skipping AI call");
@@ -132,24 +185,64 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
 
   const commentableLines = computeCommentableLines(diff.files);
 
-  log.info({ reviewId }, "calling the model and running static analysis...");
-  // calling the Ai model to generate  the review
-  const [aiResult, staticFindings] = await Promise.all([
-    generateReview(diff.diffText, { customInstructions: repoConfig?.customInstructions }),
-    runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines, log).catch(
+  const touchedFiles = new Set(diff.files.map((file) => file.filename));
+  const carriedForwardFindings = filterCarriedForwardFindings(previousReview?.findings ?? [], touchedFiles);
+
+  let aiResult: Pick<ReviewResult, "verdict" | "summary" | "findings">;
+  let staticFindings: FindingDoc[];
+
+  if (previousReview && diff.fileCount === 0) {
+    // The incremental delta is empty (e.g. an empty merge commit) — nothing
+    // to send the model, so reuse the previous review's verdict/summary
+    // rather than spending an AI call on zero changed files.
+    log.info({ reviewId }, "incremental diff is empty, reusing previous review's verdict/summary");
+    aiResult = {
+      verdict: previousReview.verdict ?? "comment",
+      summary: previousReview.summary ?? "No code changes since the last review.",
+      findings: [],
+    };
+    staticFindings = [];
+  } else {
+    log.info({ reviewId }, "running static analysis, then calling the model...");
+
+    // Not run inside the same Promise.all as the AI call below: the AI call
+    // now wants static analysis's findings as context (see generateReview's
+    // staticFindings option), so it has to start after they're at least
+    // partially available. Bounded by STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS below
+    // rather than awaited unconditionally, so a slow static-analysis run
+    // degrades gracefully instead of blocking the AI call indefinitely.
+    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines, log).catch(
       (staticError) => {
         log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
         return [] as FindingDoc[];
       },
-    ),
-  ]);
-  log.info(
-    { reviewId, aiFindings: aiResult.findings.length, staticFindings: staticFindings.length },
-    "model + static analysis returned",
-  );
+    );
 
-  const allFindings = [...aiResult.findings, ...staticFindings];
-// saves  the review in mongo db 
+    const staticFindingsForContext = await Promise.race([
+      staticFindingsPromise,
+      new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
+    ]);
+
+    aiResult = await generateReview(diff.diffText, {
+      customInstructions: repoConfig?.customInstructions,
+      staticFindings: staticFindingsForContext,
+      prTitle,
+      prBody: prBody ?? undefined,
+      repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
+    });
+
+    // Always wait for the real result for the final merged findings list —
+    // posting/gating correctness is unaffected even when the race above timed
+    // out and the AI call proceeded without seeing static findings that time.
+    staticFindings = await staticFindingsPromise;
+    log.info(
+      { reviewId, aiFindings: aiResult.findings.length, staticFindings: staticFindings.length },
+      "model + static analysis returned",
+    );
+  }
+
+  const allFindings = [...carriedForwardFindings, ...aiResult.findings, ...staticFindings];
+// saves  the review in mongo db
   await reviewsCol.updateOne(
     { pullRequestId, headSha },
     {
@@ -165,13 +258,34 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   const postingThreshold = resolvePostingThreshold(repoConfig);
   const postableFindings = allFindings.filter((f) => meetsThreshold(f.severity, postingThreshold));
 
+  // Only genuinely new findings from this delta get shown in the comment
+  // text (both the summary and inline comments) — carried-forward findings
+  // are still fully tracked in allFindings for the stored review doc and the
+  // check-run gate (a stale critical bug must still fail the check even if
+  // untouched this round), they just aren't re-announced in the comment
+  // every time nothing changed about them. On a first-ever review (no
+  // previousReview), touchedFiles covers the whole diff, so this is a no-op
+  // filter and every postable finding is shown, same as before.
+  const newPostableFindings = postableFindings.filter((f) => touchedFiles.has(f.file));
+
   try {
-    const commentBody = formatSummaryComment({ summary: aiResult.summary, findings: postableFindings });
-    const commentId = await postSummaryComment(githubInstallationId, owner, repo, prNumber, commentBody);
-    log.info({ reviewId, commentId }, "posted summary comment");
+    const commentBody = formatSummaryComment({ summary: aiResult.summary, findings: newPostableFindings });
+
+    let commentId: number;
+    if (previousReview?.githubCommentId) {
+      // Edit the existing comment in place rather than posting a new one —
+      // keeps a PR with many small pushes to one up-to-date comment instead
+      // of a new comment spammed on every push.
+      await updateSummaryComment(githubInstallationId, owner, repo, previousReview.githubCommentId, commentBody);
+      commentId = previousReview.githubCommentId;
+      log.info({ reviewId, commentId }, "updated summary comment in place");
+    } else {
+      commentId = await postSummaryComment(githubInstallationId, owner, repo, prNumber, commentBody);
+      log.info({ reviewId, commentId }, "posted summary comment");
+    }
     await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { githubCommentId: commentId } });
 
-    const { mappable, unmappable } = mapFindingsToInlineComments(postableFindings, commentableLines);
+    const { mappable, unmappable } = mapFindingsToInlineComments(newPostableFindings, commentableLines);
     log.info({ reviewId, mappable: mappable.length, unmappable: unmappable.length }, "inline mapping");
 
     if (mappable.length > 0) {

@@ -1,0 +1,83 @@
+Large PR Handling: Graphite vs. CodeRabbit
+Scenario: a PR touching 60 files, ~1,500 lines changed in each.
+Compiled 2026-08-24.
+
+===========================================================
+CODERABBIT — engineers around the problem
+===========================================================
+Treats this as a technical scaling problem to solve, and has published real
+detail on how:
+
+- COMPRESSION BEFORE THE MAIN MODEL: a cheaper model shrinks large files
+  down to the functions/sections actually touched, before the expensive
+  review model ever sees them.
+- SCOPE REDUCTION: path filters drop generated/vendored files from
+  consideration; "differential analysis" means a re-review only looks at
+  what changed since the LAST review, not the whole PR again.
+- SANDBOXED INVESTIGATION: an isolated microVM per review, with an agent
+  that runs its own grep/ast-grep-style commands to gather only the
+  context it decides it needs — not the whole repo.
+- RATE-LIMITED AT SCALE: their own engineering blog ("Squeezing Water from
+  Stone") admits 50+ file PRs at peak hours hit real AI-provider rate
+  limits — they built "Aperture," a token-bucket load balancer that
+  prioritizes requests (chat over review, paid over free), rather than
+  just buying more capacity.
+- OWN ADMITTED LIMIT: CodeRabbit's docs still recommend breaking a huge
+  review into smaller chunks / targeted comment threads — even their
+  engineering doesn't claim to fully solve arbitrarily large PRs, just to
+  degrade more gracefully than a naive tool.
+
+Bottom line: CodeRabbit assumes big PRs will keep happening and invests in
+infrastructure (compression, sandboxing, rate-limit orchestration) to cope.
+
+===========================================================
+GRAPHITE — designs the problem away
+===========================================================
+Does not publish a compression/chunking algorithm. Its answer is
+architectural, not engineering:
+
+- STACKED PRs IS THE ANSWER: Graphite's core product is breaking a branch
+  into a series of small, dependent PRs (each built on the last) instead
+  of one giant one. A 60-file change is meant to become ~however many
+  small stacked PRs, each reviewed independently while you keep working
+  on the next.
+- OWN STATED REASONING: Graphite's own materials say a 1,000+ line diff
+  "overwhelms the context window, causing the model to lose coherence,
+  miss connections between changes, and fall back on pattern matching for
+  style issues." That's not a bug they're fixing — it's their justification
+  for why you shouldn't have that diff at all.
+- REVIEWER (DIAMOND / GRAPHITE AGENT): codebase-aware, not diff-only, via
+  a "hybrid strategy" that avoids full-repo indexing overhead — positioned
+  as a middle ground between diff-only and full-repo-indexed review. No
+  published token-budget/chunking mechanism for an oversized diff.
+- NAMING NOTE: "Diamond" was folded into the unified "Graphite Agent"
+  brand as of October 2025 — same capability, different name in newer
+  material.
+
+Bottom line: Graphite's bet is prevention over compression. If you open a
+60-file/1,500-line-each PR without stacking it, there's no disclosed
+graceful-degradation path the way CodeRabbit has one — their own stated
+position is that the review would simply degrade.
+
+===========================================================
+THE ACTUAL DIFFERENCE
+===========================================================
+Same problem, two different philosophies:
+
+  CodeRabbit: "Big PRs will happen. Build infrastructure to review them
+  as well as possible anyway."
+
+  Graphite:   "Big PRs shouldn't happen. Build a workflow (stacking) that
+  prevents them, and let review quality assume PRs stay small."
+
+Neither is more "correct" — CodeRabbit's approach works regardless of team
+habits but costs real engineering (and real AI spend) to run; Graphite's
+approach is cheaper to build but only pays off if a team actually adopts
+stacked PRs as a habit, which is a workflow change, not just a tool swap.
+
+Sources: CodeRabbit engineering blog ("Squeezing Water from Stone"),
+coderabbit.ai/blog and /docs (context engineering, agentic vs RAG) —
+researched earlier this session. Graphite: graphite.com/guides/ai-code-
+review-context-full-repo-vs-diff, graphite.com/blog/introducing-graphite-
+agent-and-pricing, graphite.com/features/ai-reviews, devclass.com (Diamond
+launch coverage) — researched via web search this session.

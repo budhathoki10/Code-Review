@@ -13,6 +13,9 @@ export interface ReviewJobData {
   prNumber: number;
   /** The webhook delivery ID that triggered this job — threaded through logs end to end. */
   requestId: string;
+  /** Passed straight through to the AI review call as context — see generateReview's staticFindings/prTitle/prBody options. */
+  prTitle: string;
+  prBody?: string | null;
 }
 
 let queue: Queue<ReviewJobData> | undefined;

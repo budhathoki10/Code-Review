@@ -54,3 +54,22 @@ export async function postSummaryComment(
   );
   return Number(data.id);
 }
+
+/**
+ * Edits an existing summary comment in place instead of posting a new one —
+ * used for incremental reviews, so a PR with many small pushes gets one
+ * comment kept up to date rather than a new comment spammed per push.
+ */
+export async function updateSummaryComment(
+  installationId: number,
+  owner: string,
+  repo: string,
+  commentId: number,
+  body: string,
+): Promise<void> {
+  const octokit = await getInstallationOctokit(installationId);
+  await octokit.request(
+    "PATCH /repos/{owner}/{repo}/issues/comments/{comment_id}",
+    { owner, repo, comment_id: commentId, body },
+  );
+}
