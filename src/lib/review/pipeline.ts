@@ -170,6 +170,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     staticFindings: staticFindingsForContext,
     prTitle,
     prBody: prBody ?? undefined,
+    repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
   });
 
   // Always wait for the real result for the final merged findings list —
