@@ -258,8 +258,18 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   const postingThreshold = resolvePostingThreshold(repoConfig);
   const postableFindings = allFindings.filter((f) => meetsThreshold(f.severity, postingThreshold));
 
+  // Only genuinely new findings from this delta get shown in the comment
+  // text (both the summary and inline comments) — carried-forward findings
+  // are still fully tracked in allFindings for the stored review doc and the
+  // check-run gate (a stale critical bug must still fail the check even if
+  // untouched this round), they just aren't re-announced in the comment
+  // every time nothing changed about them. On a first-ever review (no
+  // previousReview), touchedFiles covers the whole diff, so this is a no-op
+  // filter and every postable finding is shown, same as before.
+  const newPostableFindings = postableFindings.filter((f) => touchedFiles.has(f.file));
+
   try {
-    const commentBody = formatSummaryComment({ summary: aiResult.summary, findings: postableFindings });
+    const commentBody = formatSummaryComment({ summary: aiResult.summary, findings: newPostableFindings });
 
     let commentId: number;
     if (previousReview?.githubCommentId) {
@@ -275,12 +285,6 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     }
     await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { githubCommentId: commentId } });
 
-    // Only genuinely new findings from this delta get inline comments —
-    // carried-forward findings already have their original inline comments
-    // sitting on the PR from the previous review's post. On a first-ever
-    // review (no previousReview), touchedFiles covers the whole diff, so
-    // this is a no-op filter and every postable finding still gets one.
-    const newPostableFindings = postableFindings.filter((f) => touchedFiles.has(f.file));
     const { mappable, unmappable } = mapFindingsToInlineComments(newPostableFindings, commentableLines);
     log.info({ reviewId, mappable: mappable.length, unmappable: unmappable.length }, "inline mapping");
 
