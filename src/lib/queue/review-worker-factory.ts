@@ -27,6 +27,12 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
       concurrency: 5,
       // Bounds how often this process calls the AI provider, independent of
       // job concurrency — avoids tripping the provider's own rate limits.
+      // Counts job starts, not raw provider calls: generateReview (see
+      // src/lib/ai/review.ts) issues 2 concurrent calls per job (findings +
+      // verdict/summary), so the effective NVIDIA-endpoint call rate is
+      // 2 × AI_RATE_LIMIT_MAX per AI_RATE_LIMIT_DURATION_MS. If tuning
+      // against a provider-side RPM cap, divide the target RPM by 2 before
+      // setting AI_RATE_LIMIT_MAX.
       limiter: { max: AI_RATE_LIMIT_MAX, duration: AI_RATE_LIMIT_DURATION_MS },
       ...options,
     },
