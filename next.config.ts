@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
     ],
   },
   // Only relevant while testing through an ngrok tunnel instead of localhost.
-  allowedDevOrigins: ["sasquatch-rickety-imaging.ngrok-free.dev"],
+  allowedDevOrigins: ["traveler-cookbook-natural-normally.trycloudflare.com"],
 };
 
 export default nextConfig;

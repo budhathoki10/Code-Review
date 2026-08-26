@@ -11,7 +11,7 @@ import { createHmac } from "crypto";
  * non-"pull_request" event (e.g. "ping", which GitHub sends when a webhook
  * is first configured) returns 200 without ever touching Mongo or Redis.
  */
-
+// this is the webhook secret for end to end 
 const WEBHOOK_SECRET = "e2e-test-webhook-secret";
 
 function sign(body: string): string {
