@@ -75,9 +75,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     </ToastContext.Provider>
   );
 }
-
+//exporting the use use thoast 
 export function useToast() {
   const toast = useContext(ToastContext);
-  if (!toast) throw new Error("useToast must be used within a ToastProvider");
+  if (!toast) throw new Error("useToast must be used within a ToastProvider. fix this");
   return useMemo(() => toast, [toast]);
 }
