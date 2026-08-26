@@ -31,6 +31,7 @@ let nextId = 1;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  // removes a toast from the stack once it's dismissed or times out
   const dismiss = useCallback((id: number) => {
     setToasts((current) => current.filter((t) => t.id !== id));
   }, []);
@@ -43,7 +44,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     },
     [dismiss],
   );
-
+  //returning the toast provider
   return (
     <ToastContext.Provider value={toast}>
       {children}
@@ -75,9 +76,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     </ToastContext.Provider>
   );
 }
-
+//exporting the use use thoast 
 export function useToast() {
   const toast = useContext(ToastContext);
-  if (!toast) throw new Error("useToast must be used within a ToastProvider");
+  if (!toast) throw new Error("useToast must be used within a ToastProvider. fix this");
+  // using the memo 
   return useMemo(() => toast, [toast]);
 }

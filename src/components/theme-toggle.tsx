@@ -38,6 +38,7 @@ export function ThemeToggle() {
   }, []);
 
   const Icon = ICON[choice];
+  //returning the theme toggle.tsx 
 
   return (
     <button

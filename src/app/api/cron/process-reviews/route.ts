@@ -13,6 +13,7 @@ import { logger } from "@/lib/logger";
  */
 const MAX_DURATION_MS = Number(process.env.CRON_MAX_DURATION_MS ?? 25_000);
 
+// counts the number of failed and completed counts 
 interface SweepCounts {
   completed: number;
   failed: number;
@@ -28,7 +29,10 @@ interface SweepCounts {
  */
 async function sweep(worker: Worker, maxDurationMs: number): Promise<SweepCounts> {
   const counts: SweepCounts = { completed: 0, failed: 0 };
+  // increase if the worker completed 
   worker.on("completed", () => counts.completed++);
+  // increase if the worker failed 
+
   worker.on("failed", () => counts.failed++);
 
   const runPromise = worker.run();
