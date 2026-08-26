@@ -10,6 +10,8 @@ export async function postInlineReview(
   comments: InlineComment[],
 ): Promise<void> {
   const octokit = await getInstallationOctokit(installationId);
+  // octo kit post request for the reviews the code 
+  // requesting the octo kit for the review according ti the pr number
   await octokit.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews", {
     owner,
     repo,

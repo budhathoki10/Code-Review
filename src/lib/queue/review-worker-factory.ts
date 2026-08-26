@@ -1,12 +1,25 @@
-import { Worker, type WorkerOptions } from "bullmq";
+import { Worker, DelayedError, type WorkerOptions } from "bullmq";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { REVIEW_QUEUE_NAME, type ReviewJobData } from "@/lib/queue/review-queue";
 import { runReviewPipeline } from "@/lib/review/pipeline";
+import { acquirePrLock } from "@/lib/queue/pr-lock";
 import { reviews } from "@/lib/db/collections";
 import { logger } from "@/lib/logger";
 
 const AI_RATE_LIMIT_MAX = Number(process.env.AI_RATE_LIMIT_MAX ?? 10);
 const AI_RATE_LIMIT_DURATION_MS = Number(process.env.AI_RATE_LIMIT_DURATION_MS ?? 60_000);
+
+/**
+ * Per-PR lock TTL (see pr-lock.ts) and the delay before a job blocked on
+ * that lock is retried. TTL defaults generously above the AI call's own
+ * worst case (up to 5 rounds, rate-limited to AI_RATE_LIMIT_MAX per
+ * AI_RATE_LIMIT_DURATION_MS — see review-worker-factory's limiter comment
+ * below) so a legitimately slow review isn't cut off mid-run; the lock is
+ * renewed periodically regardless, so this is a ceiling for a crashed
+ * holder, not the expected runtime.
+ */
+const PR_REVIEW_LOCK_TTL_MS = Number(process.env.PR_REVIEW_LOCK_TTL_MS ?? 5 * 60_000);
+const PR_REVIEW_LOCK_RETRY_DELAY_MS = Number(process.env.PR_REVIEW_LOCK_RETRY_DELAY_MS ?? 3_000);
 
 /**
  * Shared by the long-running worker process (src/worker/review-worker.ts)
@@ -17,10 +30,37 @@ const AI_RATE_LIMIT_DURATION_MS = Number(process.env.AI_RATE_LIMIT_DURATION_MS ?
 export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker<ReviewJobData> {
   const worker = new Worker<ReviewJobData>(
     REVIEW_QUEUE_NAME,
-    async (job) => {
+    async (job, token) => {
       const log = logger.child({ requestId: job.data.requestId, jobId: job.id });
       log.info({ attempt: job.attemptsMade + 1 }, "job starting");
-      await runReviewPipeline(job.data, log);
+
+      // Serialize review jobs per PR. Two pushes to the same PR close
+      // together each enqueue their own job (see review-queue.ts), and
+      // runReviewPipeline's incremental-diff decision depends on the
+      // *previous* push's review already being marked "completed" in
+      // Mongo. Without this lock, this worker's own concurrency (5) — or a
+      // second cron-triggered worker invocation under Netlify, see
+      // process-reviews/route.ts — can run both jobs in parallel, so the
+      // later push's "find the last completed review" lookup races the
+      // earlier job and comes up empty, silently falling back to a full
+      // base-branch diff that re-reviews files the later push never
+      // touched. If another job for this PR already holds the lock, this
+      // one is rescheduled rather than processed now or treated as failed
+      // (DelayedError makes BullMQ neither complete nor fail it, and
+      // doesn't count against `attempts`).
+      const lock = await acquirePrLock(getRedisConnection(), job.data.pullRequestId, PR_REVIEW_LOCK_TTL_MS);
+      if (!lock) {
+        log.info("another review for this PR is in flight — delaying");
+        if (!token) throw new Error("missing worker token — cannot delay job");
+        await job.moveToDelayed(Date.now() + PR_REVIEW_LOCK_RETRY_DELAY_MS, token);
+        throw new DelayedError();
+      }
+
+      try {
+        await runReviewPipeline(job.data, log);
+      } finally {
+        await lock.release();
+      }
     },
     {
       connection: getRedisConnection(),

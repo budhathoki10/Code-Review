@@ -29,6 +29,8 @@ export interface PullRequestDoc {
   githubPrId: number;
   title: string;
   headSha: string;
+  /** Kept in sync with the PR body on every push so a throttle-debounced trailing review (see throttle-worker-factory.ts) still has it for AI context. */
+  body?: string | null;
 }
 
 export interface FindingDoc {
