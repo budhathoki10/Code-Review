@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import { Bug, ChevronRight, FlaskConical, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
+import { visibleFindings } from "@/lib/review/visible-findings";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
@@ -184,9 +185,10 @@ export function ReviewCard({
   /** Omit to hide the delete action (e.g. contexts without ownership scoping already established). */
   repositoryId?: string;
 }) {
+  const findings = visibleFindings(review);
   const hasReviewDetails = Boolean(
     review.summary ||
-      review.findings.length > 0 ||
+      findings.length > 0 ||
       (review.status === "failed" && review.error),
   );
   const prLabel = pullRequest ? `#${pullRequest.githubPrNumber}` : "this review";
@@ -222,7 +224,7 @@ export function ReviewCard({
         </summary>
 
         <div className="border-t border-border px-5 pb-5">
-          <SeverityStrip findings={review.findings} />
+          <SeverityStrip findings={findings} />
 
           {!hasReviewDetails && (
             <p className="py-5 text-sm leading-6 text-muted">
@@ -247,9 +249,9 @@ export function ReviewCard({
             </div>
           )}
 
-          {review.findings.length > 0 && (
+          {findings.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
-              {groupFindingsByFile(review.findings).map((group, i) => (
+              {groupFindingsByFile(findings).map((group, i) => (
                 <FindingGroup
                   key={group.file}
                   file={group.file}

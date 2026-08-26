@@ -56,6 +56,8 @@ export interface ReviewDoc {
   score?: number;
   findings: FindingDoc[];
   createdAt: Date;
+  /** Files this specific round's diff actually covered (the incremental delta, or every file on a first review) — lets the dashboard show only what changed *this round*, even though `findings` also carries forward still-open findings from untouched files for gating purposes. Absent on reviews created before this field existed. */
+  touchedFiles?: string[];
   /** Set only once the Phase 3 summary comment successfully posts. Its absence on a
    *  "completed" review means generation succeeded but posting to GitHub hasn't (yet). */
   githubCommentId?: number;
