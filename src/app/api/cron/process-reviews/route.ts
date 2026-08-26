@@ -13,7 +13,7 @@ const MAX_DURATION_MS = Number(process.env.CRON_MAX_DURATION_MS ?? 25_000);
 
 export async function GET(request: NextRequest) {
   if (!process.env.CRON_SECRET) {
-    logger.error("cron sweep rejected — CRON_SECRET is not configured");
+    logger.error("cron sweep rejected — CRON_SECRET is not configured please test it ");
     return NextResponse.json({ error: "not configured" }, { status: 500 });
   }
   if (request.headers.get("authorization") !== `Bearer ${process.env.CRON_SECRET}`) {
