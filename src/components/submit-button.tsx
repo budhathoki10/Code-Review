@@ -6,6 +6,7 @@ import { Loader2 } from "lucide-react";
 import { buttonClasses, type ButtonVariant } from "@/lib/ui";
 
 /** A submit button that shows a spinner and disables itself while its form is pending. Must render inside the <form> it submits. */
+// exporting the submit button and it disables itself
 export function SubmitButton({
   children,
   pendingLabel,
