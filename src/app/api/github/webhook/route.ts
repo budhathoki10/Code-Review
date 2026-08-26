@@ -3,13 +3,24 @@ import { NextRequest, NextResponse } from "next/server";
 import type { PullRequestEvent } from "@octokit/webhooks-types";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
+import { claimThrottleWindow, throttleWindowRemainingMs } from "@/lib/queue/pr-throttle";
+import { scheduleThrottleTrailer } from "@/lib/queue/throttle-queue";
 import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isDuplicateKeyError } from "@/lib/db/mongo-errors";
 import { logger } from "@/lib/logger";
 
 const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 20);
 const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_SECONDS ?? 60);
+
+/**
+ * At most one review is triggered per PR per window — a burst of pushes
+ * (e.g. someone force-pushing fixups repeatedly) debounces to a single
+ * review of whichever commit is HEAD once the window ends, instead of one
+ * AI review per commit. See pr-throttle.ts / throttle-queue.ts.
+ */
+const PR_REVIEW_THROTTLE_WINDOW_MS = Number(process.env.PR_REVIEW_THROTTLE_WINDOW_MS ?? 60_000);
 
 function ok() {
   return NextResponse.json({ ok: true }, { status: 200 });
@@ -92,6 +103,10 @@ export async function POST(request: NextRequest) {
         githubPrNumber: payload.number,
         title: payload.pull_request.title,
         headSha,
+        // Kept current on every push so a throttle-debounced trailing
+        // review (see throttle-worker-factory.ts) still has PR context —
+        // that job runs later, off the webhook payload's timeline.
+        body: payload.pull_request.body,
       },
     },
     { upsert: true, returnDocument: "after" },
@@ -99,13 +114,28 @@ export async function POST(request: NextRequest) {
   if (!pullRequestDoc?._id) {
     throw new Error(`Failed to upsert pull request ${payload.pull_request.id}`);
   }
+  const pullRequestId = String(pullRequestDoc._id);
+
+  // At most one review triggered per PR per PR_REVIEW_THROTTLE_WINDOW_MS.
+  // A push landing inside an already-open window is debounced: it doesn't
+  // get its own review, but a trailing job (fixed jobId per PR, so a burst
+  // of pushes only schedules it once) reviews whatever's HEAD once the
+  // window ends.
+  const redis = getRedisConnection();
+  const allowedNow = await claimThrottleWindow(redis, pullRequestId, PR_REVIEW_THROTTLE_WINDOW_MS);
+  if (!allowedNow) {
+    const remainingMs = await throttleWindowRemainingMs(redis, pullRequestId);
+    await scheduleThrottleTrailer({ pullRequestId, requestId: deliveryId }, remainingMs);
+    log.info({ prNumber: payload.number, remainingMs }, "webhook throttled — trailing review scheduled");
+    return ok();
+  }
 
   const reviewsCol = await reviews();
   let reviewId: string;
   try {
     // creates the pending status of the pr 
     const insertResult = await reviewsCol.insertOne({
-      pullRequestId: String(pullRequestDoc._id),
+      pullRequestId,
       headSha,
       status: "pending",
       findings: [],
@@ -130,7 +160,7 @@ export async function POST(request: NextRequest) {
   try {
     await enqueueReviewJob({
       reviewId,
-      pullRequestId: String(pullRequestDoc._id),
+      pullRequestId,
       headSha,
       githubInstallationId: repositoryDoc.githubInstallationId,
       owner: payload.repository.owner.login,
@@ -144,7 +174,7 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     log.error({ reviewId, err: error }, "failed to enqueue review job");
     await reviewsCol.updateOne(
-      { pullRequestId: String(pullRequestDoc._id), headSha },
+      { pullRequestId, headSha },
       {
         $set: {
           status: "failed",
@@ -156,13 +186,4 @@ export async function POST(request: NextRequest) {
   }
 
   return ok();
-}
-
-function isDuplicateKeyError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === 11000
-  );
 }

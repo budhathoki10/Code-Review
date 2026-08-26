@@ -1,10 +1,15 @@
 import "dotenv/config";
 import { createServer } from "http";
 import { createReviewWorker, AI_RATE_LIMIT_MAX, AI_RATE_LIMIT_DURATION_MS } from "@/lib/queue/review-worker-factory";
+import { createThrottleTrailerWorker } from "@/lib/queue/throttle-worker-factory";
 import { logger } from "@/lib/logger";
 
 // npm run worker......it creates a worker from review factory and wait for the job
 const worker = createReviewWorker();
+
+// Handles pushes debounced by the per-PR throttle window (see
+// pr-throttle.ts) — reviews whatever's HEAD once the window ends.
+const throttleTrailerWorker = createThrottleTrailerWorker();
 
 logger.info(
   { concurrency: 5, aiRateLimit: `${AI_RATE_LIMIT_MAX}/${AI_RATE_LIMIT_DURATION_MS}ms` },
@@ -41,7 +46,7 @@ if (process.env.PORT) {
  */
 async function shutdown(signal: NodeJS.Signals) {
   logger.info({ signal }, "review worker shutting down");
-  await worker.close();
+  await Promise.all([worker.close(), throttleTrailerWorker.close()]);
   process.exit(0);
 }
 
