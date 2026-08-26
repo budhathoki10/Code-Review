@@ -1,3 +1,4 @@
+// formatiing according to the time
 const DIVISIONS: { amount: number; unit: Intl.RelativeTimeFormatUnit }[] = [
   { amount: 60, unit: "seconds" },
   { amount: 60, unit: "minutes" },
@@ -10,6 +11,7 @@ const DIVISIONS: { amount: number; unit: Intl.RelativeTimeFormatUnit }[] = [
 
 const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
 
+// formating the relative time 
 export function formatRelativeTime(date: Date): string {
   let duration = (date.getTime() - Date.now()) / 1000;
 
@@ -19,6 +21,6 @@ export function formatRelativeTime(date: Date): string {
     }
     duration /= division.amount;
   }
-
+// returning in years 
   return rtf.format(Math.round(duration), "years");
 }

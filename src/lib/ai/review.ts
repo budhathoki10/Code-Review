@@ -15,8 +15,26 @@ const findingSchema = z.object({
   confidence: z.string().optional(),
 });
 
+/**
+ * Models intermittently double-encode an array-typed tool argument — emitting
+ * `{"findings": "[{...}]"}` (the array as a JSON *string*) instead of
+ * `{"findings": [{...}]}`. Observed in practice against the configured NVIDIA
+ * endpoint, where it failed all 3 BullMQ attempts and dead-lettered the
+ * review, since the shape is deterministic per response rather than a
+ * transient error a retry could clear. Unwrapping it here is strictly more
+ * permissive than before — anything already well-formed passes through
+ * untouched, and a string that isn't valid JSON is left alone so the array
+ * check below still rejects it with the usual error.
+ */
 const findingsSchema = z.object({
-  findings: z.array(findingSchema),
+  findings: z.preprocess((value) => {
+    if (typeof value !== "string") return value;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }, z.array(findingSchema)),
 });
 type FindingsResult = z.infer<typeof findingsSchema>;
 
