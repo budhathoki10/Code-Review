@@ -12,7 +12,7 @@ const nextConfig: NextConfig = {
   // TryCloudflare's Quick Tunnel in particular assigns a new random hostname on every
   // restart, so a hardcoded value goes stale and needs a fresh commit each time. Only
   // relevant while testing through a tunnel instead of localhost.
-  allowedDevOrigins: process.env.DEV_TUNNEL_ORIGIN ? [process.env.DEV_TUNNEL_ORIGIN] : ["codereview.kushalbudhathoki.com.np"],
+  allowedDevOrigins: process.env.AUTH_URL ? [process.env.AUTH_URL] : ["codereview.kushalbudhathoki.com.np"],
 
 };
 

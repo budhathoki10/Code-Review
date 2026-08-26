@@ -134,6 +134,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   const reviewsCol = await reviews();
 
   // first finding the most recent document
+  // checking the col and also filter  in parallel 
   const [repoConfig, existingReview, previousReview] = await Promise.all([
     loadRepositoryConfig(pullRequestId),
     reviewsCol.findOne({ pullRequestId, headSha }),

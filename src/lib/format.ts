@@ -1,3 +1,4 @@
+// formatiing according to the time
 const DIVISIONS: { amount: number; unit: Intl.RelativeTimeFormatUnit }[] = [
   { amount: 60, unit: "seconds" },
   { amount: 60, unit: "minutes" },
