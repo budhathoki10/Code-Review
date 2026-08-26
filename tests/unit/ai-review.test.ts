@@ -313,6 +313,49 @@ describe("generateReview", () => {
     expect(finalParams.tools).toHaveLength(1); // fetch_file no longer offered
   });
 
+  it("accepts a findings array the model double-encoded as a JSON string", async () => {
+    const { generateReview } = await loadGenerateReview();
+    // Observed against the NVIDIA endpoint: `{"findings": "[{...}]"}` instead
+    // of `{"findings": [{...}]}`. Deterministic per response, so BullMQ's
+    // retries couldn't clear it and the review dead-lettered.
+    wireResponses(
+      {
+        findings: JSON.stringify([
+          {
+            severity: "low",
+            category: "quality",
+            file: "src/foo.ts",
+            title: "nit",
+            explanation: "minor style issue",
+          },
+        ]),
+      },
+      { verdict: "comment", summary: "One small nit." },
+    );
+
+    const result = await generateReview("diff --git a/foo b/foo");
+
+    expect(result.findings).toHaveLength(1);
+    expect(result.findings[0].title).toBe("nit");
+  });
+
+  it("accepts an empty findings array double-encoded as a JSON string", async () => {
+    const { generateReview } = await loadGenerateReview();
+    wireResponses({ findings: "[]" }, { verdict: "approve", summary: "All good." });
+
+    const result = await generateReview("diff --git a/x b/x");
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.verdict).toBe("approve");
+  });
+
+  it("still rejects a findings string that isn't valid JSON", async () => {
+    const { generateReview } = await loadGenerateReview();
+    wireResponses({ findings: "no issues found" }, { verdict: "approve", summary: "fine" });
+
+    await expect(generateReview("diff --git a/x b/x")).rejects.toThrow();
+  });
+
   it("reaches submit_findings after fetch_file fails on a nonexistent path", async () => {
     const { generateReview } = await loadGenerateReview();
     getFileContentMock.mockResolvedValue(undefined);
