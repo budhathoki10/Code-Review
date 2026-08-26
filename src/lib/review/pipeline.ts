@@ -251,6 +251,7 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
         verdict: aiResult.verdict,
         summary: aiResult.summary,
         findings: allFindings,
+        touchedFiles: Array.from(touchedFiles),
       },
     },
   );
