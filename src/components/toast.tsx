@@ -31,6 +31,7 @@ let nextId = 1;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  // removes a toast from the stack once it's dismissed or times out
   const dismiss = useCallback((id: number) => {
     setToasts((current) => current.filter((t) => t.id !== id));
   }, []);
