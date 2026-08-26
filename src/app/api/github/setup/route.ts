@@ -19,6 +19,7 @@ export async function GET(request: NextRequest) {
   //check if the user is login 
   const session = await auth();
   if (!session?.user?.id) {
+    // redirect to the base url
     return NextResponse.redirect(appUrl("/", request));
   }
 
