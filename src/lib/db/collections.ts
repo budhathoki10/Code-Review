@@ -9,6 +9,30 @@ export interface InstallationDoc {
   createdAt: Date;
 }
 
+/**
+ * Running AI token totals across the WHOLE app — every review by every user
+ * `$inc`s this one shared document, so reading total consumption is a single
+ * point lookup. Deliberately not split per user and not a per-call ledger:
+ * it's one global cost counter, so it can't attribute usage to a user or a
+ * specific review — add a separate collection if that's ever needed.
+ */
+export interface UsageDoc {
+  _id?: string;
+  /** Always GLOBAL_USAGE_KEY — the fixed key making this a single shared row. */
+  key: string;
+  /** Prompt tokens sent to the provider (system prompts + tool schemas + diff, re-sent each findings round). */
+  inputTokens: number;
+  /** Completion tokens returned. */
+  outputTokens: number;
+  totalTokens: number;
+  /** Individual provider calls — up to 5 per review (see generateReview). */
+  calls: number;
+  /** Reviews contributing to these totals — `calls / reviews` gives average calls per review. */
+  reviews: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface RepositoryDoc {
   _id?: string;
   installationId: string;
@@ -88,18 +112,23 @@ export async function reviews(): Promise<Collection<ReviewDoc>> {
   return (await db()).collection<ReviewDoc>("reviews");
 }
 
+export async function usage(): Promise<Collection<UsageDoc>> {
+  return (await db()).collection<UsageDoc>("usage");
+}
+
 let indexesEnsured: Promise<void> | undefined;
 
 /** Idempotent — safe to call on every cold start. */
 export function ensureIndexes(): Promise<void> {
   if (!indexesEnsured) {
     indexesEnsured = (async () => {
-      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol] =
+      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol] =
         await Promise.all([
           installations(),
           repositories(),
           pullRequests(),
           reviews(),
+          usage(),
         ]);
 
       await Promise.all([
@@ -107,6 +136,9 @@ export function ensureIndexes(): Promise<void> {
         repositoriesCol.createIndex({ githubRepoId: 1 }, { unique: true }),
         pullRequestsCol.createIndex({ githubPrId: 1 }, { unique: true }),
         reviewsCol.createIndex({ pullRequestId: 1, headSha: 1 }, { unique: true }),
+        // Unique so the recordUsage upsert always accumulates into the single
+        // global document instead of racing concurrent reviews into duplicates.
+        usageCol.createIndex({ key: 1 }, { unique: true }),
       ]);
     })();
   }

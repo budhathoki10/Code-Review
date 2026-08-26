@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
 import type { FindingDoc } from "@/lib/db/collections";
+import { addUsage, usageFromResponse, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
 import { getFileContent } from "@/lib/github/file-content";
 
 const findingSchema = z.object({
@@ -248,8 +249,9 @@ async function callStructured<T>(
   params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
   schema: z.ZodType<T>,
   expectedToolName: string,
-): Promise<T> {
+): Promise<{ value: T; usage: TokenUsage }> {
   const response = await getClient().chat.completions.create(params);
+  const usage = usageFromResponse(response.usage);
 
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall || toolCall.type !== "function") {
@@ -263,7 +265,7 @@ async function callStructured<T>(
     throw new Error(`Model returned invalid JSON in ${expectedToolName} tool call arguments`);
   }
 
-  return schema.parse(parsedArgs);
+  return { value: schema.parse(parsedArgs), usage };
 }
 
 /**
@@ -325,13 +327,17 @@ async function runFindingsLoop(
   sharedParams: { max_tokens: number; temperature: number; top_p: number },
   diffBlock: string,
   repoContext: RepoContext | undefined,
-): Promise<FindingsResult> {
+): Promise<{ value: FindingsResult; usage: TokenUsage }> {
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: FINDINGS_SYSTEM_PROMPT },
     { role: "user", content: diffBlock },
   ];
   const fileCache = new Map<string, string>();
   const roundsAvailable = repoContext ? MAX_FINDINGS_TOOL_ROUNDS : 0;
+  // Accumulated across rounds, not just the round that submits: every round
+  // re-sends the whole conversation (diff included), so the earlier rounds are
+  // where most of a multi-round review's input tokens actually go.
+  let totalUsage: TokenUsage = EMPTY_USAGE;
 
   for (let round = 0; round <= roundsAvailable; round++) {
     const isFinalRound = round === roundsAvailable;
@@ -343,6 +349,7 @@ async function runFindingsLoop(
       tools: isFinalRound ? [FINDINGS_TOOL] : [FINDINGS_TOOL, FETCH_FILE_TOOL],
       tool_choice: isFinalRound ? { type: "function", function: { name: "submit_findings" } } : "auto",
     });
+    totalUsage = addUsage(totalUsage, usageFromResponse(response.usage));
 
     const message = response.choices[0]?.message;
     const toolCalls = (message?.tool_calls ?? []).filter(
@@ -357,7 +364,7 @@ async function runFindingsLoop(
       } catch {
         throw new Error("Model returned invalid JSON in submit_findings tool call arguments");
       }
-      return findingsSchema.parse(parsedArgs);
+      return { value: findingsSchema.parse(parsedArgs), usage: totalUsage };
     }
 
     if (isFinalRound) {
@@ -429,7 +436,7 @@ export async function generateReview(
     prBody?: string;
     repoContext?: RepoContext;
   },
-): Promise<ReviewResult> {
+): Promise<ReviewResult & { usage: TokenUsage }> {
   const model = process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b";
 
   const customInstructions = options?.customInstructions?.filter((line) => line.trim().length > 0);
@@ -458,20 +465,22 @@ export async function generateReview(
     tool_choice: { type: "function", function: { name: "submit_verdict" } },
   };
 
-  const [findingsResult, verdictResult] = await Promise.all([
+  const [findings, verdictCall] = await Promise.all([
     runFindingsLoop(model, sharedParams, diffBlock, options?.repoContext),
     callStructured<VerdictResult>(verdictParams, verdictSchema, "submit_verdict"),
   ]);
 
-  const verdict = reconcileVerdict(verdictResult.verdict, findingsResult.findings);
+  const usage = addUsage(findings.usage, verdictCall.usage);
+  const verdict = reconcileVerdict(verdictCall.value.verdict, findings.value.findings);
   const result = reviewSchema.parse({
     verdict,
-    summary: verdictResult.summary,
-    findings: findingsResult.findings,
+    summary: verdictCall.value.summary,
+    findings: findings.value.findings,
   });
 
   return {
     ...result,
     summary: appendVerdictLine(result.summary, result.verdict),
+    usage,
   };
 }
