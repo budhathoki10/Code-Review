@@ -8,6 +8,7 @@ import { computeCommentableLines, mapFindingsToInlineComments } from "@/lib/gith
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
+import { recordUsage } from "@/lib/db/usage";
 import {
   reviews,
   pullRequests,
@@ -224,13 +225,22 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
       new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
     ]);
 
-    aiResult = await generateReview(diff.diffText, {
+    const generated = await generateReview(diff.diffText, {
       customInstructions: repoConfig?.customInstructions,
       staticFindings: staticFindingsForContext,
       prTitle,
       prBody: prBody ?? undefined,
       repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
     });
+    aiResult = generated;
+
+    // Token accounting is a side metric, not part of the review — a failure
+    // writing it must never fail an otherwise-good review, so it's logged and
+    // swallowed rather than thrown.
+    await recordUsage(generated.usage).catch((usageError) => {
+      log.warn({ reviewId, err: usageError }, "failed to record token usage");
+    });
+    log.info({ reviewId, usage: generated.usage }, "ai token usage");
 
     // Always wait for the real result for the final merged findings list —
     // posting/gating correctness is unaffected even when the race above timed
