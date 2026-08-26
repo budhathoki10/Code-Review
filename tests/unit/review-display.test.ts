@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { visibleFindings } from "@/lib/review/visible-findings";
+import { visibleFindings, groupFindingsByFile } from "@/lib/review/review-display";
 import type { FindingDoc, ReviewDoc } from "@/lib/db/collections";
 
 function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
@@ -58,5 +58,44 @@ describe("visibleFindings", () => {
     });
 
     expect(visibleFindings(r)).toEqual(r.findings);
+  });
+});
+
+describe("groupFindingsByFile", () => {
+  it("groups findings by file, worst severity first", () => {
+    const groups = groupFindingsByFile([
+      finding({ file: "src/a.ts", severity: "low" }),
+      finding({ file: "src/b.ts", severity: "critical" }),
+      finding({ file: "src/a.ts", severity: "medium" }),
+    ]);
+
+    expect(groups.map((g) => g.file)).toEqual(["src/b.ts", "src/a.ts"]);
+    expect(groups.find((g) => g.file === "src/a.ts")?.findings.map((f) => f.severity)).toEqual(["medium", "low"]);
+  });
+
+  it("adds a zero-finding entry for a touched file with no findings, sorted after every file that has findings", () => {
+    const groups = groupFindingsByFile([finding({ file: "src/a.ts", severity: "low" })], [
+      "src/a.ts",
+      "src/clean.ts",
+    ]);
+
+    expect(groups.map((g) => g.file)).toEqual(["src/a.ts", "src/clean.ts"]);
+    expect(groups.find((g) => g.file === "src/clean.ts")).toEqual({ file: "src/clean.ts", findings: [], worst: 5 });
+  });
+
+  it("returns one zero-finding entry per touched file when nothing was flagged at all", () => {
+    const groups = groupFindingsByFile([], ["src/a.ts", "src/b.ts"]);
+
+    expect(groups).toEqual([
+      { file: "src/a.ts", findings: [], worst: 5 },
+      { file: "src/b.ts", findings: [], worst: 5 },
+    ]);
+  });
+
+  it("does not duplicate a file that both has findings and appears in touchedFiles", () => {
+    const groups = groupFindingsByFile([finding({ file: "src/a.ts" })], ["src/a.ts"]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].findings).toHaveLength(1);
   });
 });

@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import { Bug, ChevronRight, FlaskConical, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
-import { visibleFindings } from "@/lib/review/visible-findings";
+import { visibleFindings, groupFindingsByFile } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
@@ -91,22 +91,20 @@ function FindingItem({ finding }: { finding: FindingDoc }) {
   );
 }
 
-/** Groups findings under the file they belong to, worst-severity file first — turns a flat list into something scannable when a review touches several files. */
-function groupFindingsByFile(findings: FindingDoc[]) {
-  const order: string[] = [];
-  const byFile = new Map<string, FindingDoc[]>();
-  for (const finding of findings) {
-    if (!byFile.has(finding.file)) order.push(finding.file);
-    byFile.set(finding.file, [...(byFile.get(finding.file) ?? []), finding]);
-  }
-  return order
-    .map((file) => {
-      const items = [...byFile.get(file)!].sort(
-        (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity),
-      );
-      return { file, findings: items, worst: SEVERITY_ORDER.indexOf(items[0].severity) };
-    })
-    .sort((a, b) => a.worst - b.worst);
+/** A file this round reviewed and found nothing in — same row shape as FindingGroup below, minus the disclosure (there's nothing to expand into). */
+function CleanFileRow({ file, index }: { file: string; index: number }) {
+  return (
+    <li className="stagger-in" style={{ "--index": index } as CSSProperties}>
+      <div className="flex items-center gap-2 py-2.5 text-muted">
+        <span className="h-3 w-3 shrink-0" aria-hidden="true" />
+        <span className={toneDotClasses("success")} aria-hidden="true" />
+        <span className="truncate font-mono text-xs text-foreground" title={file}>
+          {file}
+        </span>
+        <span className="shrink-0 text-xs text-subtle">No issues</span>
+      </div>
+    </li>
+  );
 }
 
 /** One file's findings behind a native disclosure — open by default only when it contains a critical/high finding, so a large review still lands scannable. */
@@ -121,6 +119,8 @@ function FindingGroup({
   defaultOpen: boolean;
   index: number;
 }) {
+  if (findings.length === 0) return <CleanFileRow file={file} index={index} />;
+
   const worstTone = SEVERITY_TONE[findings[0].severity];
   return (
     <li className="stagger-in" style={{ "--index": index } as CSSProperties}>
@@ -186,9 +186,10 @@ export function ReviewCard({
   repositoryId?: string;
 }) {
   const findings = visibleFindings(review);
+  const fileGroups = groupFindingsByFile(findings, review.touchedFiles);
   const hasReviewDetails = Boolean(
     review.summary ||
-      findings.length > 0 ||
+      fileGroups.length > 0 ||
       (review.status === "failed" && review.error),
   );
   const prLabel = pullRequest ? `#${pullRequest.githubPrNumber}` : "this review";
@@ -249,9 +250,9 @@ export function ReviewCard({
             </div>
           )}
 
-          {findings.length > 0 && (
+          {fileGroups.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
-              {groupFindingsByFile(findings).map((group, i) => (
+              {fileGroups.map((group, i) => (
                 <FindingGroup
                   key={group.file}
                   file={group.file}
