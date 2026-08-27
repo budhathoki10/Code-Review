@@ -32,7 +32,7 @@
     "bullmq": "^6.1.2",
     "diff": "^9.0.0",
     "dotenv": "^17.4.2",
-    "eslint": "^9",
+    "eslint": "^10",
     "globals": "^14.0.0",
     "htmlhint": "^1.9.2",
     "ioredis": "^6.0.0",
