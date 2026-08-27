@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { visibleFindings, groupFindingsByFile } from "@/lib/review/review-display";
+import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import type { FindingDoc, ReviewDoc } from "@/lib/db/collections";
 
 function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
@@ -61,41 +61,41 @@ describe("visibleFindings", () => {
   });
 });
 
-describe("groupFindingsByFile", () => {
-  it("groups findings by file, worst severity first", () => {
-    const groups = groupFindingsByFile([
+describe("groupFindingsBySeverity", () => {
+  it("groups findings by severity, worst first", () => {
+    const groups = groupFindingsBySeverity([
       finding({ file: "src/a.ts", severity: "low" }),
       finding({ file: "src/b.ts", severity: "critical" }),
-      finding({ file: "src/a.ts", severity: "medium" }),
+      finding({ file: "src/c.ts", severity: "medium" }),
     ]);
 
-    expect(groups.map((g) => g.file)).toEqual(["src/b.ts", "src/a.ts"]);
-    expect(groups.find((g) => g.file === "src/a.ts")?.findings.map((f) => f.severity)).toEqual(["medium", "low"]);
+    expect(groups.map((g) => g.severity)).toEqual(["critical", "medium", "low"]);
   });
 
-  it("adds a zero-finding entry for a touched file with no findings, sorted after every file that has findings", () => {
-    const groups = groupFindingsByFile([finding({ file: "src/a.ts", severity: "low" })], [
-      "src/a.ts",
-      "src/clean.ts",
+  it("keeps every finding of the same severity together, in their original relative order", () => {
+    const groups = groupFindingsBySeverity([
+      finding({ file: "src/a.ts", severity: "high", title: "first" }),
+      finding({ file: "src/b.ts", severity: "high", title: "second" }),
     ]);
-
-    expect(groups.map((g) => g.file)).toEqual(["src/a.ts", "src/clean.ts"]);
-    expect(groups.find((g) => g.file === "src/clean.ts")).toEqual({ file: "src/clean.ts", findings: [], worst: 5 });
-  });
-
-  it("returns one zero-finding entry per touched file when nothing was flagged at all", () => {
-    const groups = groupFindingsByFile([], ["src/a.ts", "src/b.ts"]);
-
-    expect(groups).toEqual([
-      { file: "src/a.ts", findings: [], worst: 5 },
-      { file: "src/b.ts", findings: [], worst: 5 },
-    ]);
-  });
-
-  it("does not duplicate a file that both has findings and appears in touchedFiles", () => {
-    const groups = groupFindingsByFile([finding({ file: "src/a.ts" })], ["src/a.ts"]);
 
     expect(groups).toHaveLength(1);
-    expect(groups[0].findings).toHaveLength(1);
+    expect(groups[0].findings.map((f) => f.title)).toEqual(["first", "second"]);
+  });
+
+  it("omits a severity with zero findings entirely, rather than an empty group", () => {
+    const groups = groupFindingsBySeverity([finding({ severity: "high" })]);
+
+    expect(groups.map((g) => g.severity)).toEqual(["high"]);
+  });
+
+  it("returns no groups at all for a clean review", () => {
+    expect(groupFindingsBySeverity([])).toEqual([]);
+  });
+
+  it("preserves each finding's file/line — nothing is grouped away", () => {
+    const groups = groupFindingsBySeverity([finding({ file: "src/a.ts", line: 42, severity: "critical" })]);
+
+    expect(groups[0].findings[0].file).toBe("src/a.ts");
+    expect(groups[0].findings[0].line).toBe(42);
   });
 });

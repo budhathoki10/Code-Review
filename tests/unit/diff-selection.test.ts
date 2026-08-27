@@ -35,9 +35,11 @@ describe("selectDiffForReview", () => {
     expect(selection.analyzableFiles.map((f) => f.filename)).toEqual(["src/app.ts"]);
   });
 
-  it("ranks source files ahead of tests and docs", () => {
+  it("ranks source files ahead of tests and supporting config", () => {
+    // Not README.md here — markdown is triaged out entirely (see triage.ts),
+    // so it never reaches the ranking stage this test is checking.
     const selection = selectDiffForReview([
-      file("README.md"),
+      file("config.yaml"),
       file("tests/app.test.ts"),
       file("src/app.ts"),
     ]);
@@ -45,7 +47,7 @@ describe("selectDiffForReview", () => {
     expect(selection.chunks[0].files.map((f) => f.filename)).toEqual([
       "src/app.ts",
       "tests/app.test.ts",
-      "README.md",
+      "config.yaml",
     ]);
   });
 

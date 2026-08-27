@@ -113,6 +113,15 @@ export interface ReviewDoc {
   createdAt: Date;
   /** Files this specific round's diff actually covered (the incremental delta, or every file on a first review) — lets the dashboard show only what changed *this round*, even though `findings` also carries forward still-open findings from untouched files for gating purposes. Absent on reviews created before this field existed. */
   touchedFiles?: string[];
+  /**
+   * Files this round's diff touched but that never reached the model —
+   * noise (lockfiles, generated code), cheap-triage skips (whitespace/
+   * comment/import-reorder-only), or an unobtainable diff. Not derivable
+   * from `findings` alone: a file with zero findings is either "reviewed,
+   * clean" or "never reviewed", and those look identical without this list.
+   * Absent on reviews saved before this field existed.
+   */
+  filteredFiles?: { file: string; reason: string }[];
   /** Set only once the Phase 3 summary comment successfully posts. Its absence on a
    *  "completed" review means generation succeeded but posting to GitHub hasn't (yet). */
   githubCommentId?: number;

@@ -6,7 +6,13 @@ import type { PullRequestFile } from "@/lib/github/diff";
  * skipped and why — "12 files skipped" with no reason reads as the bot
  * having quietly given up.
  */
-export type SkipReason = "whitespace-only" | "comment-only" | "import-order-only" | "file-deleted" | "generated";
+export type SkipReason =
+  | "whitespace-only"
+  | "comment-only"
+  | "import-order-only"
+  | "file-deleted"
+  | "generated"
+  | "documentation";
 
 export interface TriageResult {
   skip: SkipReason | undefined;
@@ -135,8 +141,12 @@ export function hasGeneratedMarker(text: string): boolean {
  * add 100 API calls before a single file gets reviewed, which is exactly the
  * cost this phase exists to avoid.
  */
+/** Markdown docs — README, changelogs, design specs. Skipped by policy, not by content: a doc file is never noise, but the team has decided reviewing prose isn't worth the model call. */
+const DOCUMENTATION_PATTERN = /\.(md|mdx)$/i;
+
 export function triageFile(file: PullRequestFile, generatedText?: string): TriageResult {
   if (file.status === "removed") return { skip: "file-deleted" };
+  if (DOCUMENTATION_PATTERN.test(file.filename)) return { skip: "documentation" };
 
   const text = generatedText ?? file.patch ?? "";
   // Only the top of the text is considered: these markers live in a header,
@@ -163,6 +173,7 @@ const SKIP_LABELS: Record<SkipReason, string> = {
   "import-order-only": "import reordering only",
   "file-deleted": "file deleted",
   generated: "generated file",
+  documentation: "documentation (.md)",
 };
 
 export function describeSkipReason(reason: SkipReason): string {
