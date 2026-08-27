@@ -1,8 +1,7 @@
-import type { CSSProperties } from "react";
-import { Bug, ChevronRight, FlaskConical, ShieldAlert, Sparkles, Zap } from "lucide-react";
+import { Bug, ChevronRight, FlaskConical, Folder, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
-import { visibleFindings, groupFindingsByFile } from "@/lib/review/review-display";
+import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
@@ -59,23 +58,21 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
   );
 }
 
-function FindingItem({ finding }: { finding: FindingDoc }) {
-  const tone = SEVERITY_TONE[finding.severity];
+/** One finding, numbered within its severity group. `file`/`line` are shown here now — no longer implied by a per-file group header, since the grouping key is severity. */
+function FindingItem({ finding, number }: { finding: FindingDoc; number: number }) {
   const CategoryIcon = CATEGORY_ICON[finding.category];
   return (
     <li className="py-4 first:pt-0 last:pb-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span
-          className={`inline-flex items-center gap-1.5 text-xs font-semibold tracking-wide uppercase ${toneTextClasses(tone)}`}
-        >
-          <span className={toneDotClasses(tone)} />
-          {finding.severity}
-        </span>
+        <span className="shrink-0 text-xs font-semibold tabular-nums text-subtle">{number})</span>
         <span className="inline-flex items-center gap-1 text-xs text-subtle">
           <CategoryIcon className="h-3 w-3" aria-hidden="true" />
           {finding.category}
         </span>
-        {finding.line && <span className="font-mono text-xs text-subtle">· line {finding.line}</span>}
+        <span className="truncate font-mono text-xs text-subtle" title={finding.file}>
+          {finding.file}
+          {finding.line ? `:${finding.line}` : ""}
+        </span>
       </div>
       <p className="mt-1.5 text-sm font-medium text-foreground">
         {finding.title}
@@ -91,54 +88,29 @@ function FindingItem({ finding }: { finding: FindingDoc }) {
   );
 }
 
-/** A file this round reviewed and found nothing in — same row shape as FindingGroup below, minus the disclosure (there's nothing to expand into). */
-function CleanFileRow({ file, index }: { file: string; index: number }) {
+/**
+ * One severity's findings behind a native disclosure — a "folder" for High,
+ * Medium, and so on. Closed by default, no exceptions: a review with two
+ * dozen findings across five severities should land as five compact rows,
+ * not everything already unfurled.
+ */
+function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"]; findings: FindingDoc[] }) {
+  const tone = SEVERITY_TONE[severity];
   return (
-    <li className="stagger-in" style={{ "--index": index } as CSSProperties}>
-      <div className="flex items-center gap-2 py-2.5 text-muted">
-        <span className="h-3 w-3 shrink-0" aria-hidden="true" />
-        <span className={toneDotClasses("success")} aria-hidden="true" />
-        <span className="truncate font-mono text-xs text-foreground" title={file}>
-          {file}
-        </span>
-        <span className="shrink-0 text-xs text-subtle">No issues</span>
-      </div>
-    </li>
-  );
-}
-
-/** One file's findings behind a native disclosure — open by default only when it contains a critical/high finding, so a large review still lands scannable. */
-function FindingGroup({
-  file,
-  findings,
-  defaultOpen,
-  index,
-}: {
-  file: string;
-  findings: FindingDoc[];
-  defaultOpen: boolean;
-  index: number;
-}) {
-  if (findings.length === 0) return <CleanFileRow file={file} index={index} />;
-
-  const worstTone = SEVERITY_TONE[findings[0].severity];
-  return (
-    <li className="stagger-in" style={{ "--index": index } as CSSProperties}>
-      <details open={defaultOpen} className="group/file">
+    <li>
+      <details className="group/severity">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-2.5 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
           <ChevronRight
-            className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/file:rotate-90"
+            className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/severity:rotate-90"
             aria-hidden="true"
           />
-          <span className={toneDotClasses(worstTone)} aria-hidden="true" />
-          <span className="truncate font-mono text-xs text-foreground" title={file}>
-            {file}
-          </span>
+          <Folder className={`h-3.5 w-3.5 shrink-0 ${toneTextClasses(tone)}`} aria-hidden="true" />
+          <span className={`text-xs font-semibold tracking-wide uppercase ${toneTextClasses(tone)}`}>{severity}</span>
           <span className="shrink-0 text-xs tabular-nums text-subtle">{findings.length}</span>
         </summary>
         <ul className="divide-y divide-border border-t border-border pl-5">
           {findings.map((finding, i) => (
-            <FindingItem key={i} finding={finding} />
+            <FindingItem key={i} finding={finding} number={i + 1} />
           ))}
         </ul>
       </details>
@@ -170,12 +142,6 @@ function SeverityStrip({ findings }: { findings: FindingDoc[] }) {
   );
 }
 
-function formatTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
-  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
-  return String(count);
-}
-
 function formatDuration(ms: number): string {
   if (ms < 1_000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
@@ -183,15 +149,17 @@ function formatDuration(ms: number): string {
 }
 
 /**
- * What this review cost and how much of the PR it actually covered. Rendered
- * only when metrics exist, so reviews written before per-review accounting
- * simply don't show the strip rather than showing zeros that read as "this
- * review was free".
+ * How much of the PR this review actually covered, and how long it took.
+ * Rendered only when metrics exist, so reviews written before per-review
+ * accounting simply don't show the strip rather than showing zeros.
+ *
+ * Token and call counts are deliberately not shown here — they're internal
+ * cost accounting (still recorded in full on the review doc and the global
+ * usage counter, see `npm run usage`), not something a reviewer reading a PR
+ * needs in front of them.
  */
 function MetricsStrip({ metrics }: { metrics: NonNullable<ReviewDoc["metrics"]> }) {
   const cells: { label: string; value: string; title?: string }[] = [
-    { label: "Tokens", value: formatTokens(metrics.totalTokens), title: `${metrics.inputTokens} in / ${metrics.outputTokens} out` },
-    { label: "Calls", value: String(metrics.calls) },
     { label: "Duration", value: formatDuration(metrics.durationMs) },
     {
       label: "Files",
@@ -235,10 +203,10 @@ export function ReviewCard({
   repositoryId?: string;
 }) {
   const findings = visibleFindings(review);
-  const fileGroups = groupFindingsByFile(findings, review.touchedFiles);
+  const severityGroups = groupFindingsBySeverity(findings);
   const hasReviewDetails = Boolean(
     review.summary ||
-      fileGroups.length > 0 ||
+      severityGroups.length > 0 ||
       (review.status === "failed" && review.error),
   );
   const prLabel = pullRequest ? `#${pullRequest.githubPrNumber}` : "this review";
@@ -310,16 +278,10 @@ export function ReviewCard({
             </div>
           )}
 
-          {fileGroups.length > 0 && (
+          {severityGroups.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
-              {fileGroups.map((group, i) => (
-                <FindingGroup
-                  key={group.file}
-                  file={group.file}
-                  findings={group.findings}
-                  defaultOpen={group.worst <= 1}
-                  index={i}
-                />
+              {severityGroups.map((group) => (
+                <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} />
               ))}
             </ul>
           )}

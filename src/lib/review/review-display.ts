@@ -18,41 +18,26 @@ export function visibleFindings(review: ReviewDoc): FindingDoc[] {
   return review.findings.filter((f) => touched.has(f.file));
 }
 
-export interface FileFindingGroup {
-  file: string;
+export interface SeverityFindingGroup {
+  severity: FindingDoc["severity"];
   findings: FindingDoc[];
-  /** Index into SEVERITY_ORDER, or SEVERITY_ORDER.length for a clean (zero-finding) file — lets callers sort worst-first with clean files trailing. */
-  worst: number;
 }
 
 /**
- * Groups findings under the file they belong to, worst-severity file first —
- * turns a flat list into something scannable when a review touches several
- * files. `touchedFiles`, when given, adds a zero-finding entry (sorted after
- * every file that has findings) for each file this round reviewed but found
- * nothing in — so an all-clear review still shows the scope of what was
- * actually checked, not just an empty list.
+ * Groups findings by severity — critical first, then high, medium, low,
+ * info — with each finding still carrying its own `file`/`line` so nothing
+ * is lost by no longer grouping on file. Severities with zero findings are
+ * omitted entirely, so a clean review renders no groups at all rather than
+ * five empty folders.
+ *
+ * This is the grouping the reviewer actually scans by: "what's critical"
+ * matters more than "which file", especially on a review that touches
+ * dozens of files — a single file view buries three unrelated highs among
+ * forty clean rows, where a severity view puts them one tap away.
  */
-export function groupFindingsByFile(findings: FindingDoc[], touchedFiles?: string[]): FileFindingGroup[] {
-  const order: string[] = [];
-  const byFile = new Map<string, FindingDoc[]>();
-  for (const finding of findings) {
-    if (!byFile.has(finding.file)) order.push(finding.file);
-    byFile.set(finding.file, [...(byFile.get(finding.file) ?? []), finding]);
-  }
-  for (const file of touchedFiles ?? []) {
-    if (!byFile.has(file)) {
-      order.push(file);
-      byFile.set(file, []);
-    }
-  }
-  return order
-    .map((file) => {
-      const items = [...byFile.get(file)!].sort(
-        (a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity),
-      );
-      const worst = items.length > 0 ? SEVERITY_ORDER.indexOf(items[0].severity) : SEVERITY_ORDER.length;
-      return { file, findings: items, worst };
-    })
-    .sort((a, b) => a.worst - b.worst);
+export function groupFindingsBySeverity(findings: FindingDoc[]): SeverityFindingGroup[] {
+  return SEVERITY_ORDER.map((severity) => ({
+    severity,
+    findings: findings.filter((f) => f.severity === severity),
+  })).filter((group) => group.findings.length > 0);
 }

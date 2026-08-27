@@ -5,6 +5,7 @@ import { getPullRequestDiff, getIncrementalDiff, type PullRequestDiff } from "@/
 import { GitHubRateLimitError } from "@/lib/github/file-content";
 import { generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
+import { describeSkipReason } from "@/lib/review/triage";
 import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/lib/review/gate";
 import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
@@ -328,6 +329,17 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     "diff selected for review",
   );
 
+  // Computed once, right after selection, so both the bail-out path and the
+  // normal-completion path below can persist the same answer to "which
+  // touched files never reached the model, and why". Without this, a
+  // filtered file and a genuinely-reviewed-and-clean file are indistinguishable
+  // downstream — both have zero findings.
+  const filteredFiles: { file: string; reason: string }[] = [
+    ...selection.skippedAsNoise.map((file) => ({ file, reason: "generated, vendored, or binary" })),
+    ...selection.triaged.map((t) => ({ file: t.filename, reason: describeSkipReason(t.reason) })),
+    ...selection.diffUnavailable.map((file) => ({ file, reason: "diff unavailable" })),
+  ];
+
   // Projected before any call is made, so an expensive review is visible in
   // the logs whether or not it ends up being refused.
   const costEstimate = estimateReviewCost(selection);
@@ -354,6 +366,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
           summary: gate.detail ?? "Pull request too large to review.",
           findings: [],
           touchedFiles: diff.files.map((f) => f.filename),
+          filteredFiles,
           incomplete: {
             reason: gate.reason!,
             detail: gate.detail ?? "",
@@ -589,6 +602,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         summary: summaryWithResolved,
         findings: allFindings,
         touchedFiles: Array.from(touchedFiles),
+        filteredFiles,
       },
     },
   );
