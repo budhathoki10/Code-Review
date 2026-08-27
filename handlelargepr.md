@@ -282,3 +282,4 @@ These are all reasonable later. None of them affect whether the bot survives a l
 - Treat repo content as untrusted input to prompts. A file can contain text trying to steer the review. Wrap repo content in clear delimiters and tell the model to treat it as data.
 - Never log installation tokens or authed URLs.
 - Scope every database query by installation id.
+<!-- retest trigger -->
