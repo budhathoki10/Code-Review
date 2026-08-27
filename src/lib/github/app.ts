@@ -1,8 +1,20 @@
 import { App } from "@octokit/app";
+import { Octokit as OctokitCore } from "@octokit/core";
+import { paginateRest } from "@octokit/plugin-paginate-rest";
 
-let app: App | undefined;
+/**
+ * `@octokit/app` defaults to a bare `@octokit/core` instance with no
+ * plugins, so `octokit.paginate` does not exist unless we add it. Every
+ * listing endpoint this app hits is one a large PR can overflow — a PR's
+ * changed files most of all, where relying on the default 30-per-page
+ * response silently truncates the review to the first page. Wiring the
+ * plugin here means every `getInstallationOctokit` caller gets `paginate`.
+ */
+const PaginatingOctokit = OctokitCore.plugin(paginateRest);
 
-function getApp(): App {
+let app: App<{ Octokit: typeof PaginatingOctokit }> | undefined;
+
+function getApp() {
   if (!app) {
     const appId = process.env.GITHUB_APP_ID;
     const privateKey = process.env.GITHUB_APP_PRIVATE_KEY;
@@ -15,6 +27,7 @@ function getApp(): App {
       appId,
       // .env stores the PEM with literal "\n" sequences; restore real newlines.
       privateKey: privateKey.replace(/\\n/g, "\n"),
+      Octokit: PaginatingOctokit,
     });
   }
   return app;

@@ -67,15 +67,31 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
       concurrency: 5,
       // Bounds how often this process calls the AI provider, independent of
       // job concurrency — avoids tripping the provider's own rate limits.
-      // Counts job starts, not raw provider calls: generateReview (see
-      // src/lib/ai/review.ts) issues up to 5 calls per job now (the findings
-      // side is a bounded tool-calling loop of up to 4 rounds, run
-      // concurrently with 1 verdict/summary call), so the effective
-      // NVIDIA-endpoint call rate can reach 5 × AI_RATE_LIMIT_MAX per
-      // AI_RATE_LIMIT_DURATION_MS in the worst case. If tuning against a
-      // provider-side RPM cap, divide the target RPM by 5 before setting
-      // AI_RATE_LIMIT_MAX (a conservative bound — most reviews use far fewer
-      // than the full 4-round findings budget).
+      //
+      // Counts job starts, not raw provider calls, and one job is a whole
+      // chunked review (see generateChunkedReview in src/lib/ai/review.ts).
+      //
+      // The unit that matters is an ATTEMPT, not a call: one findings attempt
+      // is a tool-calling loop of up to MAX_FINDINGS_TOOL_ROUNDS + 1 = 4
+      // provider calls. REVIEW_MAX_BISECT_ATTEMPTS budgets attempts, so it
+      // costs 4x its face value in calls. Worst case per job:
+      //
+      //   root attempts:   MAX_REVIEW_CHUNKS (4) x 4 rounds       = 16
+      //   bisect attempts: REVIEW_MAX_BISECT_ATTEMPTS (12) x 4    = 48
+      //   verdict/summary: once per review                        =  1
+      //                                                             ----
+      //                                                               65
+      //
+      // Verified empirically, not derived on paper — see the "bounds total
+      // provider calls" test in tests/unit/chunked-review.test.ts, which
+      // drives every attempt through every round and counts the mock.
+      //
+      // So the effective endpoint call rate can reach 65 × AI_RATE_LIMIT_MAX
+      // per AI_RATE_LIMIT_DURATION_MS. If tuning against a provider-side RPM
+      // cap, divide the target RPM by 65 before setting AI_RATE_LIMIT_MAX —
+      // a deliberately conservative bound, since a typical review is one or
+      // two chunks that each submit on their first round and never bisect,
+      // i.e. 2-3 calls, well under 5% of this ceiling.
       limiter: { max: AI_RATE_LIMIT_MAX, duration: AI_RATE_LIMIT_DURATION_MS },
       ...options,
     },

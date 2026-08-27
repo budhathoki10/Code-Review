@@ -1,14 +1,18 @@
 // this is the main heart of the code
 import { ObjectId } from "mongodb";
 import type { Logger } from "pino";
-import { getPullRequestDiff, getIncrementalDiff, MAX_DIFF_FILES, MAX_DIFF_CHARS, type PullRequestDiff } from "@/lib/github/diff";
-import { generateReview, type ReviewResult } from "@/lib/ai/review";
+import { getPullRequestDiff, getIncrementalDiff, type PullRequestDiff } from "@/lib/github/diff";
+import { GitHubRateLimitError } from "@/lib/github/file-content";
+import { generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
+import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
+import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
+import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/lib/review/gate";
 import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
-import { computeCommentableLines, mapFindingsToInlineComments } from "@/lib/github/diff-lines";
+import { computeCommentableLines, mapFindingsToInlineComments, capInlineComments } from "@/lib/github/diff-lines";
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
-import { recordUsage } from "@/lib/db/usage";
+import { recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
 import {
   reviews,
   pullRequests,
@@ -16,7 +20,7 @@ import {
   type FindingDoc,
   type RepositoryDoc,
 } from "@/lib/db/collections";
-import type { ReviewJobData } from "@/lib/queue/review-queue";
+import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
@@ -49,6 +53,12 @@ function resolvePostingThreshold(config: RepositoryDoc["config"] | undefined): F
 
 function resolveGateThreshold(config: RepositoryDoc["config"] | undefined): FindingDoc["severity"] {
   return config?.severityThreshold ?? "high";
+}
+
+async function loadPullRequestDoc(pullRequestId: string) {
+  if (!ObjectId.isValid(pullRequestId)) return null;
+  const pullRequestsCol = await pullRequests();
+  return pullRequestsCol.findOne({ _id: new ObjectId(pullRequestId) as unknown as string });
 }
 
 async function loadRepositoryConfig(pullRequestId: string): Promise<RepositoryDoc["config"] | undefined> {
@@ -97,6 +107,47 @@ export function filterCarriedForwardFindings(previousFindings: FindingDoc[], tou
   return previousFindings.filter((f) => !touchedFiles.has(f.file));
 }
 
+/** Identity used to decide whether two findings describe the same defect across reviews. */
+function findingKey(finding: FindingDoc): string {
+  return `${finding.file}::${finding.title.trim().toLowerCase()}`;
+}
+
+/**
+ * Findings from the previous review that this round's re-scan no longer
+ * reports, on files this round actually looked at.
+ *
+ * The inference is deliberately narrow. A finding only counts as resolved if
+ * its file was in this delta — meaning the code was edited AND re-reviewed —
+ * and the fresh scan of that file did not raise it again. A finding on an
+ * untouched file is carried forward unchanged rather than declared fixed,
+ * because nothing about it was re-examined; treating "not re-reported" as
+ * "fixed" without that guard would silently retire real findings every time
+ * the model's attention moved elsewhere.
+ *
+ * Still a heuristic, not a proof: the model could simply have missed on the
+ * second pass. That's why this drives a sentence in the summary and not, say,
+ * the check-run gate.
+ */
+export function findResolvedFindings(
+  previousFindings: FindingDoc[],
+  touchedFiles: Set<string>,
+  currentFindings: FindingDoc[],
+): FindingDoc[] {
+  const stillReported = new Set(currentFindings.map(findingKey));
+  return previousFindings.filter((f) => touchedFiles.has(f.file) && !stillReported.has(findingKey(f)));
+}
+
+/** The sentence appended to a summary when a push fixed things the last review flagged. */
+export function formatResolvedNote(resolved: FindingDoc[]): string {
+  if (resolved.length === 0) return "";
+
+  const shown = resolved.slice(0, 5).map((f) => `- \`${f.file}\` — ${f.title}`);
+  const remainder = resolved.length - shown.length;
+  if (remainder > 0) shown.push(`- ...and ${remainder} more`);
+
+  return `\n\n---\n\n**${resolved.length} finding(s) from the previous review look resolved:**\n\n${shown.join("\n")}`;
+}
+
 function buildCheckSummary(findings: FindingDoc[]): string {
   if (findings.length === 0) return "No issues found.";
   const bySeverity = SEVERITY_ORDER.filter((severity) => findings.some((f) => f.severity === severity))
@@ -111,9 +162,14 @@ function buildCheckSummary(findings: FindingDoc[]): string {
  * fed the static findings + PR title/description as context → post comment
  * → inline comments → check run), run by the BullMQ worker for
  * a single job. Diff fetch and AI generation failures are left to throw —
- * the caller (the worker) lets BullMQ retry those. A too-large diff is a
- * permanent, non-retryable failure, so it's written straight to the review
- * doc and returned instead of thrown.
+ * the caller (the worker) lets BullMQ retry those.
+ *
+ * Large PRs: size never fails a review. selectDiffForReview filters
+ * generated/vendored noise, ranks what's left source-first, and splits it
+ * into bounded chunks reviewed by generateChunkedReview; static analysis
+ * still covers every non-noise file regardless of the AI budget, and
+ * anything the budget couldn't reach is named in the posted comment rather
+ * than quietly omitted.
  *
  * Incremental reviews: if a previous *completed* review exists for this PR,
  * the diff is computed from that review's headSha forward (just the delta
@@ -131,43 +187,200 @@ function buildCheckSummary(findings: FindingDoc[]): string {
  * fails the job/retries the whole pipeline.
  */
 export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promise<void> {
-  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber, prTitle, prBody } = data;
+  try {
+    await runReviewPipelineInner(data, log);
+  } catch (error) {
+    if (!(error instanceof GitHubRateLimitError)) throw error;
+
+    // A rate limit means the review would be built from an incomplete
+    // picture of the PR. Posting it anyway is the worst outcome: the author
+    // reads a partial review as a complete one. Say so instead and let
+    // BullMQ retry the job.
+    const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber } = data;
+    log.warn({ reviewId, resetAt: error.resetAt }, "review stopped — GitHub rate limit not cleared by the retry");
+
+    const reviewsCol = await reviews();
+    await reviewsCol.updateOne(
+      { pullRequestId, headSha },
+      { $set: { incomplete: { reason: "rate-limited" as const, detail: error.message, at: new Date() } } },
+    );
+
+    // Every BullMQ attempt lands here, so posting unconditionally would stack
+    // up to `REVIEW_JOB_ATTEMPTS` identical notices on the PR. Reuse the
+    // comment this review already owns — the same edit-in-place rule the
+    // normal path follows — and record the id so the eventual successful
+    // review overwrites the paused notice instead of posting beneath it.
+    const existing = await reviewsCol.findOne({ pullRequestId, headSha });
+    const body = [
+      "##  AI Code Review",
+      "",
+      "This review was paused because GitHub's API rate limit was reached while reading the pull request.",
+      "",
+      "**No review was posted rather than a partial one** — a review built from an incomplete diff would look like a full review of the whole PR.",
+      "",
+      `It will retry automatically, up to ${REVIEW_JOB_ATTEMPTS} attempts in total. If every attempt is rate limited, push again or re-open the pull request to trigger a fresh review.`,
+    ].join("\n");
+
+    try {
+      if (existing?.githubCommentId) {
+        await updateSummaryComment(githubInstallationId, owner, repo, existing.githubCommentId, body);
+        log.info({ reviewId, commentId: existing.githubCommentId }, "updated the rate-limit notice in place");
+      } else {
+        const commentId = await postSummaryComment(githubInstallationId, owner, repo, prNumber, body);
+        await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { githubCommentId: commentId } });
+        log.info({ reviewId, commentId }, "posted the rate-limit notice");
+      }
+    } catch (postError) {
+      log.warn({ reviewId, err: postError }, "could not post the rate-limit notice");
+    }
+
+    // Rethrown so BullMQ retries this job rather than marking it done.
+    throw error;
+  }
+}
+
+async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise<void> {
+  const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber, prTitle, prBody, forced } = data;
+  const startedAt = Date.now();
   const reviewsCol = await reviews();
 
   // first finding the most recent document
   // checking the col and also filter  in parallel 
-  const [repoConfig, existingReview, previousReview] = await Promise.all([
+  const [repoConfig, existingReview, previousReview, pullRequestDoc] = await Promise.all([
     loadRepositoryConfig(pullRequestId),
     reviewsCol.findOne({ pullRequestId, headSha }),
     reviewsCol.findOne({ pullRequestId, status: "completed" }, { sort: { createdAt: -1 } }),
+    loadPullRequestDoc(pullRequestId),
   ]);
 
+  // The PR's own lastReviewedSha is the authority on how far this PR has been
+  // reviewed; the most recent completed review's headSha is the fallback for
+  // PRs last reviewed before that field existed. Both are skipped entirely on
+  // a forced review, which is a request to re-review the whole PR, not the
+  // delta since a run the author just rejected.
+  const baselineSha = forced ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
+
   let diff: PullRequestDiff;
-  // if there is previous diff then submit it to getIncrementalDiff else review normally 
-  if (previousReview) {
-    
-    //get the head id  and pass the previous heasha and current headsha
-    const incrementalDiff = await getIncrementalDiff(githubInstallationId, owner, repo, previousReview.headSha, headSha).catch(
+  if (baselineSha && baselineSha !== headSha) {
+    const incrementalDiff = await getIncrementalDiff(githubInstallationId, owner, repo, baselineSha, headSha).catch(
       (incrementalError) => {
         log.warn({ reviewId, err: incrementalError }, "incremental diff failed, falling back to full PR diff");
         return null;
       },
     );
+    if (incrementalDiff) {
+      log.info({ reviewId, baselineSha, headSha, files: incrementalDiff.fileCount }, "reviewing incrementally");
+    }
     diff = incrementalDiff ?? (await getPullRequestDiff(githubInstallationId, owner, repo, prNumber));
   } else {
     diff = await getPullRequestDiff(githubInstallationId, owner, repo, prNumber);
   }
   log.info(
-    { reviewId, fileCount: diff.fileCount, chars: diff.diffText.length, incremental: Boolean(previousReview) },
+    {
+      reviewId,
+      fileCount: diff.fileCount,
+      totalChangedLines: diff.totalChangedLines,
+      chars: diff.diffText.length,
+      incremental: Boolean(baselineSha),
+      oversized: Boolean(diff.oversized),
+      locallyDiffed: diff.files.filter((f) => f.patchSource === "local").length,
+      diffUnavailable: diff.files.filter((f) => f.patchSource === "unavailable").length,
+    },
     "diff fetched",
   );
 
-  if (diff.fileCount > MAX_DIFF_FILES || diff.diffText.length > MAX_DIFF_CHARS) {
-    log.info({ reviewId }, "diff too large, skipping AI call");
+  // Repo-level overrides from .prsentry.yaml at the head commit. A malformed
+  // file never fails the review — its problems are collected and appended to
+  // the posted comment so the author can see exactly which key is wrong.
+  const { config: reviewConfig, errors: configErrors } = await loadRepoConfig(
+    githubInstallationId,
+    owner,
+    repo,
+    headSha,
+  );
+  if (configErrors.length > 0) {
+    log.warn({ reviewId, configErrors }, "problems in .prsentry.yaml — continuing with defaults for those keys");
+  }
+
+  // Filtering runs before the size gate so the gate measures real reviewable
+  // work: a 400-file formatting PR is usually under 20 files by this count,
+  // and gating on GitHub's raw file count would refuse a PR there is nothing
+  // expensive about. Within the reviewable set, size still doesn't decide
+  // *whether* to review — only how the diff is split across AI passes.
+  const selection = selectDiffForReview(diff.files, {
+    pathFilters: reviewConfig.pathFilters,
+    skipTriage: forced,
+  });
+  log.info(
+    {
+      reviewId,
+      chunks: selection.chunks.length,
+      analyzable: selection.analyzableFiles.length,
+      skippedAsNoise: selection.skippedAsNoise.length,
+      triaged: selection.triaged.length,
+      reviewableCount: selection.reviewableCount,
+      reviewableChangedLines: selection.reviewableChangedLines,
+      skippedForBudget: selection.skippedForBudget.length,
+      truncated: selection.truncatedFiles.length,
+      coveredCount: selection.coveredCount,
+      coveragePct: Math.round(coverageRatio(selection) * 100),
+    },
+    "diff selected for review",
+  );
+
+  // Projected before any call is made, so an expensive review is visible in
+  // the logs whether or not it ends up being refused.
+  const costEstimate = estimateReviewCost(selection);
+  log.info(
+    { reviewId, ...costEstimate, capacity: REVIEW_CAPACITY },
+    "projected review cost",
+  );
+
+  // The one place size stops a review outright. Everything above this line
+  // is cheap; everything below it costs model tokens.
+  const gate = evaluateSizeGate(selection, reviewConfig, { oversized: diff.oversized, forced });
+  for (const warning of gate.warnings) {
+    log.warn({ reviewId, expectedTokens: costEstimate.expectedTokens }, warning);
+  }
+  if (gate.bail) {
+    log.warn({ reviewId, reason: gate.reason, detail: gate.detail }, "review gate tripped — no review will be run");
+
     await reviewsCol.updateOne(
       { pullRequestId, headSha },
-      { $set: { status: "failed", summary: "PR too large to review automatically." } },
+      {
+        $set: {
+          status: "completed" as const,
+          verdict: "comment" as const,
+          summary: gate.detail ?? "Pull request too large to review.",
+          findings: [],
+          touchedFiles: diff.files.map((f) => f.filename),
+          incomplete: {
+            reason: gate.reason!,
+            detail: gate.detail ?? "",
+            filesSeen: diff.fileCount,
+            filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,
+            changedLines: diff.totalChangedLines,
+            at: new Date(),
+          },
+        },
+      },
     );
+
+    try {
+      const body =
+        formatBailoutComment(selection, reviewConfig, gate, {
+          filesSeen: diff.fileCount,
+          totalChangedLines: diff.totalChangedLines,
+        }) + formatConfigErrors(configErrors);
+      const commentId = await postSummaryComment(githubInstallationId, owner, repo, prNumber, body);
+      await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { githubCommentId: commentId } });
+      log.info({ reviewId, commentId }, "posted size bail-out comment");
+    } catch (postError) {
+      log.error({ reviewId, err: postError }, "failed to post size bail-out comment");
+    }
+
+    // Deliberately not a job failure: the review reached a correct, final
+    // decision. Retrying would just re-post the same comment.
     return;
   }
 
@@ -192,8 +405,24 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
 
   let aiResult: Pick<ReviewResult, "verdict" | "summary" | "findings">;
   let staticFindings: FindingDoc[];
+  // Tracked across every branch, including the ones that spend nothing, so a
+  // review that made zero provider calls records that as a fact rather than
+  // as a missing field.
+  let reviewUsage: TokenUsage = EMPTY_USAGE;
 
-  if (previousReview && diff.fileCount === 0) {
+  if (selection.chunks.length === 0 && !(baselineSha && diff.fileCount === 0)) {
+    // Nothing with a reviewable text patch survived selection — a PR of only
+    // binaries, images, or lockfiles. Static analysis has nothing to read
+    // either, so this completes as a real (empty) review rather than a
+    // failure: there is genuinely nothing to say about it.
+    log.info({ reviewId, skippedAsNoise: selection.skippedAsNoise.length }, "no reviewable text changes");
+    aiResult = {
+      verdict: "approve",
+      summary: "No reviewable code changes in this pull request (only generated, binary, or vendored files changed).",
+      findings: [],
+    };
+    staticFindings = [];
+  } else if (baselineSha && previousReview && diff.fileCount === 0) {
     // The incremental delta is empty (e.g. an empty merge commit) — nothing
     // to send the model, so reuse the previous review's verdict/summary
     // rather than spending an AI call on zero changed files.
@@ -204,6 +433,31 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
       findings: [],
     };
     staticFindings = [];
+  } else if (existingReview?.aiCheckpoint) {
+    // A previous attempt at THIS head commit already finished the model work
+    // and then failed somewhere after it. Reuse that output rather than
+    // re-spending the whole token budget — the diff is byte-identical, so a
+    // second generation would buy nothing but cost everything.
+    const checkpoint = existingReview.aiCheckpoint;
+    log.info(
+      { reviewId, checkpointedAt: checkpoint.at, calls: checkpoint.calls, totalTokens: checkpoint.totalTokens },
+      "reusing the model output from a previous attempt — skipping generation",
+    );
+    aiResult = {
+      verdict: checkpoint.verdict,
+      summary: `${checkpoint.summary}${formatCoverageNote(selection, checkpoint.unreviewedFiles)}`,
+      findings: checkpoint.findings,
+    };
+    staticFindings = checkpoint.staticFindings;
+    // Reported so this review's metrics still show what it cost, but NOT
+    // re-added to the global counter: those tokens were already recorded by
+    // the attempt that actually spent them.
+    reviewUsage = {
+      inputTokens: checkpoint.inputTokens,
+      outputTokens: checkpoint.outputTokens,
+      totalTokens: checkpoint.totalTokens,
+      calls: checkpoint.calls,
+    };
   } else {
     log.info({ reviewId }, "running static analysis, then calling the model...");
 
@@ -213,7 +467,12 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     // partially available. Bounded by STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS below
     // rather than awaited unconditionally, so a slow static-analysis run
     // degrades gracefully instead of blocking the AI call indefinitely.
-    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, diff.files, commentableLines, log).catch(
+    // Static analysis reads analyzableFiles, NOT the chunk selection: linters
+    // have no context window and no per-token cost, so the AI's size budget
+    // must never shrink their coverage. A file the AI had no room for still
+    // gets linted, which is what keeps an oversized PR from going completely
+    // unexamined.
+    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, selection.analyzableFiles, commentableLines, log).catch(
       (staticError) => {
         log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
         return [] as FindingDoc[];
@@ -225,14 +484,32 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
       new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
     ]);
 
-    const generated = await generateReview(diff.diffText, {
-      customInstructions: repoConfig?.customInstructions,
-      staticFindings: staticFindingsForContext,
-      prTitle,
-      prBody: prBody ?? undefined,
-      repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
-    });
-    aiResult = generated;
+    const generated = await generateChunkedReview(
+      selection.chunks.map((chunk) => chunk.files),
+      {
+        customInstructions: repoConfig?.customInstructions,
+        staticFindings: staticFindingsForContext,
+        prTitle,
+        prBody: prBody ?? undefined,
+        repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
+      },
+    );
+    // Step 4 of the large-PR plan: whatever the budget couldn't cover is
+    // stated in the posted comment. A partial review that reads like a full
+    // one is worse than no review, because "no issues found" gets taken as a
+    // statement about the whole PR.
+    aiResult = {
+      ...generated,
+      summary: `${generated.summary}${formatCoverageNote(selection, generated.unreviewedFiles)}`,
+    };
+    if (generated.unreviewedFiles.length > 0) {
+      log.warn(
+        { reviewId, unreviewedFiles: generated.unreviewedFiles },
+        "some files could not be reviewed even after chunk splitting",
+      );
+    }
+
+    reviewUsage = generated.usage;
 
     // Token accounting is a side metric, not part of the review — a failure
     // writing it must never fail an otherwise-good review, so it's logged and
@@ -250,9 +527,58 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
       { reviewId, aiFindings: aiResult.findings.length, staticFindings: staticFindings.length },
       "model + static analysis returned",
     );
+
+    // Persisted here, immediately after the expensive work and before
+    // anything else that can throw. Everything below this line — the review
+    // write, the lastReviewedSha write, posting, the check run — can now fail
+    // and be retried without re-spending a single token. The checkpoint
+    // stores the RAW model output: the coverage note is re-derived from this
+    // attempt's own selection, so a reused checkpoint still reports the
+    // correct gaps.
+    await reviewsCol
+      .updateOne(
+        { pullRequestId, headSha },
+        {
+          $set: {
+            aiCheckpoint: {
+              verdict: generated.verdict,
+              summary: generated.summary,
+              findings: generated.findings,
+              unreviewedFiles: generated.unreviewedFiles,
+              staticFindings,
+              inputTokens: generated.usage.inputTokens,
+              outputTokens: generated.usage.outputTokens,
+              totalTokens: generated.usage.totalTokens,
+              calls: generated.usage.calls,
+              at: new Date(),
+            },
+          },
+        },
+      )
+      .catch((checkpointError) => {
+        // Not fatal: the review continues and posts normally. It only means a
+        // later failure would have to re-spend the budget, which is the
+        // behaviour we had before this existed.
+        log.warn({ reviewId, err: checkpointError }, "failed to checkpoint model output — a retry would re-run generation");
+      });
   }
 
   const allFindings = [...carriedForwardFindings, ...aiResult.findings, ...staticFindings];
+
+  // Anything the last review flagged on a file this push edited, that this
+  // review no longer reports, is called out as fixed — otherwise a review
+  // that says nothing about a resolved issue is indistinguishable from one
+  // that forgot about it.
+  const resolvedFindings = findResolvedFindings(
+    previousReview?.findings ?? [],
+    touchedFiles,
+    [...aiResult.findings, ...staticFindings],
+  );
+  if (resolvedFindings.length > 0) {
+    log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
+  }
+  const summaryWithResolved = `${aiResult.summary}${formatResolvedNote(resolvedFindings)}`;
+
 // saves  the review in mongo db
   await reviewsCol.updateOne(
     { pullRequestId, headSha },
@@ -260,12 +586,22 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
       $set: {
         status: "completed",
         verdict: aiResult.verdict,
-        summary: aiResult.summary,
+        summary: summaryWithResolved,
         findings: allFindings,
         touchedFiles: Array.from(touchedFiles),
       },
     },
   );
+
+  // Records how far this PR has actually been reviewed, so the next push's
+  // incremental diff starts from here.
+  if (ObjectId.isValid(pullRequestId)) {
+    const pullRequestsCol = await pullRequests();
+    await pullRequestsCol.updateOne(
+      { _id: new ObjectId(pullRequestId) as unknown as string },
+      { $set: { lastReviewedSha: headSha } },
+    );
+  }
 
   const postingThreshold = resolvePostingThreshold(repoConfig);
   const postableFindings = allFindings.filter((f) => meetsThreshold(f.severity, postingThreshold));
@@ -280,8 +616,21 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
   // filter and every postable finding is shown, same as before.
   const newPostableFindings = postableFindings.filter((f) => touchedFiles.has(f.file));
 
+  // Mapped before the comment is rendered, because the inline cap decides
+  // what the comment body has to carry: anything that loses a slot has to
+  // appear in the collapsed section instead, so no finding is dropped just
+  // because it didn't fit inline.
+  const { mappable, unmappable } = mapFindingsToInlineComments(newPostableFindings, commentableLines);
+  const { posted, overflow } = capInlineComments(mappable);
+  const overflowKeys = new Set(overflow.map((f) => `${f.file}::${f.line}::${f.title}`));
+
   try {
-    const commentBody = formatSummaryComment({ summary: aiResult.summary, findings: newPostableFindings });
+    const commentBody =
+      formatSummaryComment({
+        summary: summaryWithResolved,
+        findings: newPostableFindings.filter((f) => !overflowKeys.has(`${f.file}::${f.line}::${f.title}`)),
+        overflowFindings: overflow,
+      }) + formatConfigErrors(configErrors);
 
     let commentId: number;
     if (previousReview?.githubCommentId) {
@@ -297,12 +646,20 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     }
     await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { githubCommentId: commentId } });
 
-    const { mappable, unmappable } = mapFindingsToInlineComments(newPostableFindings, commentableLines);
-    log.info({ reviewId, mappable: mappable.length, unmappable: unmappable.length }, "inline mapping");
+    log.info(
+      {
+        reviewId,
+        mappable: mappable.length,
+        unmappable: unmappable.length,
+        postedInline: posted.length,
+        overflowToSummary: overflow.length,
+      },
+      "inline mapping",
+    );
 
-    if (mappable.length > 0) {
-      await postInlineReview(githubInstallationId, owner, repo, prNumber, headSha, mappable);
-      log.info({ reviewId, count: mappable.length }, "posted inline review");
+    if (posted.length > 0) {
+      await postInlineReview(githubInstallationId, owner, repo, prNumber, headSha, posted);
+      log.info({ reviewId, count: posted.length }, "posted inline review");
     }
   } catch (postError) {
     log.error({ reviewId, err: postError }, "posting to GitHub FAILED");
@@ -321,5 +678,39 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     } catch (checkError) {
       log.warn({ reviewId, err: checkError }, "failed to complete check run");
     }
+  }
+
+  const metrics = {
+    inputTokens: reviewUsage.inputTokens,
+    outputTokens: reviewUsage.outputTokens,
+    totalTokens: reviewUsage.totalTokens,
+    calls: reviewUsage.calls,
+    model: process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b",
+    durationMs: Date.now() - startedAt,
+    filesSeen: diff.fileCount,
+    filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,
+    filesReviewed: selection.analyzableFiles.length - selection.skippedForBudget.length,
+    findingsProduced: allFindings.length,
+    commentsPosted: posted.length,
+    estimatedCostUsd: estimateCost(reviewUsage),
+  };
+
+  // Written after posting so `commentsPosted` reflects what actually went
+  // out. Like the usage counter, a failure here must never fail a review
+  // that already succeeded.
+  await reviewsCol
+    .updateOne({ pullRequestId, headSha }, { $set: { metrics } })
+    .catch((metricsError) => log.warn({ reviewId, err: metricsError }, "failed to record review metrics"));
+
+  // The ceiling alert. Logged at error level so it reaches whatever watches
+  // logs, rather than only being visible to someone who thinks to look at
+  // the dashboard.
+  if (metrics.totalTokens > REVIEW_TOKEN_CEILING) {
+    log.error(
+      { reviewId, prNumber, ...metrics, ceiling: REVIEW_TOKEN_CEILING },
+      "review exceeded the per-review token ceiling",
+    );
+  } else {
+    log.info({ reviewId, ...metrics }, "review metrics");
   }
 }

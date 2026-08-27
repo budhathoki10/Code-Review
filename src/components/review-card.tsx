@@ -170,6 +170,55 @@ function SeverityStrip({ findings }: { findings: FindingDoc[] }) {
   );
 }
 
+function formatTokens(count: number): string {
+  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(2)}M`;
+  if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+  return String(count);
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1_000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1_000)}s`;
+}
+
+/**
+ * What this review cost and how much of the PR it actually covered. Rendered
+ * only when metrics exist, so reviews written before per-review accounting
+ * simply don't show the strip rather than showing zeros that read as "this
+ * review was free".
+ */
+function MetricsStrip({ metrics }: { metrics: NonNullable<ReviewDoc["metrics"]> }) {
+  const cells: { label: string; value: string; title?: string }[] = [
+    { label: "Tokens", value: formatTokens(metrics.totalTokens), title: `${metrics.inputTokens} in / ${metrics.outputTokens} out` },
+    { label: "Calls", value: String(metrics.calls) },
+    { label: "Duration", value: formatDuration(metrics.durationMs) },
+    {
+      label: "Files",
+      value: `${metrics.filesReviewed}/${metrics.filesSeen}`,
+      title: `${metrics.filesReviewed} reviewed, ${metrics.filesFiltered} filtered out, ${metrics.filesSeen} changed`,
+    },
+    { label: "Comments", value: String(metrics.commentsPosted) },
+  ];
+
+  // Only shown once rates are configured — a $0.0000 cell would look like a
+  // measurement rather than an absent setting.
+  if (metrics.estimatedCostUsd > 0) {
+    cells.push({ label: "Est. cost", value: `$${metrics.estimatedCostUsd.toFixed(4)}` });
+  }
+
+  return (
+    <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-t border-border pt-4 sm:grid-cols-3 lg:grid-cols-6">
+      {cells.map((cell) => (
+        <div key={cell.label} title={cell.title}>
+          <dt className="text-xs text-subtle">{cell.label}</dt>
+          <dd className="mt-0.5 text-sm font-medium tabular-nums text-foreground">{cell.value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
 export function ReviewCard({
   review,
   pullRequest,
@@ -241,6 +290,17 @@ export function ReviewCard({
             </div>
           )}
 
+          {review.incomplete && (
+            <div className="mt-3 rounded-md border border-warning/30 bg-warning/5 px-3 py-2">
+              <p className="text-xs font-medium text-warning">
+                {review.incomplete.reason === "rate-limited"
+                  ? "Paused — GitHub rate limit"
+                  : "Not reviewed — pull request too large"}
+              </p>
+              <p className="mt-0.5 text-xs text-muted">{review.incomplete.detail}</p>
+            </div>
+          )}
+
           {review.status === "failed" && review.error && (
             <div className="mt-3 rounded-md border border-danger/30 bg-danger/5 px-3 py-2">
               <p className="text-xs font-medium text-danger">
@@ -263,6 +323,8 @@ export function ReviewCard({
               ))}
             </ul>
           )}
+
+          {review.metrics && <MetricsStrip metrics={review.metrics} />}
         </div>
       </details>
     </li>

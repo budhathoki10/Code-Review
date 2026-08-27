@@ -5,7 +5,7 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
-  /** Provider calls these totals came from — 1 for a single call, up to 5 for a full review. */
+  /** Provider calls these totals came from — 1 for a single call, up to 65 for a full chunked review (see review-worker-factory.ts). */
   calls: number;
 }
 
@@ -70,6 +70,33 @@ export async function recordUsage(reviewUsage: TokenUsage): Promise<void> {
     { upsert: true },
   );
 }
+
+/**
+ * Per-million-token rates for the configured model. Defaults are zero rather
+ * than a guess: a fabricated price is worse than an explicit "not
+ * configured", because it looks authoritative on a dashboard. Set
+ * AI_INPUT_COST_PER_MTOK / AI_OUTPUT_COST_PER_MTOK to get real numbers.
+ */
+const INPUT_COST_PER_MTOK = Number(process.env.AI_INPUT_COST_PER_MTOK ?? 0);
+const OUTPUT_COST_PER_MTOK = Number(process.env.AI_OUTPUT_COST_PER_MTOK ?? 0);
+
+/** Approximate USD for one review's token usage. Returns 0 when no rates are configured. */
+export function estimateCost(usage: TokenUsage): number {
+  const cost =
+    (usage.inputTokens / 1_000_000) * INPUT_COST_PER_MTOK +
+    (usage.outputTokens / 1_000_000) * OUTPUT_COST_PER_MTOK;
+  // Rounded to a tenth of a cent — more precision than that is noise given
+  // the provider reports token counts, not prices.
+  return Math.round(cost * 10_000) / 10_000;
+}
+
+/**
+ * Cost above which a single review is considered anomalous and logged at
+ * error level. Expressed in tokens rather than dollars so it still works
+ * with no pricing configured — the thing being watched for is a runaway
+ * review, and token count is the direct signal.
+ */
+export const REVIEW_TOKEN_CEILING = Number(process.env.REVIEW_TOKEN_CEILING ?? 300_000);
 
 /** App-wide lifetime totals across every user, or null before any review has run. */
 export async function getUsageSummary(): Promise<UsageDoc | null> {
