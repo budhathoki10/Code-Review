@@ -27,13 +27,42 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-/** Matches the sample output shape from Documentation.md's Phase 3 section. */
-export function formatSummaryComment(review: { summary?: string; findings: FindingDoc[] }): string {
+/**
+ * Matches the sample output shape from Documentation.md's Phase 3 section.
+ *
+ * `overflowFindings` are findings that qualified for an inline comment but
+ * lost the per-review inline cap (see capInlineComments). They are rendered
+ * in a collapsed <details> block rather than posted as individual line
+ * comments — still fully disclosed, just not occupying the reader's
+ * attention by default. They are deliberately NOT also listed in the main
+ * findings list above, so every finding appears exactly once in this
+ * comment.
+ */
+export function formatSummaryComment(review: {
+  summary?: string;
+  findings: FindingDoc[];
+  overflowFindings?: FindingDoc[];
+}): string {
   const parts = ["##  AI Code Review", "", review.summary ?? "No summary available."];
 
   if (review.findings.length > 0) {
     parts.push("", `**Findings (${review.findings.length}):**`, "");
     parts.push(review.findings.map(formatFinding).join("\n\n"));
+  }
+
+  const overflow = review.overflowFindings ?? [];
+  if (overflow.length > 0) {
+    // The blank line after </summary> is required — without it GitHub
+    // renders the block's Markdown as literal text.
+    parts.push(
+      "",
+      "<details>",
+      `<summary><b>${overflow.length} more finding(s)</b> — not posted inline to keep this review readable</summary>`,
+      "",
+      overflow.map(formatFinding).join("\n\n"),
+      "",
+      "</details>",
+    );
   }
 
   return parts.join("\n");

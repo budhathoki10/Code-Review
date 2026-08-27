@@ -1,6 +1,8 @@
 // this file is the heart of the project
 import { NextRequest, NextResponse } from "next/server";
-import type { PullRequestEvent } from "@octokit/webhooks-types";
+import type { PullRequestEvent, IssueCommentEvent } from "@octokit/webhooks-types";
+import type { Logger } from "pino";
+import { isForceCommand } from "@/lib/review/gate";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { claimThrottleWindow, throttleWindowRemainingMs } from "@/lib/queue/pr-throttle";
@@ -24,6 +26,104 @@ const PR_REVIEW_THROTTLE_WINDOW_MS = Number(process.env.PR_REVIEW_THROTTLE_WINDO
 
 function ok() {
   return NextResponse.json({ ok: true }, { status: 200 });
+}
+
+/**
+ * Handles `@prsentry review --force` on a pull request.
+ *
+ * Only PR comments count — `issue_comment` fires for plain issues too, and a
+ * comment on an issue has no diff to review. The forced review reuses the
+ * whole normal path; the only difference is the `forced` flag, which makes
+ * the pipeline skip the size gate and the cheap-triage filter.
+ *
+ * A forced review deliberately bypasses the per-PR throttle window: it is an
+ * explicit human request, not an automatic reaction to a push, and making
+ * someone wait out a debounce they didn't trigger would read as the command
+ * being ignored.
+ */
+async function handleForceCommand(payload: IssueCommentEvent, deliveryId: string, log: Logger) {
+  if (payload.action !== "created" || !payload.issue?.pull_request) {
+    log.info("issue_comment ignored — not a new comment on a pull request");
+    return ok();
+  }
+  if (!isForceCommand(payload.comment?.body)) {
+    return ok();
+  }
+
+  // Authorization. The webhook signature proves the payload came from GitHub,
+  // not that this commenter may spend our tokens: on a public repo any account
+  // can comment on any PR. A forced review bypasses the throttle, the size
+  // gate and the triage filter (up to ~65 provider calls) and deletes the
+  // stored review row for the current head, so it has to be limited to people
+  // with a real relationship to the repo — plus the PR's own author, who is
+  // the person most likely to want their oversized PR reviewed anyway.
+  const association = payload.comment?.author_association;
+  const isMaintainer = association === "OWNER" || association === "MEMBER" || association === "COLLABORATOR";
+  const isPrAuthor = Boolean(
+    payload.comment?.user?.login && payload.issue?.user?.login && payload.comment.user.login === payload.issue.user.login,
+  );
+  if (!isMaintainer && !isPrAuthor) {
+    log.info(
+      { association, actor: payload.comment?.user?.login, prNumber: payload.issue.number },
+      "force review ignored — commenter is not a maintainer or the PR author",
+    );
+    return ok();
+  }
+
+  log.info({ prNumber: payload.issue.number, association }, "force review command received");
+  await ensureIndexes();
+
+  const repositoriesCol = await repositories();
+  const repositoryDoc = await repositoriesCol.findOne({ githubRepoId: payload.repository.id });
+  if (!repositoryDoc?._id) {
+    log.info("force review ignored — repo isn't tracked");
+    return ok();
+  }
+
+  const pullRequestsCol = await pullRequests();
+  const pullRequestDoc = await pullRequestsCol.findOne({
+    repositoryId: String(repositoryDoc._id),
+    githubPrNumber: payload.issue.number,
+  });
+  if (!pullRequestDoc?._id) {
+    log.info("force review ignored — no tracked pull request for this comment");
+    return ok();
+  }
+
+  const pullRequestId = String(pullRequestDoc._id);
+  const headSha = pullRequestDoc.headSha;
+
+  // The (pullRequestId, headSha) unique index means a forced review of a
+  // commit that already has a review row would be rejected. Delete that row
+  // first: forcing is an explicit request to redo the work, so the previous
+  // (bailed-out) result for this exact commit is what's being replaced.
+  const reviewsCol = await reviews();
+  await reviewsCol.deleteOne({ pullRequestId, headSha });
+
+  const insertResult = await reviewsCol.insertOne({
+    pullRequestId,
+    headSha,
+    status: "pending",
+    findings: [],
+    createdAt: new Date(),
+  });
+
+  await enqueueReviewJob({
+    reviewId: String(insertResult.insertedId),
+    pullRequestId,
+    headSha,
+    githubInstallationId: repositoryDoc.githubInstallationId,
+    owner: payload.repository.owner.login,
+    repo: payload.repository.name,
+    prNumber: payload.issue.number,
+    requestId: deliveryId,
+    prTitle: pullRequestDoc.title,
+    prBody: pullRequestDoc.body,
+    forced: true,
+  });
+  log.info({ pullRequestId, headSha }, "forced review enqueued");
+
+  return ok();
 }
 
 export async function POST(request: NextRequest) {
@@ -62,6 +162,12 @@ export async function POST(request: NextRequest) {
         { status: 429, headers: { "Retry-After": String(WEBHOOK_RATE_LIMIT_WINDOW_SECONDS) } },
       );
     }
+  }
+
+  // The one chat command this bot supports: a maintainer overriding the
+  // size gate on a PR the bot declined to review (see review/gate.ts).
+  if (eventType === "issue_comment") {
+    return handleForceCommand(rawPayload as unknown as IssueCommentEvent, deliveryId, log);
   }
 
   //only cares about the pull request

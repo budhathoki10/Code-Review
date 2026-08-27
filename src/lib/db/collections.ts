@@ -25,7 +25,7 @@ export interface UsageDoc {
   /** Completion tokens returned. */
   outputTokens: number;
   totalTokens: number;
-  /** Individual provider calls — up to 5 per review (see generateReview). */
+  /** Individual provider calls — up to 65 per review (see the worst-case breakdown in review-worker-factory.ts). */
   calls: number;
   /** Reviews contributing to these totals — `calls / reviews` gives average calls per review. */
   reviews: number;
@@ -55,6 +55,14 @@ export interface PullRequestDoc {
   headSha: string;
   /** Kept in sync with the PR body on every push so a throttle-debounced trailing review (see throttle-worker-factory.ts) still has it for AI context. */
   body?: string | null;
+  /**
+   * The head commit of the last review that completed for this PR — the base
+   * of the next incremental diff. Derivable from the reviews collection, but
+   * stored here so the incremental path is a point lookup on the PR rather
+   * than a sort over its review history, and so "what has this PR actually
+   * been reviewed up to?" is answerable without reconstructing it.
+   */
+  lastReviewedSha?: string;
 }
 
 export interface FindingDoc {
@@ -68,6 +76,29 @@ export interface FindingDoc {
   confidence?: string;
   /** Absent means "ai" — only set for findings produced by the deterministic static-analysis stage. */
   source?: "ai" | "static-analysis";
+}
+
+/** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */
+export interface ReviewMetrics {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Provider calls this review made. */
+  calls: number;
+  model: string;
+  /** Wall-clock milliseconds from pipeline start to finish, including GitHub I/O and static analysis. */
+  durationMs: number;
+  /** Files GitHub reported as changed. */
+  filesSeen: number;
+  /** Files removed by the noise list, user path filters, or cheap triage. */
+  filesFiltered: number;
+  /** Files actually sent to the model. */
+  filesReviewed: number;
+  findingsProduced: number;
+  /** Inline comments actually posted (after the per-review cap). */
+  commentsPosted: number;
+  /** USD, from the configured per-million-token rates. Approximate by construction — see estimateCost. */
+  estimatedCostUsd: number;
 }
 
 export interface ReviewDoc {
@@ -87,8 +118,67 @@ export interface ReviewDoc {
   githubCommentId?: number;
   /** Set once a GitHub check run is created, so a retried job PATCHes it instead of creating a duplicate. */
   checkRunId?: number;
+  /**
+   * What this one review cost and covered. The global `usage` counter answers
+   * "what have we spent in total"; this answers "what did THIS review spend,
+   * and on how much work" — the question you actually need to find the review
+   * that burned 400k tokens, which a single shared counter can never surface.
+   */
+  metrics?: ReviewMetrics;
+  /**
+   * The model's output for this exact head commit, persisted the instant
+   * generation finishes and before anything that can fail.
+   *
+   * BullMQ retries a failed job up to `attempts` (3) times, and a retry
+   * re-runs the whole pipeline from the top. Without this, any failure after
+   * the model calls — a Mongo blip writing the review, say — would re-spend
+   * the entire token budget, making the real worst case per PR event 3x the
+   * per-attempt ceiling. Posting failures were already isolated and never
+   * retried; this closes the remaining window.
+   *
+   * Keyed implicitly by (pullRequestId, headSha), the same pair the unique
+   * index uses, so it can only ever be reused for the commit that produced
+   * it. A new push writes a new review row and gets no checkpoint.
+   */
+  aiCheckpoint?: {
+    verdict: "approve" | "request_changes" | "comment";
+    summary: string;
+    findings: FindingDoc[];
+    /** Files the model could not review even after chunk splitting — see runFindingsWithBisect. */
+    unreviewedFiles: string[];
+    /** Static-analysis findings from the same attempt. Free of model cost, but not free of GitHub calls and CPU. */
+    staticFindings: FindingDoc[];
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    calls: number;
+    at: Date;
+  };
   /** Populated once retries are exhausted — the durable dead-letter record for a failed review. */
   error?: { message: string; attempts: number; failedAt: Date };
+  /**
+   * Set when a review deliberately stopped short instead of reviewing the
+   * whole PR: rate limiting (retryable — the job is failed so BullMQ runs it
+   * again) or a size bail-out (terminal until someone forces it). Recorded so
+   * "why did this PR never get a real review?" is answerable from the
+   * database rather than only from logs.
+   */
+  incomplete?: {
+    reason:
+      | "rate-limited"
+      | "too-many-files"
+      | "too-many-changed-lines"
+      | "un-enumerable"
+      /** The chunk budget reached too little of the PR for the review to be a fair account of it. */
+      | "coverage-too-low"
+      /** Projected token spend exceeded the per-review cost ceiling. */
+      | "cost-ceiling";
+    detail: string;
+    filesSeen?: number;
+    filesFiltered?: number;
+    changedLines?: number;
+    at: Date;
+  };
 }
 
 async function db() {
