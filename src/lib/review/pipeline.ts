@@ -594,6 +594,11 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   };
 
   const allFindings = [
+    // Carried-forward findings are deliberately NOT re-mapped: their line
+    // numbers were resolved against an earlier commit's diff, so looking
+    // them up in this one would pair a suggestion with whatever text now
+    // occupies that number — a confidently wrong "before" line is worse
+    // than none, and they keep whatever originalLine they were stored with.
     ...carriedForwardFindings,
     ...aiResult.findings.map(withOriginalLine),
     ...staticFindings.map(withOriginalLine),
