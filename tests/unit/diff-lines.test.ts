@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeCommentableLines,
+  computeLineContents,
   mapFindingsToInlineComments,
   looksLikeCleanCodeSuggestion,
 } from "@/lib/github/diff-lines";
@@ -182,6 +183,61 @@ describe("looksLikeCleanCodeSuggestion", () => {
     // `shouldRetry` contains "should" — both are ordinary code.
     expect(looksLikeCleanCodeSuggestion("return orDefault(value);")).toBe(true);
     expect(looksLikeCleanCodeSuggestion("const shouldRetry = attempts < max;")).toBe(true);
+  });
+});
+
+/**
+ * Supplies the "before" side of the dashboard's side-by-side suggestion view.
+ * Its line numbering must agree with computeCommentableLines exactly — a
+ * finding is anchored by that function and looked up by this one, so any
+ * drift shows the developer a different line than the one being replaced.
+ */
+describe("computeLineContents", () => {
+  it("maps each commentable line to its text, without the diff marker", () => {
+    const contents = computeLineContents([file()])!.get("src/greet.ts")!;
+
+    expect(contents.get(10)).toBe("function greet() {");
+    expect(contents.get(11)).toBe("  console.log('hello')");
+    expect(contents.get(12)).toBe("  console.log('added line')");
+    expect(contents.get(13)).toBe("}");
+  });
+
+  it("numbers lines identically to computeCommentableLines", () => {
+    // The two must not drift: one anchors the finding, the other renders it.
+    const commentable = computeCommentableLines([file()]).get("src/greet.ts")!;
+    const contents = computeLineContents([file()]).get("src/greet.ts")!;
+
+    expect(new Set(contents.keys())).toEqual(commentable);
+  });
+
+  it("does not let a removed line advance the numbering", () => {
+    // The off-by-one hazard: "-" lines have no new-file number. If they
+    // advanced the counter, every line after the first deletion would be
+    // attributed to the wrong text.
+    const patch = ["@@ -1,4 +1,3 @@", " keep", "-gone", "-also gone", " after"].join("\n");
+    const contents = computeLineContents([file({ patch })]).get("src/greet.ts")!;
+
+    expect(contents.get(1)).toBe("keep");
+    expect(contents.get(2)).toBe("after");
+    expect(contents.has(3)).toBe(false);
+  });
+
+  it("handles multiple hunks, restarting at each hunk's line number", () => {
+    const patch = ["@@ -1,1 +1,1 @@", "+first", "@@ -50,1 +50,1 @@", "+fiftieth"].join("\n");
+    const contents = computeLineContents([file({ patch })]).get("src/greet.ts")!;
+
+    expect(contents.get(1)).toBe("first");
+    expect(contents.get(50)).toBe("fiftieth");
+  });
+
+  it("preserves leading whitespace, which a replacement has to match", () => {
+    const patch = ["@@ -1,1 +1,1 @@", "+      deeplyIndented();"].join("\n");
+
+    expect(computeLineContents([file({ patch })]).get("src/greet.ts")!.get(1)).toBe("      deeplyIndented();");
+  });
+
+  it("skips files with no patch", () => {
+    expect(computeLineContents([file({ patch: undefined })]).has("src/greet.ts")).toBe(false);
   });
 });
 

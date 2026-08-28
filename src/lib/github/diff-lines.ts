@@ -52,6 +52,46 @@ export function computeCommentableLines(
   return result;
 }
 
+/**
+ * New-file line number → that line's text, per file, read from the same
+ * patches `computeCommentableLines` walks.
+ *
+ * Exists so a stored finding can show the line it is replacing, side by side
+ * with the suggestion, without re-fetching the file: the dashboard renders
+ * long after the diff is gone, and GitHub's own suggestion widget gets the
+ * "before" side for free from the PR page, which our dashboard does not.
+ */
+export function computeLineContents(files: PullRequestFile[]): Map<string, Map<number, string>> {
+  const result = new Map<string, Map<number, string>>();
+
+  for (const file of files) {
+    if (!file.patch) continue;
+
+    const contents = new Map<number, string>();
+    let newLine = 0;
+
+    for (const rawLine of file.patch.split("\n")) {
+      const hunkMatch = rawLine.match(HUNK_HEADER);
+      if (hunkMatch) {
+        newLine = Number(hunkMatch[1]);
+        continue;
+      }
+      if (rawLine.startsWith("\\")) continue;
+      // Mirrors computeCommentableLines exactly: removed lines have no
+      // new-file number and must not advance the counter, or every line
+      // after the first deletion would be off by one.
+      if (rawLine.startsWith("+") || rawLine.startsWith(" ")) {
+        contents.set(newLine, rawLine.slice(1));
+        newLine++;
+      }
+    }
+
+    result.set(file.filename, contents);
+  }
+
+  return result;
+}
+
 export interface InlineComment {
   path: string;
   line: number;
@@ -102,7 +142,7 @@ export function looksLikeCleanCodeSuggestion(suggestion: string): boolean {
   if (!trimmed || trimmed.length > 400) return false;
   // A real diff/hunk means the model produced a patch, not the pure
   // replacement text GitHub's suggestion syntax requires.
-  if (/^[+\-]|^@@|^```/m.test(trimmed)) return false;
+  if (/^[+-]|^@@|^```/m.test(trimmed)) return false;
   if (PROSE_MARKERS.test(trimmed)) return false;
   return true;
 }

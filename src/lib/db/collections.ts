@@ -87,6 +87,18 @@ export interface FindingDoc {
    * before this field existed; both simply aren't replyable.
    */
   githubCommentId?: number;
+  /**
+   * The existing line `suggestion` would replace, captured from the diff at
+   * review time. Lets the dashboard show before/after side by side the way
+   * GitHub's suggestion widget does — GitHub gets the "before" from the PR
+   * page it renders on, whereas the dashboard has no diff at render time.
+   *
+   * Only set when the suggestion is committable code (see
+   * looksLikeCleanCodeSuggestion) and the finding's line was in the diff.
+   * Absent on prose suggestions, unmappable findings, and reviews saved
+   * before this field existed.
+   */
+  originalLine?: string;
 }
 
 /** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */

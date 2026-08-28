@@ -9,7 +9,13 @@ import { describeSkipReason } from "@/lib/review/triage";
 import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/lib/review/gate";
 import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
-import { computeCommentableLines, mapFindingsToInlineComments, capInlineComments } from "@/lib/github/diff-lines";
+import {
+  computeCommentableLines,
+  computeLineContents,
+  looksLikeCleanCodeSuggestion,
+  mapFindingsToInlineComments,
+  capInlineComments,
+} from "@/lib/github/diff-lines";
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
@@ -576,7 +582,22 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       });
   }
 
-  const allFindings = [...carriedForwardFindings, ...aiResult.findings, ...staticFindings];
+  // Capture the line each committable suggestion would replace, while the
+  // diff is still in hand — the dashboard renders long after it's gone, and
+  // needs the "before" side to show the change the way GitHub does.
+  const lineContents = computeLineContents(diff.files);
+  const withOriginalLine = (finding: FindingDoc): FindingDoc => {
+    if (finding.line === undefined || !finding.suggestion) return finding;
+    if (!looksLikeCleanCodeSuggestion(finding.suggestion)) return finding;
+    const originalLine = lineContents.get(finding.file)?.get(finding.line);
+    return originalLine === undefined ? finding : { ...finding, originalLine };
+  };
+
+  const allFindings = [
+    ...carriedForwardFindings,
+    ...aiResult.findings.map(withOriginalLine),
+    ...staticFindings.map(withOriginalLine),
+  ];
 
   // Anything the last review flagged on a file this push edited, that this
   // review no longer reports, is called out as fixed — otherwise a review
