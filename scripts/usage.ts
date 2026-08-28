@@ -11,7 +11,7 @@ async function main() {
   const summary = await getUsageSummary();
 
   if (!summary) {
-    console.log("No AI usage recorded yet.");
+    console.log("No AI usage recorded yet. please test it later it is used");
     return;
   }
 
