@@ -1,5 +1,6 @@
 import { getInstallationOctokit } from "@/lib/github/app";
 import type { FindingDoc } from "@/lib/db/collections";
+import { groupFindingsBySeverity } from "@/lib/review/review-display";
 
 // this write the comment in the github
 const SEVERITY_EMOJI: Record<FindingDoc["severity"], string> = {
@@ -28,7 +29,39 @@ function capitalize(value: string): string {
 }
 
 /**
- * Matches the sample output shape from Documentation.md's Phase 3 section.
+ * Renders one severity's findings as a collapsed folder, worst severity
+ * first, matching how the dashboard groups them.
+ *
+ * `<details>` rather than component state, because this is Markdown posted to
+ * GitHub, not a React tree — there is no client to hold an open/closed set,
+ * and GitHub strips scripts and styles. The native element already gives
+ * every behavior that state would: closed by default, click to toggle, each
+ * folder independent so several can be open at once, and its own disclosure
+ * triangle.
+ *
+ * The blank lines after `</summary>` and before `</details>` are required —
+ * without them GitHub renders the block's Markdown as literal text.
+ */
+function formatSeverityFolders(findings: FindingDoc[]): string[] {
+  return groupFindingsBySeverity(findings).flatMap((group) => [
+    "<details>",
+    `<summary>${SEVERITY_EMOJI[group.severity]} <b>${group.severity.toUpperCase()}</b> · ${group.findings.length}</summary>`,
+    "",
+    group.findings.map(formatFinding).join("\n\n"),
+    "",
+    "</details>",
+    // Separates one folder from the next; without it GitHub renders
+    // back-to-back folders flush against each other.
+    "",
+  ]);
+}
+
+/**
+ * Findings are grouped into one collapsed folder per severity (see
+ * formatSeverityFolders), the same grouping the dashboard uses — a review
+ * with two dozen findings lands as three or four compact rows instead of an
+ * unreadable wall, and "what's critical here?" is answerable without reading
+ * everything.
  *
  * `overflowFindings` are findings that qualified for an inline comment but
  * lost the per-review inline cap (see capInlineComments). They are rendered
@@ -47,7 +80,7 @@ export function formatSummaryComment(review: {
 
   if (review.findings.length > 0) {
     parts.push("", `**Findings (${review.findings.length}):**`, "");
-    parts.push(review.findings.map(formatFinding).join("\n\n"));
+    parts.push(...formatSeverityFolders(review.findings));
   }
 
   const overflow = review.overflowFindings ?? [];

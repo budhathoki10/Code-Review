@@ -76,6 +76,17 @@ export interface FindingDoc {
   confidence?: string;
   /** Absent means "ai" — only set for findings produced by the deterministic static-analysis stage. */
   source?: "ai" | "static-analysis";
+  /**
+   * The GitHub review-comment this finding was posted as, when it was posted
+   * inline. This is the anchor the reply feature resolves against: a
+   * `pull_request_review_comment` webhook only tells us `in_reply_to_id`, so
+   * without this stored mapping there is no way to know which finding a
+   * developer is asking about. Absent for findings that were never posted
+   * inline (no line, line outside the diff, or lost the inline cap — see
+   * mapFindingsToInlineComments/capInlineComments) and for reviews written
+   * before this field existed; both simply aren't replyable.
+   */
+  githubCommentId?: number;
 }
 
 /** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */

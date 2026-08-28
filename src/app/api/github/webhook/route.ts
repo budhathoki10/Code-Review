@@ -1,10 +1,16 @@
 // this file is the heart of the project
 import { NextRequest, NextResponse } from "next/server";
-import type { PullRequestEvent, IssueCommentEvent } from "@octokit/webhooks-types";
+import type {
+  PullRequestEvent,
+  IssueCommentEvent,
+  PullRequestReviewCommentEvent,
+} from "@octokit/webhooks-types";
 import type { Logger } from "pino";
 import { isForceCommand } from "@/lib/review/gate";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
+import { isTrustedCommenter } from "@/lib/github/commenter";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
+import { enqueueReplyJob } from "@/lib/queue/reply-queue";
 import { claimThrottleWindow, throttleWindowRemainingMs } from "@/lib/queue/pr-throttle";
 import { scheduleThrottleTrailer } from "@/lib/queue/throttle-queue";
 import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
@@ -23,6 +29,14 @@ const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_
  * AI review per commit. See pr-throttle.ts / throttle-queue.ts.
  */
 const PR_REVIEW_THROTTLE_WINDOW_MS = Number(process.env.PR_REVIEW_THROTTLE_WINDOW_MS ?? 60_000);
+
+/**
+ * Questions answered per PR per window. Generous enough for a real
+ * back-and-forth, low enough that a comment flood on one PR can't run up an
+ * unbounded provider bill.
+ */
+const REPLY_RATE_LIMIT_MAX = Number(process.env.REPLY_RATE_LIMIT_MAX ?? 10);
+const REPLY_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.REPLY_RATE_LIMIT_WINDOW_SECONDS ?? 600);
 
 function ok() {
   return NextResponse.json({ ok: true }, { status: 200 });
@@ -58,11 +72,7 @@ async function handleForceCommand(payload: IssueCommentEvent, deliveryId: string
   // with a real relationship to the repo — plus the PR's own author, who is
   // the person most likely to want their oversized PR reviewed anyway.
   const association = payload.comment?.author_association;
-  const isMaintainer = association === "OWNER" || association === "MEMBER" || association === "COLLABORATOR";
-  const isPrAuthor = Boolean(
-    payload.comment?.user?.login && payload.issue?.user?.login && payload.comment.user.login === payload.issue.user.login,
-  );
-  if (!isMaintainer && !isPrAuthor) {
+  if (!isTrustedCommenter(association, payload.comment?.user?.login, payload.issue?.user?.login)) {
     log.info(
       { association, actor: payload.comment?.user?.login, prNumber: payload.issue.number },
       "force review ignored — commenter is not a maintainer or the PR author",
@@ -126,6 +136,99 @@ async function handleForceCommand(payload: IssueCommentEvent, deliveryId: string
   return ok();
 }
 
+/**
+ * Handles a developer replying to one of the bot's inline finding comments.
+ *
+ * Only threaded replies count. A brand-new review comment (no
+ * `in_reply_to_id`) isn't addressed to us and has no finding to answer about;
+ * GitHub flattens threads, so even a reply three deep carries the ROOT
+ * comment's id here, which is exactly the id stored on the finding.
+ *
+ * The work itself is queued rather than done inline: a provider call takes
+ * far longer than GitHub's webhook timeout, so answering here would time out
+ * the delivery and get it retried.
+ */
+async function handleFindingReply(
+  payload: PullRequestReviewCommentEvent,
+  deliveryId: string,
+  log: Logger,
+) {
+  if (payload.action !== "created") {
+    return ok();
+  }
+
+  const comment = payload.comment;
+  const rootCommentId = comment?.in_reply_to_id;
+  if (!rootCommentId) {
+    log.info("review comment ignored — not a reply to an existing thread");
+    return ok();
+  }
+
+  // Never answer a bot, our own replies most of all: our reply fires this
+  // same event, so without this the bot answers itself forever. Excluding
+  // every bot (not just ours) also keeps us out of loops with other review
+  // bots installed on the same repo.
+  if (comment.user?.type === "Bot") {
+    log.info({ actor: comment.user?.login }, "review comment ignored — author is a bot");
+    return ok();
+  }
+
+  if (!isTrustedCommenter(comment.author_association, comment.user?.login, payload.pull_request?.user?.login)) {
+    log.info(
+      { association: comment.author_association, actor: comment.user?.login },
+      "reply ignored — commenter is not a maintainer or the PR author",
+    );
+    return ok();
+  }
+
+  await ensureIndexes();
+
+  const repositoriesCol = await repositories();
+  const repositoryDoc = await repositoriesCol.findOne({ githubRepoId: payload.repository.id });
+  if (!repositoryDoc?._id) {
+    log.info("reply ignored — repo isn't tracked");
+    return ok();
+  }
+
+  const pullRequestsCol = await pullRequests();
+  const pullRequestDoc = await pullRequestsCol.findOne({
+    repositoryId: String(repositoryDoc._id),
+    githubPrNumber: payload.pull_request.number,
+  });
+  if (!pullRequestDoc?._id) {
+    log.info("reply ignored — no tracked pull request for this comment");
+    return ok();
+  }
+
+  // Bounds how many questions one PR can turn into provider calls. Separate
+  // from the per-repo webhook limiter above, which counts all traffic
+  // including ordinary pushes and would let a comment flood hide inside it.
+  const withinLimit = await checkRateLimit(
+    getRedisConnection(),
+    `ratelimit:reply:${payload.repository.id}:${payload.pull_request.number}`,
+    REPLY_RATE_LIMIT_MAX,
+    REPLY_RATE_LIMIT_WINDOW_SECONDS,
+  );
+  if (!withinLimit) {
+    log.warn({ prNumber: payload.pull_request.number }, "reply rate limit exceeded — dropping");
+    return ok();
+  }
+
+  await enqueueReplyJob({
+    githubInstallationId: repositoryDoc.githubInstallationId,
+    owner: payload.repository.owner.login,
+    repo: payload.repository.name,
+    prNumber: payload.pull_request.number,
+    pullRequestId: String(pullRequestDoc._id),
+    rootCommentId,
+    triggerCommentId: comment.id,
+    requestId: deliveryId,
+  });
+  log.info({ rootCommentId, triggerCommentId: comment.id }, "reply enqueued");
+
+  return ok();
+}
+
 export async function POST(request: NextRequest) {
   // verifying the signature 
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
@@ -168,6 +271,12 @@ export async function POST(request: NextRequest) {
   // size gate on a PR the bot declined to review (see review/gate.ts).
   if (eventType === "issue_comment") {
     return handleForceCommand(rawPayload as unknown as IssueCommentEvent, deliveryId, log);
+  }
+
+  // A developer replying to one of our inline finding comments. Distinct
+  // event from issue_comment, which only covers top-level PR comments.
+  if (eventType === "pull_request_review_comment") {
+    return handleFindingReply(rawPayload as unknown as PullRequestReviewCommentEvent, deliveryId, log);
   }
 
   //only cares about the pull request
