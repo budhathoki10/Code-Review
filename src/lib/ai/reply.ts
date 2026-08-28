@@ -115,6 +115,74 @@ function renderThread(thread: ThreadMessage[], botLogin: string): string {
 }
 
 /**
+ * Fits a file into the context budget by keeping the region around the
+ * finding, rather than the top of the file.
+ *
+ * Head-slicing a large file is worse than it looks: at 12k chars a
+ * 6,000-line file contributes its first ~320 lines, so a finding at line
+ * 4,500 is answered by a model that never saw the code in question and has
+ * no way to say so. Centering spends the same budget on the part the
+ * conversation is actually about.
+ *
+ * The window is deliberately generous rather than a tight ±N lines: a
+ * finding points at the symptom, and the cause is often tens of lines away
+ * in the same function — a real answer on PR #56 cited a line 25 above the
+ * finding, which a ±10 window would have excluded.
+ *
+ * Exported for tests: the interesting cases (a finding near either
+ * boundary, budget accounting) need a file far larger than a fixture should
+ * have to travel through the whole reply path to reach.
+ */
+export function windowAroundLine(
+  content: string,
+  line: number | undefined,
+  budget: number = MAX_CONTEXT_CHARS,
+): string {
+  if (content.length <= budget) return content;
+  // Nothing to center on — fall back to the top of the file, which at least
+  // shows imports and the general shape of the module.
+  if (line === undefined) return `${content.slice(0, budget)}\n... [truncated]`;
+
+  const lines = content.split("\n");
+  const target = Math.min(Math.max(line, 1), lines.length) - 1;
+
+  let first = target;
+  let last = target;
+  let used = lines[target].length;
+
+  // Expand outward a line at a time, alternating, so the window stays
+  // centered until it hits a boundary — then the remaining budget is spent
+  // entirely in the other direction rather than left unused.
+  while (true) {
+    let moved = false;
+
+    // Each direction is re-checked against the running total, not against a
+    // total snapshotted before the pair — testing both up front and then
+    // taking both overshoots the budget by whichever line was added second.
+    if (first > 0 && used + lines[first - 1].length + 1 <= budget) {
+      first--;
+      used += lines[first].length + 1;
+      moved = true;
+    }
+    if (last < lines.length - 1 && used + lines[last + 1].length + 1 <= budget) {
+      last++;
+      used += lines[last].length + 1;
+      moved = true;
+    }
+
+    if (!moved) break;
+  }
+
+  const parts: string[] = [];
+  // 1-based line numbers, matching how the finding and the reader refer to
+  // them, so the model knows where in the file its window sits.
+  if (first > 0) parts.push(`... [lines 1-${first} omitted]`);
+  parts.push(lines.slice(first, last + 1).join("\n"));
+  if (last < lines.length - 1) parts.push(`... [lines ${last + 2}-${lines.length} omitted]`);
+  return parts.join("\n");
+}
+
+/**
  * Reads the file the finding is on, so the model can answer from the real
  * current code rather than only the finding text it wrote earlier. Best
  * effort: an unreadable file just means answering from the thread alone,
@@ -130,9 +198,7 @@ async function loadFileContext(ctx: ReplyContext): Promise<string | undefined> {
     ctx.repo.ref,
   );
   if (content === undefined) return undefined;
-  return content.length > MAX_CONTEXT_CHARS
-    ? `${content.slice(0, MAX_CONTEXT_CHARS)}\n... [truncated]`
-    : content;
+  return windowAroundLine(content, ctx.finding.line);
 }
 
 /**

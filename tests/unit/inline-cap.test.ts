@@ -99,20 +99,95 @@ describe("formatSummaryComment overflow section", () => {
     expect(body).toMatch(/<\/summary>\n\n/);
   });
 
-  it("omits the details block entirely when nothing overflowed", () => {
+  // The main findings list is itself made of <details> folders now (one per
+  // severity), so the overflow block is identified by its own summary text
+  // rather than by the tag, which is no longer unique in the body.
+  it("omits the overflow block entirely when nothing overflowed", () => {
     const body = formatSummaryComment({ summary: "Summary text.", findings: [finding()] });
 
-    expect(body).not.toContain("<details>");
+    expect(body).not.toContain("more finding(s)");
   });
 
-  it("still lists non-overflow findings in the main section", () => {
+  it("still lists non-overflow findings in the main section, above the overflow block", () => {
     const body = formatSummaryComment({
       summary: "Summary text.",
       findings: [finding({ title: "main one" })],
       overflowFindings: [finding({ title: "overflowed one" })],
     });
 
-    expect(body.indexOf("main one")).toBeLessThan(body.indexOf("<details>"));
-    expect(body.indexOf("overflowed one")).toBeGreaterThan(body.indexOf("<details>"));
+    const overflowStart = body.indexOf("more finding(s)");
+    expect(body.indexOf("main one")).toBeLessThan(overflowStart);
+    expect(body.indexOf("overflowed one")).toBeGreaterThan(overflowStart);
+  });
+});
+
+describe("formatSummaryComment severity folders", () => {
+  it("puts each severity in its own collapsed folder, worst first", () => {
+    const body = formatSummaryComment({
+      summary: "Summary text.",
+      findings: [
+        finding({ severity: "low", title: "a low one" }),
+        finding({ severity: "critical", title: "a critical one" }),
+        finding({ severity: "medium", title: "a medium one" }),
+      ],
+    });
+
+    expect(body).toContain("<b>CRITICAL</b> · 1");
+    expect(body).toContain("<b>MEDIUM</b> · 1");
+    expect(body).toContain("<b>LOW</b> · 1");
+    expect(body.indexOf("CRITICAL")).toBeLessThan(body.indexOf("MEDIUM"));
+    expect(body.indexOf("MEDIUM")).toBeLessThan(body.indexOf("LOW"));
+  });
+
+  it("counts every finding of a severity in one folder", () => {
+    const body = formatSummaryComment({
+      summary: "Summary text.",
+      findings: [
+        finding({ severity: "low", title: "first low" }),
+        finding({ severity: "low", title: "second low" }),
+      ],
+    });
+
+    expect(body).toContain("<b>LOW</b> · 2");
+    expect(body).toContain("first low");
+    expect(body).toContain("second low");
+  });
+
+  it("omits severities with no findings rather than rendering empty folders", () => {
+    const body = formatSummaryComment({ summary: "Summary text.", findings: [finding({ severity: "info" })] });
+
+    expect(body).toContain("<b>INFO</b>");
+    expect(body).not.toContain("CRITICAL");
+    expect(body).not.toContain("HIGH");
+  });
+
+  it("leaves every folder closed — no severity is auto-expanded", () => {
+    const body = formatSummaryComment({
+      summary: "Summary text.",
+      findings: [finding({ severity: "critical" }), finding({ severity: "info" })],
+    });
+
+    // An `open` attribute on any folder would expand it by default.
+    expect(body).not.toContain("<details open>");
+  });
+
+  it("keeps the blank lines GitHub needs to render Markdown inside a folder", () => {
+    const body = formatSummaryComment({ summary: "Summary text.", findings: [finding()] });
+
+    expect(body).toMatch(/<\/summary>\n\n/);
+    expect(body).toMatch(/\n\n<\/details>/);
+  });
+
+  it("still renders each finding's existing detail inside its folder", () => {
+    const body = formatSummaryComment({
+      summary: "Summary text.",
+      findings: [
+        finding({ severity: "medium", title: "the title", file: "src/a.ts", line: 12, suggestion: "- old\n+ new" }),
+      ],
+    });
+
+    expect(body).toContain("`src/a.ts:12` — the title");
+    expect(body).toContain("```diff");
+    expect(body).toContain("+ new");
   });
 });
