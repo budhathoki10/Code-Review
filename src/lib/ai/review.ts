@@ -129,7 +129,11 @@ const FINDINGS_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
               line: { type: "integer" },
               title: { type: "string" },
               explanation: { type: "string" },
-              suggestion: { type: "string" },
+              suggestion: {
+                type: "string",
+                description:
+                  "Optional. Fill this ONLY when the fix is a direct replacement for the single line named in `line`, and write ONLY the literal replacement code — no explanation, no markdown fence, no alternatives, no 'consider ...' phrasing. This is posted as a one-click 'commit suggestion' on GitHub, so anything here that is not code becomes something a developer can click to commit as code. The replacement may span several lines (e.g. splitting one line into three) — only the ORIGINAL line has to be a single line. If the fix needs judgment, spans multiple original lines, or is not reducible to replacing that one line, leave this empty and put the guidance in `explanation` instead.",
+              },
               confidence: { type: "string" },
             },
             required: ["severity", "category", "file", "title", "explanation"],
