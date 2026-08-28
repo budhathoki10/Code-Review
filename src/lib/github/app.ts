@@ -67,3 +67,23 @@ export async function getInstallationRepositories(
 export function getInstallationOctokit(installationId: number) {
   return getApp().getInstallationOctokit(installationId);
 }
+
+let botLogin: string | undefined;
+
+/**
+ * The login our own comments are authored as — a GitHub App comments as
+ * `<app-slug>[bot]`. Needed to tell our own messages apart from a human's
+ * when rendering a comment thread, and to ignore webhooks fired by our own
+ * replies (otherwise answering a question triggers a webhook that we answer
+ * again, forever).
+ *
+ * Cached for the process: an app's slug does not change at runtime.
+ */
+export async function getBotLogin(): Promise<string> {
+  if (!botLogin) {
+    const { data } = await getApp().octokit.request("GET /app");
+    if (!data?.slug) throw new Error("GET /app returned no slug — cannot determine bot login");
+    botLogin = `${data.slug}[bot]`;
+  }
+  return botLogin;
+}

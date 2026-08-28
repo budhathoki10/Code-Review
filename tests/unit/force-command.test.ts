@@ -1,28 +1,26 @@
 import { describe, it, expect } from "vitest";
 import { isForceCommand, FORCE_COMMAND } from "@/lib/review/gate";
+import { isTrustedCommenter } from "@/lib/github/commenter";
 
 /**
- * Authorization for `@prsentry review --force`.
+ * Authorization for the token-spending comment paths — the force command and
+ * a reply to a finding, which share this predicate.
  *
  * The webhook signature proves a payload came from GitHub, not that the
  * commenter may spend our tokens. On a public repo anyone can comment on any
  * PR, and a forced review bypasses the throttle, the size gate and the triage
  * filter while deleting the stored review row — so identity has to be checked.
  *
- * Mirrors the predicate in handleForceCommand; kept here so the rule is
- * pinned by a test rather than living only inside a route handler that has no
- * test harness.
+ * Tests the real implementation rather than a copy of it: this used to
+ * duplicate the predicate here because it lived inside the route handler,
+ * which meant the test could pass while the route drifted.
  */
-function isAuthorized(association: string | undefined, commenter?: string, prAuthor?: string): boolean {
-  const isMaintainer = association === "OWNER" || association === "MEMBER" || association === "COLLABORATOR";
-  const isPrAuthor = Boolean(commenter && prAuthor && commenter === prAuthor);
-  return isMaintainer || isPrAuthor;
-}
+const isAuthorized = isTrustedCommenter;
 
-describe("force command authorization", () => {
+describe("comment authorization", () => {
   it("allows repo owners, members and collaborators", () => {
     for (const association of ["OWNER", "MEMBER", "COLLABORATOR"]) {
-      expect(isAuthorized(association)).toBe(true);
+      expect(isAuthorized(association, "someone", "alice")).toBe(true);
     }
   });
 

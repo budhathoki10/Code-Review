@@ -672,8 +672,23 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     );
 
     if (posted.length > 0) {
-      await postInlineReview(githubInstallationId, owner, repo, prNumber, headSha, posted);
-      log.info({ reviewId, count: posted.length }, "posted inline review");
+      const postedComments = await postInlineReview(githubInstallationId, owner, repo, prNumber, headSha, posted);
+      log.info({ reviewId, count: posted.length, mapped: postedComments.length }, "posted inline review");
+
+      // Persist which GitHub comment each finding landed as, so a developer
+      // replying in that thread can be answered about the right finding (see
+      // reply-pipeline.ts). Matched by object identity: `posted` carries the
+      // very same FindingDoc references that are in `allFindings`.
+      if (postedComments.length > 0) {
+        const commentIdByFinding = new Map<FindingDoc, number>(
+          postedComments.map((p) => [p.comment.finding, p.commentId]),
+        );
+        const findingsWithCommentIds = allFindings.map((finding) => {
+          const githubCommentId = commentIdByFinding.get(finding);
+          return githubCommentId === undefined ? finding : { ...finding, githubCommentId };
+        });
+        await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { findings: findingsWithCommentIds } });
+      }
     }
   } catch (postError) {
     log.error({ reviewId, err: postError }, "posting to GitHub FAILED");
