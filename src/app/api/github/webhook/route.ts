@@ -19,7 +19,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { isDuplicateKeyError } from "@/lib/db/mongo-errors";
 import { logger } from "@/lib/logger";
 
-const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 20);
+const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 2);
 const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_SECONDS ?? 60);
 
 /**
