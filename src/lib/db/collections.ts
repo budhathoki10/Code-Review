@@ -151,6 +151,21 @@ export interface ReviewDoc {
   /** Set once a GitHub check run is created, so a retried job PATCHes it instead of creating a duplicate. */
   checkRunId?: number;
   /**
+   * Set once inline review comments have gone out for this head SHA, so a
+   * retried job doesn't post them a second time.
+   *
+   * The summary comment was already safe — it is edited in place by ID — but
+   * inline comments have no equivalent handle, and BullMQ retries re-run the
+   * pipeline from the top. With `aiCheckpoint` making a retry cheap and fast,
+   * the second attempt reaches posting in seconds with byte-identical
+   * findings: PR #58 received every one of its reviews twice, roughly the
+   * retry backoff apart. Posting itself is wrapped in try/catch and never
+   * triggers the retry, so whatever failure caused it happened elsewhere —
+   * which is exactly why this guard has to be persisted rather than held in
+   * memory for the length of one attempt.
+   */
+  inlineCommentsPostedAt?: Date;
+  /**
    * What this one review cost and covered. The global `usage` counter answers
    * "what have we spent in total"; this answers "what did THIS review spend,
    * and on how much work" — the question you actually need to find the review

@@ -13,13 +13,19 @@ import type { Logger } from "pino";
  * whether to regenerate, which is where a regression would actually land.
  */
 
-const { generateChunkedReviewMock, getPullRequestDiffMock, postSummaryCommentMock, updateSummaryCommentMock } =
-  vi.hoisted(() => ({
-    generateChunkedReviewMock: vi.fn(),
-    getPullRequestDiffMock: vi.fn(),
-    postSummaryCommentMock: vi.fn(),
-    updateSummaryCommentMock: vi.fn(),
-  }));
+const {
+  generateChunkedReviewMock,
+  getPullRequestDiffMock,
+  postSummaryCommentMock,
+  updateSummaryCommentMock,
+  postInlineReviewMock,
+} = vi.hoisted(() => ({
+  generateChunkedReviewMock: vi.fn(),
+  getPullRequestDiffMock: vi.fn(),
+  postSummaryCommentMock: vi.fn(),
+  updateSummaryCommentMock: vi.fn(),
+  postInlineReviewMock: vi.fn(),
+}));
 
 /** Fails the write that sets `status`, i.e. the first thing after the checkpoint. */
 let failStatusWrite = false;
@@ -90,7 +96,7 @@ vi.mock("@/lib/github/comment", async (importOriginal) => ({
   updateSummaryComment: updateSummaryCommentMock,
 }));
 
-vi.mock("@/lib/github/inline-comments", () => ({ postInlineReview: vi.fn() }));
+vi.mock("@/lib/github/inline-comments", () => ({ postInlineReview: postInlineReviewMock }));
 vi.mock("@/lib/github/checks", () => ({ createCheckRun: vi.fn(), completeCheckRun: vi.fn() }));
 vi.mock("@/lib/review/static-analysis", () => ({ runStaticAnalysis: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/review/config", async (importOriginal) => ({
@@ -234,5 +240,109 @@ describe("retry reuses the AI checkpoint", () => {
     seed();
     await runReviewPipeline(JOB, log);
     expect(generateChunkedReviewMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * A retry must not re-post inline comments that are already on the PR, and
+ * must not lose the comment IDs that make developer replies routable.
+ *
+ * These pull in opposite directions: the guard that stops the second post
+ * also skips the block that writes `githubCommentId` onto the findings, while
+ * the findings array itself is rewritten unconditionally from the checkpoint
+ * — which predates posting and carries no IDs. Getting one right and the
+ * other wrong trades duplicate comments for silently unanswerable replies.
+ */
+describe("retry does not duplicate or orphan inline comments", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    failStatusWrite = false;
+    seed();
+
+    getPullRequestDiffMock.mockResolvedValue({
+      fileCount: 1,
+      totalChangedLines: 4,
+      diffText: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;",
+      files: [
+        {
+          filename: "src/a.ts",
+          status: "modified",
+          changes: 4,
+          patch: "@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;",
+          patchSource: "github",
+        },
+      ],
+    });
+
+    generateChunkedReviewMock.mockResolvedValue({
+      verdict: "request_changes",
+      summary: "Reviewed the change.",
+      findings: [
+        {
+          severity: "high",
+          category: "bug",
+          file: "src/a.ts",
+          line: 1,
+          title: "Off-by-one",
+          explanation: "x should stay 1.",
+          suggestion: "const x = 1;",
+          confidence: "high",
+        },
+      ],
+      usage: { inputTokens: 1000, outputTokens: 200, totalTokens: 1200, calls: 3 },
+      chunkCount: 1,
+      unreviewedFiles: [],
+    });
+
+    postSummaryCommentMock.mockResolvedValue(999);
+    postInlineReviewMock.mockImplementation(
+      async (_i: number, _o: string, _r: string, _p: number, _s: string, comments: { finding: unknown }[]) =>
+        comments.map((comment, i) => ({ comment, commentId: 5000 + i })),
+    );
+  });
+
+  function storedFindings(): { githubCommentId?: number; title: string }[] {
+    return reviewDocs[0].findings as { githubCommentId?: number; title: string }[];
+  }
+
+  it("posts inline comments and records their IDs on the first attempt", async () => {
+    await runReviewPipeline(JOB, log);
+
+    expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
+    expect(reviewDocs[0].inlineCommentsPostedAt).toBeInstanceOf(Date);
+    expect(storedFindings().find((f) => f.title === "Off-by-one")?.githubCommentId).toBe(5000);
+  });
+
+  it("does not post them a second time when the job is retried", async () => {
+    // Attempt 1 posts, then the write after it fails.
+    await runReviewPipeline(JOB, log);
+    expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
+
+    // Attempt 2: BullMQ retries the same job against the same head SHA.
+    await runReviewPipeline(JOB, log);
+
+    // The regression this guards: PR #58 received every review twice.
+    expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps githubCommentId across the retry, so replies stay routable", async () => {
+    await runReviewPipeline(JOB, log);
+    await runReviewPipeline(JOB, log);
+
+    // findFindingByCommentId queries findings.githubCommentId; losing it
+    // drops every developer reply as "no finding maps to this comment".
+    expect(storedFindings().find((f) => f.title === "Off-by-one")?.githubCommentId).toBe(5000);
+  });
+
+  it("still posts inline comments on a retry that never got to post", async () => {
+    // Attempt 1 dies before posting, so the guard must not fire.
+    failStatusWrite = true;
+    await expect(runReviewPipeline(JOB, log)).rejects.toThrow();
+    expect(postInlineReviewMock).not.toHaveBeenCalled();
+
+    failStatusWrite = false;
+    await runReviewPipeline(JOB, log);
+
+    expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
   });
 });

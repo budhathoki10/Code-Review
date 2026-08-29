@@ -10,7 +10,6 @@ import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/lib/review/gate";
 import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
 import {
-  computeCommentableLines,
   computeLineContents,
   looksLikeCleanCodeSuggestion,
   mapFindingsToInlineComments,
@@ -117,6 +116,39 @@ export function filterCarriedForwardFindings(previousFindings: FindingDoc[], tou
 /** Identity used to decide whether two findings describe the same defect across reviews. */
 function findingKey(finding: FindingDoc): string {
   return `${finding.file}::${finding.title.trim().toLowerCase()}`;
+}
+
+/**
+ * Carries `githubCommentId` across a retry.
+ *
+ * A retry rebuilds the findings array from `aiCheckpoint`, which is written
+ * before anything is posted and so has no comment IDs on it. Storing that
+ * rebuilt array as-is would erase the mapping the first attempt persisted —
+ * and because `inlineCommentsPostedAt` correctly stops the second attempt
+ * from posting again, nothing downstream would ever put the IDs back.
+ *
+ * The cost of losing them is invisible and permanent: `findFindingByCommentId`
+ * (reply-pipeline.ts) resolves a developer's reply by querying
+ * `findings.githubCommentId`, so every reply in every thread on that review
+ * would be silently dropped as "no finding maps to this comment".
+ *
+ * Matched by value rather than object identity — these are freshly
+ * constructed objects, not the ones that were posted. Line is part of the
+ * key because one file can carry two findings with the same title.
+ */
+function withPersistedCommentIds(findings: FindingDoc[], stored: FindingDoc[] | undefined): FindingDoc[] {
+  const byPosition = new Map<string, number>();
+  for (const finding of stored ?? []) {
+    if (finding.githubCommentId !== undefined) {
+      byPosition.set(`${finding.file}::${finding.line}::${finding.title}`, finding.githubCommentId);
+    }
+  }
+  if (byPosition.size === 0) return findings;
+
+  return findings.map((finding) => {
+    const githubCommentId = byPosition.get(`${finding.file}::${finding.line}::${finding.title}`);
+    return githubCommentId === undefined ? finding : { ...finding, githubCommentId };
+  });
 }
 
 /**
@@ -417,7 +449,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     }
   }
 
-  const commentableLines = computeCommentableLines(diff.files);
+  // Both views of the diff come from one parse. `lineContents` is the richer
+  // of the two and its keys ARE the commentable lines (see walkPatches), so
+  // deriving the second costs nothing and cannot disagree with the first.
+  // It's captured here, up front, rather than where it is first read further
+  // down: the dashboard renders long after the diff is gone, and needs the
+  // "before" side of every committable suggestion to show the change the way
+  // GitHub does.
+  const lineContents = computeLineContents(diff.files);
+  const commentableLines = new Map([...lineContents].map(([file, lines]) => [file, new Set(lines.keys())]));
 
   const touchedFiles = new Set(diff.files.map((file) => file.filename));
   const carriedForwardFindings = filterCarriedForwardFindings(previousReview?.findings ?? [], touchedFiles);
@@ -582,10 +622,6 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       });
   }
 
-  // Capture the line each committable suggestion would replace, while the
-  // diff is still in hand — the dashboard renders long after it's gone, and
-  // needs the "before" side to show the change the way GitHub does.
-  const lineContents = computeLineContents(diff.files);
   const withOriginalLine = (finding: FindingDoc): FindingDoc => {
     if (finding.line === undefined || !finding.suggestion) return finding;
     if (!looksLikeCleanCodeSuggestion(finding.suggestion)) return finding;
@@ -601,7 +637,11 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // than none, and they keep whatever originalLine they were stored with.
     ...carriedForwardFindings,
     ...aiResult.findings.map(withOriginalLine),
-    ...staticFindings.map(withOriginalLine),
+    // Not mapped: no scanner in static-analysis.ts ever sets `suggestion`,
+    // so withOriginalLine would return every one of these unchanged. Mapping
+    // them anyway would imply static findings can carry a committable
+    // suggestion, which they cannot.
+    ...staticFindings,
   ];
 
   // Anything the last review flagged on a file this push edited, that this
@@ -626,7 +666,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         status: "completed",
         verdict: aiResult.verdict,
         summary: summaryWithResolved,
-        findings: allFindings,
+        findings: withPersistedCommentIds(allFindings, existingReview?.findings),
         touchedFiles: Array.from(touchedFiles),
         filteredFiles,
       },
@@ -697,9 +737,28 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       "inline mapping",
     );
 
-    if (posted.length > 0) {
+    // A retry resumes from `aiCheckpoint` and arrives here with identical
+    // findings; without this guard it posts the whole review a second time
+    // (see ReviewDoc.inlineCommentsPostedAt). Read from the row rather than
+    // `existingReview`, which was loaded before this attempt did any work.
+    const alreadyPosted = await reviewsCol.findOne(
+      { pullRequestId, headSha },
+      { projection: { inlineCommentsPostedAt: 1 } },
+    );
+
+    if (posted.length > 0 && alreadyPosted?.inlineCommentsPostedAt) {
+      log.info(
+        { reviewId, count: posted.length, postedAt: alreadyPosted.inlineCommentsPostedAt },
+        "inline comments already posted for this head SHA — skipping",
+      );
+    } else if (posted.length > 0) {
       const postedComments = await postInlineReview(githubInstallationId, owner, repo, prNumber, headSha, posted);
       log.info({ reviewId, count: posted.length, mapped: postedComments.length }, "posted inline review");
+
+      // Written immediately after the call returns, before the finding
+      // bookkeeping below — a failure there must not let a retry re-post
+      // comments that are already on the PR.
+      await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { inlineCommentsPostedAt: new Date() } });
 
       // Persist which GitHub comment each finding landed as, so a developer
       // replying in that thread can be answered about the right finding (see

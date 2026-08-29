@@ -184,6 +184,58 @@ describe("looksLikeCleanCodeSuggestion", () => {
     expect(looksLikeCleanCodeSuggestion("return orDefault(value);")).toBe(true);
     expect(looksLikeCleanCodeSuggestion("const shouldRetry = attempts < max;")).toBe(true);
   });
+
+  // The prose blocklist above only catches *hedging* ("consider", ", or ").
+  // An imperative carries none of those words, and every one of these was
+  // accepted before CODE_SHAPE existed — each would have been offered to a
+  // developer as a line of code to commit.
+  it.each([
+    "Use a transaction.",
+    "Add a null check here.",
+    "Rename this variable to something clearer.",
+    "Extract this into a helper function.",
+    "Wrap the call in try/catch.",
+    "This is not thread safe.",
+    "Move the await outside the loop.",
+  ])("rejects imperative prose with no hedging word: %s", (prose) => {
+    expect(looksLikeCleanCodeSuggestion(prose)).toBe(false);
+  });
+
+  it("rejects prose that quotes a symbol, which alone would satisfy the code check", () => {
+    // `foo()` supplies the parentheses CODE_SHAPE looks for; the trailing
+    // sentence period is what still gives it away.
+    expect(looksLikeCleanCodeSuggestion("Call resetCache() before returning here.")).toBe(false);
+  });
+
+  it("rejects a backtick anywhere, not only at the start of a line", () => {
+    // A backtick mid-line closes the ```suggestion fence this gets wrapped
+    // in, spilling the rest of the replacement out as prose. Seen live: the
+    // replacement was itself a regex containing a fence marker.
+    expect(looksLikeCleanCodeSuggestion("if (/^```/m.test(line)) return false;")).toBe(false);
+    expect(looksLikeCleanCodeSuggestion("const greeting = `hello there`;")).toBe(false);
+  });
+
+  it("rejects a replacement whose newlines lost their backslash", () => {
+    // Verbatim from PR #58 — committing this is a syntax error.
+    expect(
+      looksLikeCleanCodeSuggestion("const allFindings = [n  ...aiResult.findings.map(f),n  ...staticFindings,n  ];"),
+    ).toBe(false);
+  });
+
+  it("rejects a replacement carrying a visible \\n escape", () => {
+    expect(looksLikeCleanCodeSuggestion("const a = 1;\\nconst b = 2;")).toBe(false);
+  });
+
+  it("does not mistake a parameter named n for a mangled newline", () => {
+    // `(n ` is one space, not indentation — ordinary code, not mangling.
+    expect(looksLikeCleanCodeSuggestion("return items.map(n => n * 2);")).toBe(true);
+  });
+
+  it("still accepts real code that merely ends a statement", () => {
+    // Guards against CODE_SHAPE and the sentence-period rule over-rejecting.
+    expect(looksLikeCleanCodeSuggestion("return { ...finding, originalLine };")).toBe(true);
+    expect(looksLikeCleanCodeSuggestion("await reviewsCol.updateOne(filter, update);")).toBe(true);
+  });
 });
 
 /**
@@ -204,10 +256,21 @@ describe("computeLineContents", () => {
 
   it("numbers lines identically to computeCommentableLines", () => {
     // The two must not drift: one anchors the finding, the other renders it.
+    // Both are built from the same walkPatches call, so this now holds by
+    // construction — kept as the regression guard if they ever diverge again.
     const commentable = computeCommentableLines([file()]).get("src/greet.ts")!;
     const contents = computeLineContents([file()]).get("src/greet.ts")!;
 
     expect(new Set(contents.keys())).toEqual(commentable);
+  });
+
+  it("keeps an entry for a patch that yields no new-file lines", () => {
+    // "had a patch, nothing commentable in it" and "was never parsed" are
+    // different answers, and callers tell them apart by key presence alone.
+    const patch = ["@@ -1,2 +1,0 @@", "-gone", "-also gone"].join("\n");
+
+    expect(computeLineContents([file({ patch })]).get("src/greet.ts")?.size).toBe(0);
+    expect(computeCommentableLines([file({ patch })]).get("src/greet.ts")?.size).toBe(0);
   });
 
   it("does not let a removed line advance the numbering", () => {
@@ -270,5 +333,64 @@ describe("inline comment fence selection", () => {
 
     expect(body).not.toContain("```");
     expect(body).toContain("example explanation");
+  });
+});
+
+/**
+ * GitHub commits a suggestion block byte for byte, indentation included, so a
+ * replacement that starts at column 0 silently de-indents the line it
+ * replaces. Observed live on PR #58.
+ */
+describe("committable suggestion indentation", () => {
+  function bodyFor(overrides: Partial<FindingDoc>): string {
+    const { mappable } = mapFindingsToInlineComments(
+      [finding({ line: 11, ...overrides })],
+      computeCommentableLines([file()]),
+    );
+    return mappable[0].body;
+  }
+
+  it("re-indents a replacement to match the line it replaces", () => {
+    const body = bodyFor({
+      suggestion: "console.log('goodbye');",
+      originalLine: "    console.log('hello');",
+    });
+
+    expect(body).toContain("```suggestion\n    console.log('goodbye');\n```");
+  });
+
+  it("indents every line of a multi-line replacement", () => {
+    const body = bodyFor({
+      suggestion: "if (!user) return null;\nreturn user.name;",
+      originalLine: "      return user.name;",
+    });
+
+    expect(body).toContain("```suggestion\n      if (!user) return null;\n      return user.name;\n```");
+  });
+
+  it("leaves a replacement that already carries indentation alone", () => {
+    // The model expressed an intent about placement; overriding it would be
+    // the same mistake in reverse.
+    const body = bodyFor({
+      suggestion: "        deeplyIndented();",
+      originalLine: "  shallow();",
+    });
+
+    expect(body).toContain("```suggestion\n        deeplyIndented();\n```");
+  });
+
+  it("does not touch a prose suggestion, which is never committable", () => {
+    const body = bodyFor({
+      suggestion: "Consider extracting this into a helper, or leave it as is.",
+      originalLine: "    console.log('hello');",
+    });
+
+    expect(body).toContain("```diff\nConsider extracting");
+  });
+
+  it("is a no-op when the original line was never captured", () => {
+    expect(bodyFor({ suggestion: "await saveUser(user);" })).toContain(
+      "```suggestion\nawait saveUser(user);\n```",
+    );
   });
 });
