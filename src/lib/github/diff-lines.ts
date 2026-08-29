@@ -52,6 +52,46 @@ export function computeCommentableLines(
   return result;
 }
 
+/**
+ * New-file line number → that line's text, per file, read from the same
+ * patches `computeCommentableLines` walks.
+ *
+ * Exists so a stored finding can show the line it is replacing, side by side
+ * with the suggestion, without re-fetching the file: the dashboard renders
+ * long after the diff is gone, and GitHub's own suggestion widget gets the
+ * "before" side for free from the PR page, which our dashboard does not.
+ */
+export function computeLineContents(files: PullRequestFile[]): Map<string, Map<number, string>> {
+  const result = new Map<string, Map<number, string>>();
+
+  for (const file of files) {
+    if (!file.patch) continue;
+
+    const contents = new Map<number, string>();
+    let newLine = 0;
+
+    for (const rawLine of file.patch.split("\n")) {
+      const hunkMatch = rawLine.match(HUNK_HEADER);
+      if (hunkMatch) {
+        newLine = Number(hunkMatch[1]);
+        continue;
+      }
+      if (rawLine.startsWith("\\")) continue;
+      // Mirrors computeCommentableLines exactly: removed lines have no
+      // new-file number and must not advance the counter, or every line
+      // after the first deletion would be off by one.
+      if (rawLine.startsWith("+") || rawLine.startsWith(" ")) {
+        contents.set(newLine, rawLine.slice(1));
+        newLine++;
+      }
+    }
+
+    result.set(file.filename, contents);
+  }
+
+  return result;
+}
+
 export interface InlineComment {
   path: string;
   line: number;
@@ -70,13 +110,51 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+/**
+ * A prose marker anywhere in the suggestion disqualifies it from being posted
+ * as a GitHub suggestion block — the block becomes the literal replacement
+ * text for the commented line, so a sentence like "or accept the current
+ * approach" would be offered as code to commit. Checked case-insensitively
+ * as whole words, so a legitimate identifier containing one of these (e.g. a
+ * variable named `orDefault`) isn't falsely rejected.
+ */
+const PROSE_MARKERS =
+  /\b(consider|maybe|perhaps|alternatively|otherwise|should|could|would|e\.g\.?|i\.e\.?)\b|\bor\b.{0,40}\binstead\b|,\s*or\s|\.\s+[A-Z]/i;
+
+/**
+ * Whether `suggestion` is safe to post as a GitHub suggestion block — the
+ * fenced form that renders as a one-click "commit suggestion" button rather
+ * than plain text.
+ *
+ * GitHub applies a suggestion block as the literal, verbatim replacement for
+ * the line(s) the comment is anchored to. There is no room for explanation
+ * inside it: anything that isn't the fix itself would be offered to the
+ * developer as code to commit. The system prompt (see FINDINGS_SYSTEM_PROMPT
+ * in ai/review.ts) asks the model to leave `suggestion` as prose whenever the
+ * fix isn't a clean single-line replacement — this is the safety net for
+ * when it doesn't, not the primary mechanism: a false negative here just
+ * falls back to today's plain rendering, which is always correct; a false
+ * positive would post a sentence as if it were committable code, which is
+ * the failure this function exists to prevent.
+ */
+export function looksLikeCleanCodeSuggestion(suggestion: string): boolean {
+  const trimmed = suggestion.trim();
+  if (!trimmed || trimmed.length > 400) return false;
+  // A real diff/hunk means the model produced a patch, not the pure
+  // replacement text GitHub's suggestion syntax requires.
+  if (/^[+-]|^@@|^```/m.test(trimmed)) return false;
+  if (PROSE_MARKERS.test(trimmed)) return false;
+  return true;
+}
+
 function formatInlineComment(finding: FindingDoc): string {
   const lines = [
     ` **AI Reviewer** — ${capitalize(finding.category)} · ${capitalize(finding.severity)}`,
     finding.explanation,
   ];
   if (finding.suggestion) {
-    lines.push(`\n**Suggested fix:**\n\`\`\`diff\n${finding.suggestion}\n\`\`\``);
+    const fence = looksLikeCleanCodeSuggestion(finding.suggestion) ? "suggestion" : "diff";
+    lines.push(`\n**Suggested fix:**\n\`\`\`${fence}\n${finding.suggestion}\n\`\`\``);
   }
   return lines.join("\n");
 }

@@ -4,6 +4,7 @@ import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type To
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
+import { SuggestionBlock } from "@/components/suggestion-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
 
 const CATEGORY_ICON: Record<FindingDoc["category"], typeof Bug> = {
@@ -83,7 +84,21 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
         )}
       </p>
       <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
-      {finding.suggestion && <DiffBlock diff={finding.suggestion} file={finding.file} className="mt-3" />}
+      {/* Both halves present means this is a committable one-line replacement,
+          so it's shown before/after like GitHub's suggestion widget. Prose
+          suggestions and older findings have no originalLine and keep the
+          single-column rendering. */}
+      {finding.suggestion &&
+        (finding.originalLine !== undefined ? (
+          <SuggestionBlock
+            originalLine={finding.originalLine}
+            suggestion={finding.suggestion}
+            file={finding.file}
+            className="mt-3"
+          />
+        ) : (
+          <DiffBlock diff={finding.suggestion} file={finding.file} className="mt-3" />
+        ))}
     </li>
   );
 }
