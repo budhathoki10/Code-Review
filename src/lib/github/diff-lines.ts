@@ -7,67 +7,39 @@ const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 
 /**
- * Walks each file's unified-diff patch to find which new-file line numbers
- * are actually part of the diff (context or added lines) — GitHub only
- * accepts inline review comments anchored to one of these. Removed
- * (old-file-only) lines and anything outside a hunk are never commentable.
- * Old-file (LEFT-side) commenting is intentionally not supported — findings
- * only ever describe the new code.
- */
-export function computeCommentableLines(
-  files: PullRequestFile[],
-): Map<string, Set<number>> {
-  const result = new Map<string, Set<number>>();
-
-  for (const file of files) {
-    if (!file.patch) continue;
-
-    const commentable = new Set<number>();
-    let newLine = 0;
-
-    for (const rawLine of file.patch.split("\n")) {
-      const hunkMatch = rawLine.match(HUNK_HEADER);
-      if (hunkMatch) {
-        newLine = Number(hunkMatch[1]);
-        continue;
-      }
-      if (rawLine.startsWith("\\")) {
-        // "\ No newline at end of file" — not a content line.
-        continue;
-      }
-      if (rawLine.startsWith("+")) {
-        commentable.add(newLine);
-        newLine++;
-      } else if (rawLine.startsWith("-")) {
-        // Old-file-only line; doesn't exist in the new file, doesn't advance newLine.
-      } else if (rawLine.startsWith(" ")) {
-        commentable.add(newLine);
-        newLine++;
-      }
-    }
-
-    result.set(file.filename, commentable);
-  }
-
-  return result;
-}
-
-/**
- * New-file line number → that line's text, per file, read from the same
- * patches `computeCommentableLines` walks.
+ * The one place a unified-diff patch is turned into new-file line numbers.
  *
- * Exists so a stored finding can show the line it is replacing, side by side
- * with the suggestion, without re-fetching the file: the dashboard renders
- * long after the diff is gone, and GitHub's own suggestion widget gets the
- * "before" side for free from the PR page, which our dashboard does not.
+ * Both public views below are built from this walk. They used to be two
+ * separate copies of it, kept in step by a "mirrors the other exactly"
+ * comment and a test asserting the two agreed — an invariant policed by
+ * prose rather than held by construction. Anything the walk learns (a new
+ * hunk-header dialect, another non-content marker) now only has to be taught
+ * once, and the two results cannot drift.
+ *
+ * The numbering rules, which are what actually matter:
+ *   - A hunk header resets the counter to the new-file start it declares.
+ *   - `\ No newline at end of file` is a marker, not a content line.
+ *   - Added (`+`) and context (` `) lines exist in the new file: recorded,
+ *     and they advance the counter.
+ *   - Removed (`-`) lines exist only in the old file: no new-file number, and
+ *     they must NOT advance the counter, or every line after the first
+ *     deletion is attributed to the wrong text.
+ *
+ * A file with a patch always gets an entry, even if that patch yields no
+ * lines; a file with no patch at all gets none. Callers distinguish "reviewed
+ * and empty" from "never parsed" on exactly that.
  */
-export function computeLineContents(files: PullRequestFile[]): Map<string, Map<number, string>> {
-  const result = new Map<string, Map<number, string>>();
+function walkPatches<T>(
+  files: PullRequestFile[],
+  create: () => T,
+  record: (into: T, line: number, text: string) => void,
+): Map<string, T> {
+  const result = new Map<string, T>();
 
   for (const file of files) {
     if (!file.patch) continue;
 
-    const contents = new Map<number, string>();
+    const collected = create();
     let newLine = 0;
 
     for (const rawLine of file.patch.split("\n")) {
@@ -77,19 +49,48 @@ export function computeLineContents(files: PullRequestFile[]): Map<string, Map<n
         continue;
       }
       if (rawLine.startsWith("\\")) continue;
-      // Mirrors computeCommentableLines exactly: removed lines have no
-      // new-file number and must not advance the counter, or every line
-      // after the first deletion would be off by one.
       if (rawLine.startsWith("+") || rawLine.startsWith(" ")) {
-        contents.set(newLine, rawLine.slice(1));
+        record(collected, newLine, rawLine.slice(1));
         newLine++;
       }
     }
 
-    result.set(file.filename, contents);
+    result.set(file.filename, collected);
   }
 
   return result;
+}
+
+/**
+ * Which new-file line numbers are actually part of the diff (context or added
+ * lines) — GitHub only accepts inline review comments anchored to one of
+ * these. Old-file (LEFT-side) commenting is intentionally not supported:
+ * findings only ever describe the new code.
+ */
+export function computeCommentableLines(files: PullRequestFile[]): Map<string, Set<number>> {
+  return walkPatches(
+    files,
+    () => new Set<number>(),
+    (lines, line) => lines.add(line),
+  );
+}
+
+/**
+ * New-file line number → that line's text, per file, read from the same
+ * patches `computeCommentableLines` walks — so its keys are exactly that
+ * function's line numbers, by construction.
+ *
+ * Exists so a stored finding can show the line it is replacing, side by side
+ * with the suggestion, without re-fetching the file: the dashboard renders
+ * long after the diff is gone, and GitHub's own suggestion widget gets the
+ * "before" side for free from the PR page, which our dashboard does not.
+ */
+export function computeLineContents(files: PullRequestFile[]): Map<string, Map<number, string>> {
+  return walkPatches(
+    files,
+    () => new Map<number, string>(),
+    (contents, line, text) => contents.set(line, text),
+  );
 }
 
 export interface InlineComment {
@@ -117,9 +118,46 @@ function capitalize(value: string): string {
  * approach" would be offered as code to commit. Checked case-insensitively
  * as whole words, so a legitimate identifier containing one of these (e.g. a
  * variable named `orDefault`) isn't falsely rejected.
+ *
+ * This is a blocklist of *hedging* words, which is only half the problem: it
+ * cannot catch an imperative like "Use a transaction." — see CODE_SHAPE.
  */
 const PROSE_MARKERS =
   /\b(consider|maybe|perhaps|alternatively|otherwise|should|could|would|e\.g\.?|i\.e\.?)\b|\bor\b.{0,40}\binstead\b|,\s*or\s|\.\s+[A-Z]/i;
+
+/**
+ * Positive evidence that the text is code rather than a sentence about code.
+ *
+ * PROSE_MARKERS alone let every imperative suggestion through — "Use a
+ * transaction.", "Add a null check here.", "Extract this into a helper
+ * function." all contain no hedging word and were all accepted, which is
+ * exactly the false positive this whole function exists to prevent. No
+ * blocklist of English words can be made complete, so the test is inverted:
+ * a line of real code carries at least one structural character that an
+ * English sentence does not.
+ *
+ * A bare-identifier replacement (`userId`) has none of these and is rejected
+ * too. That's a false negative, and a false negative is always safe — it
+ * renders as a plain block, exactly as it did before suggestions existed.
+ */
+const CODE_SHAPE = /[(){}[\]<>=;:]|=>|\w\.\w/;
+
+/**
+ * A newline that lost its backslash somewhere between the model and here.
+ *
+ * Observed live on PR #58: the model's replacement arrived as
+ * `const allFindings = [n  ...aiResult.findings.map(f),n  ];` — literal `n`
+ * characters welded to the punctuation that ended each line. Committing that
+ * yields a syntax error, so the shape is rejected outright rather than
+ * guessed at. `\n` as two visible characters is the same mangling one layer
+ * the other way, and is just as wrong to commit.
+ *
+ * What follows the stray `n` has to be indentation — two or more spaces, a
+ * tab, or the end of the text. Accepting a single space would also match
+ * `map(n => …)`, where `n` is an ordinary parameter name and the code is
+ * perfectly fine.
+ */
+const MANGLED_NEWLINE = /\\n|[,;{}[\]()]n(?:[ ]{2,}|\t|$)/;
 
 /**
  * Whether `suggestion` is safe to post as a GitHub suggestion block — the
@@ -142,9 +180,45 @@ export function looksLikeCleanCodeSuggestion(suggestion: string): boolean {
   if (!trimmed || trimmed.length > 400) return false;
   // A real diff/hunk means the model produced a patch, not the pure
   // replacement text GitHub's suggestion syntax requires.
-  if (/^[+-]|^@@|^```/m.test(trimmed)) return false;
+  if (/^[+-]|^@@/m.test(trimmed)) return false;
+  // A backtick ANYWHERE, not just at the start of a line: this text is about
+  // to be wrapped in a ```suggestion fence, and a backtick run inside it
+  // closes that fence early. The rest of the replacement then escapes the
+  // block and renders as loose prose. Observed live on PR #58, where the
+  // replacement itself contained a fence marker mid-line.
+  if (trimmed.includes("`")) return false;
+  if (MANGLED_NEWLINE.test(trimmed)) return false;
   if (PROSE_MARKERS.test(trimmed)) return false;
+  if (!CODE_SHAPE.test(trimmed)) return false;
+  // A sentence-terminal period. Code essentially never ends on `<letter>.`,
+  // while prose that cleared CODE_SHAPE by quoting a symbol ("Use x() here.")
+  // always does. The whitespace requirement keeps this aimed at sentences.
+  if (/[a-z]\.$/i.test(trimmed) && /\s/.test(trimmed)) return false;
   return true;
+}
+
+/**
+ * Re-anchors a replacement to the indentation of the line it replaces.
+ *
+ * GitHub commits a suggestion block verbatim, leading whitespace included, so
+ * a model that returns `if (x) return;` for a line indented four levels deep
+ * silently de-indents it on commit — valid-looking in the diff preview, wrong
+ * in the file, and in Python or YAML a behaviour change. Observed live on
+ * PR #58.
+ *
+ * Only applied when the model supplied no indentation of its own: if its
+ * first line is already indented it has expressed an intent about placement,
+ * and overriding that would be the same class of mistake in reverse.
+ * Continuation lines keep their relative indentation.
+ */
+function reindentSuggestion(suggestion: string, originalLine: string | undefined): string {
+  if (originalLine === undefined) return suggestion;
+  const indent = originalLine.match(/^[ \t]*/)?.[0] ?? "";
+  if (!indent || /^[ \t]/.test(suggestion)) return suggestion;
+  return suggestion
+    .split("\n")
+    .map((line) => (line.trim() ? `${indent}${line}` : line))
+    .join("\n");
 }
 
 function formatInlineComment(finding: FindingDoc): string {
@@ -153,8 +227,11 @@ function formatInlineComment(finding: FindingDoc): string {
     finding.explanation,
   ];
   if (finding.suggestion) {
-    const fence = looksLikeCleanCodeSuggestion(finding.suggestion) ? "suggestion" : "diff";
-    lines.push(`\n**Suggested fix:**\n\`\`\`${fence}\n${finding.suggestion}\n\`\`\``);
+    const committable = looksLikeCleanCodeSuggestion(finding.suggestion);
+    // Indentation only matters for the committable fence — the `diff` fence
+    // is read-only text nobody can click to apply.
+    const body = committable ? reindentSuggestion(finding.suggestion, finding.originalLine) : finding.suggestion;
+    lines.push(`\n**Suggested fix:**\n\`\`\`${committable ? "suggestion" : "diff"}\n${body}\n\`\`\``);
   }
   return lines.join("\n");
 }

@@ -449,6 +449,8 @@ async function scanBiome(content: string, filename: string, commentableLines: Se
   for (const diag of parsed.diagnostics ?? []) {
     const line = diag.location?.start?.line;
     if (line === undefined || !commentableLines.has(line)) continue;
+    const group = biomeRuleGroup(diag.category);
+    if (group && BIOME_OPINION_GROUPS.has(group)) continue;
     findings.push({
       severity: diag.severity === "error" ? "medium" : "low",
       category: "quality",
@@ -717,6 +719,85 @@ function isSupportedFile(filename: string): boolean {
   );
 }
 
+/**
+ * Rules the three JS linters share under different names, mapped to one key.
+ *
+ * Exact-name matching already collapses ESLint against oxlint (both call it
+ * `no-useless-escape`), but Biome renames nearly everything, so its version
+ * of a shared rule would survive deduplication and post a third comment
+ * saying the same thing in different words. Only rules actually seen
+ * duplicated are listed — a rule genuinely unique to one linter must keep
+ * reporting.
+ */
+const EQUIVALENT_RULES: Record<string, string> = {
+  nouselessescapeinregex: "no-useless-escape",
+  nodoubleequals: "eqeqeq",
+  novar: "no-var",
+  nodebugger: "no-debugger",
+  noexplicitany: "@typescript-eslint/no-explicit-any",
+  nounusedvariables: "no-unused-vars",
+  nounreachable: "no-unreachable",
+};
+
+/**
+ * Biome rule groups that express a preference rather than a defect.
+ *
+ * There is no biome.json in a repo we review, so Biome runs its full default
+ * set — including `style`, which is how PR #58 collected seven
+ * "Forbidden non-null assertion." comments on a *test file* whose `!` usage
+ * is deliberate, and which the repo's own ESLint config does not ban.
+ * Enforcing one tool's house style on a codebase that never opted into it is
+ * noise, and noise crowds real findings out of the MAX_FINDINGS budget.
+ */
+const BIOME_OPINION_GROUPS = new Set(["style", "nursery"]);
+
+/** `lint/style/noNonNullAssertion` → `style`. */
+function biomeRuleGroup(category: string): string | undefined {
+  return category.split("/")[1];
+}
+
+/**
+ * One comparable key per lint finding, so the same defect reported by two or
+ * three linters posts once.
+ *
+ * Normalizes the three title formats — `ESLint: no-useless-escape`,
+ * `oxlint: eslint(no-useless-escape)`, `Biome: lint/complexity/noUselessEscapeInRegex`
+ * — down to a bare rule name, then folds known cross-tool synonyms together.
+ */
+export function canonicalRuleKey(title: string): string {
+  const withoutTool = title.replace(/^(ESLint|oxlint|Biome):\s*/i, "");
+  const bare = withoutTool
+    // oxlint wraps the rule in its originating plugin: eslint(no-x) → no-x.
+    .replace(/^[a-z@/-]+\((.+)\)$/i, "$1")
+    // Biome namespaces it: lint/complexity/noUselessEscapeInRegex → noUselessEscapeInRegex.
+    .replace(/^lint\/[^/]+\//, "")
+    .trim();
+  const folded = bare.toLowerCase();
+  return EQUIVALENT_RULES[folded] ?? folded;
+}
+
+/**
+ * Collapses findings that describe the same defect at the same place.
+ *
+ * Two distinct sources of duplication, both observed on PR #58: three linters
+ * reporting one useless escape in three phrasings, and Biome reporting one
+ * diagnostic per `!` operator — two identical comments anchored to the single
+ * line that happened to contain two of them. Keying on
+ * (line, canonical rule) collapses both. The first finding wins, so the
+ * earlier-running linter's severity and wording are what survive.
+ */
+export function dedupeLintFindings(findings: FindingDoc[]): FindingDoc[] {
+  const seen = new Set<string>();
+  return findings.filter((finding) => {
+    // Keyed on file as well as line: scanFile only ever passes one file's
+    // findings, but nothing about this function requires that.
+    const key = `${finding.file}::${finding.line}::${canonicalRuleKey(finding.title)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function scanFile(content: string, filename: string, commentableLines: Set<number>, log: Logger): Promise<FindingDoc[]> {
   if (WORKFLOW_FILE.test(filename)) return scanWorkflow(content, filename, commentableLines);
   if (MARKDOWN_EXTENSIONS.some((ext) => filename.endsWith(ext))) return scanMarkdown(content, filename, commentableLines);
@@ -735,12 +816,16 @@ async function scanFile(content: string, filename: string, commentableLines: Set
     // via Promise.all rather than one after another — halving the
     // event-loop-blocked window for this file versus running them in
     // sequence.
+    //
+    // Overlap is the price of that coverage, so the merged list is
+    // deduplicated (see dedupeLintFindings) rather than concatenated —
+    // without it one useless escape posts three times.
     const eslintFindings = scanJs(content, filename, commentableLines);
     const [biomeFindings, oxlintFindings] = await Promise.all([
       scanBiome(content, filename, commentableLines, log),
       scanOxlint(content, filename, commentableLines, log),
     ]);
-    return [...eslintFindings, ...biomeFindings, ...oxlintFindings];
+    return dedupeLintFindings([...eslintFindings, ...biomeFindings, ...oxlintFindings]);
   }
   return [];
 }
