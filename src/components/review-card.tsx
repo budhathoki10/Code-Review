@@ -87,11 +87,15 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
       {/* Both halves present means this is a committable one-line replacement,
           so it's shown before/after like GitHub's suggestion widget. Prose
           suggestions and older findings have no originalLine and keep the
-          single-column rendering. */}
+          single-column rendering. The `line` check is what the pipeline
+          already guarantees when it sets originalLine, restated here because
+          the stored type can't express the pairing. */}
       {finding.suggestion &&
-        (finding.originalLine !== undefined ? (
+        (finding.originalLine !== undefined && finding.line !== undefined ? (
           <SuggestionBlock
+            line={finding.line}
             originalLine={finding.originalLine}
+            originalContext={finding.originalContext}
             suggestion={finding.suggestion}
             file={finding.file}
             className="mt-3"
