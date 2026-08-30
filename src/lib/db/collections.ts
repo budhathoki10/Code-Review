@@ -99,6 +99,22 @@ export interface FindingDoc {
    * before this field existed.
    */
   originalLine?: string;
+  /**
+   * The lines around `line` in the new file, so the dashboard can show a
+   * suggestion the way GitHub's split diff does — a few lines of unchanged
+   * code above and below, rather than the replaced line floating alone with
+   * nothing to locate it against.
+   *
+   * Excludes `line` itself, which is already stored as `originalLine`;
+   * keeping one copy means the two can never disagree. Each entry carries
+   * its own new-file number because the window is not necessarily
+   * contiguous: only lines present in the diff can be captured, so a removed
+   * line or a hunk boundary leaves a gap the renderer draws as a break.
+   *
+   * Set alongside `originalLine` and under the same conditions, so a finding
+   * has both or neither. Absent on reviews saved before this field existed.
+   */
+  originalContext?: { line: number; text: string }[];
 }
 
 /** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */

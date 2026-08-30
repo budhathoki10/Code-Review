@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeCommentableLines,
   computeLineContents,
+  computeContextLines,
   mapFindingsToInlineComments,
   looksLikeCleanCodeSuggestion,
 } from "@/lib/github/diff-lines";
@@ -392,5 +393,68 @@ describe("committable suggestion indentation", () => {
     expect(bodyFor({ suggestion: "await saveUser(user);" })).toContain(
       "```suggestion\nawait saveUser(user);\n```",
     );
+  });
+});
+
+describe("computeContextLines", () => {
+  const lines = new Map([
+    [10, "function greet() {"],
+    [11, "  const name = 'x'"],
+    [12, "  console.log(name)"],
+    [13, "  return name"],
+    [14, "}"],
+  ]);
+
+  it("takes the lines on both sides of the target", () => {
+    expect(computeContextLines(lines, 12, 2)).toEqual([
+      { line: 10, text: "function greet() {" },
+      { line: 11, text: "  const name = 'x'" },
+      { line: 13, text: "  return name" },
+      { line: 14, text: "}" },
+    ]);
+  });
+
+  it("excludes the target line, which is stored as originalLine", () => {
+    const context = computeContextLines(lines, 12, 2) ?? [];
+    expect(context.some((c) => c.line === 12)).toBe(false);
+  });
+
+  it("stops at the edge of what the diff captured", () => {
+    expect(computeContextLines(lines, 10, 3)).toEqual([
+      { line: 11, text: "  const name = 'x'" },
+      { line: 12, text: "  console.log(name)" },
+      { line: 13, text: "  return name" },
+    ]);
+  });
+
+  it("skips a gap rather than padding it, so the renderer can show the break", () => {
+    // Line 12 is absent — a removed line, or a hunk boundary.
+    const withHole = new Map([
+      [10, "a"],
+      [11, "b"],
+      [14, "e"],
+    ]);
+    expect(computeContextLines(withHole, 13, 3)).toEqual([
+      { line: 10, text: "a" },
+      { line: 11, text: "b" },
+      { line: 14, text: "e" },
+    ]);
+  });
+
+  it("returns undefined when nothing surrounds the line", () => {
+    expect(computeContextLines(new Map([[5, "alone"]]), 5, 3)).toBeUndefined();
+  });
+
+  it("returns undefined when the file was never parsed", () => {
+    expect(computeContextLines(undefined, 12)).toBeUndefined();
+  });
+
+  it("reads the same map computeLineContents produces", () => {
+    const contents = computeLineContents([file()]);
+    // SAMPLE_PATCH starts at new-file line 10: header, replacement, added, close.
+    expect(computeContextLines(contents.get("src/greet.ts"), 11, 1)).toEqual([
+      { line: 10, text: "function greet() {" },
+      { line: 12, text: "  console.log('added line')" },
+    ]);
   });
 });
