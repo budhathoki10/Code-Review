@@ -50,6 +50,6 @@ export async function enqueueReplyJob(data: ReplyJobData): Promise<void> {
     attempts: REPLY_JOB_ATTEMPTS,
     backoff: { type: "exponential", delay: 5_000 },
     removeOnComplete: { age: 300 },
-    removeOnFail: { age: 604_800 },
+    removeOnFail: { age: 60 },
   });
 }

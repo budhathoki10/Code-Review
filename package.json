@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "nodemon",
     "dev:next": "next dev",
-    "dev:worker": "tsx watch src/worker/review-worker.ts",
+    "dev:worker": "nodemon --config nodemon.worker.json",
     "dev:all": "concurrently -n next,worker -c blue,green \"npm:dev\" \"npm:dev:worker\"",
     "worker": "tsx src/worker/review-worker.ts",
     "build": "next build",

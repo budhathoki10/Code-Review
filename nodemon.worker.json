@@ -1,0 +1,7 @@
+{
+  "watch": ["src", ".env", ".env.local"],
+  "ext": "ts,json",
+  "ignore": ["src/app/**", "src/components/**"],
+  "exec": "tsx src/worker/review-worker.ts",
+  "delay": 500
+}
