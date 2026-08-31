@@ -11,6 +11,7 @@ import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/li
 import { formatSummaryComment, postSummaryComment, updateSummaryComment } from "@/lib/github/comment";
 import {
   computeLineContents,
+  computeContextLines,
   looksLikeCleanCodeSuggestion,
   mapFindingsToInlineComments,
   capInlineComments,
@@ -625,8 +626,13 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const withOriginalLine = (finding: FindingDoc): FindingDoc => {
     if (finding.line === undefined || !finding.suggestion) return finding;
     if (!looksLikeCleanCodeSuggestion(finding.suggestion)) return finding;
-    const originalLine = lineContents.get(finding.file)?.get(finding.line);
-    return originalLine === undefined ? finding : { ...finding, originalLine };
+    const fileLines = lineContents.get(finding.file);
+    const originalLine = fileLines?.get(finding.line);
+    if (originalLine === undefined) return finding;
+    // Captured together so the two can never disagree about which commit they
+    // describe: a finding either has both halves of the "before" side or,
+    // when the line wasn't in this diff, neither.
+    return { ...finding, originalLine, originalContext: computeContextLines(fileLines, finding.line) };
   };
 
   const allFindings = [

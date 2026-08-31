@@ -93,6 +93,44 @@ export function computeLineContents(files: PullRequestFile[]): Map<string, Map<n
   );
 }
 
+/**
+ * How many lines of unchanged code to keep on each side of a suggestion.
+ *
+ * Three is what GitHub itself shows around a collapsed hunk. Fewer stops
+ * being enough to recognise where you are in a function; more turns a
+ * one-line fix into a wall of code the reader has to scan past.
+ */
+export const CONTEXT_RADIUS = 3;
+
+/**
+ * The lines bracketing `line`, for rendering a suggestion with its
+ * surroundings (see FindingDoc.originalContext).
+ *
+ * `line` itself is excluded — the caller already stores it as `originalLine`,
+ * and one copy cannot drift from another. Missing neighbours are skipped
+ * rather than padded: `lineContents` only holds lines the diff actually
+ * contained, so near a hunk edge the window is simply shorter, and a removed
+ * line in the middle leaves a numbering gap the renderer shows as a break.
+ * Returns undefined when nothing surrounds the line, so callers can leave the
+ * field off entirely instead of storing an empty array.
+ */
+export function computeContextLines(
+  lineContents: Map<number, string> | undefined,
+  line: number,
+  radius: number = CONTEXT_RADIUS,
+): { line: number; text: string }[] | undefined {
+  if (!lineContents) return undefined;
+
+  const context: { line: number; text: string }[] = [];
+  for (let n = line - radius; n <= line + radius; n++) {
+    if (n === line) continue;
+    const text = lineContents.get(n);
+    if (text !== undefined) context.push({ line: n, text });
+  }
+
+  return context.length > 0 ? context : undefined;
+}
+
 export interface InlineComment {
   path: string;
   line: number;
