@@ -24,7 +24,7 @@ export function summarizeAttempts(attempts: Attempt[]): AttemptSummary {
   let best = 0;
   let finished = 0;
 
-  for (let i = 0; i <= attempts.length; i++) {
+  for (let i = 0; i < attempts.length; i++) {
     const attempt = attempts[i];
     if (attempt.score > best) {
       best = attempt.score;

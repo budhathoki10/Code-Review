@@ -31,7 +31,7 @@ const DEFAULT_MAX_FILES = 50;
  * Totals the additions and deletions across a patch, up to `maxFiles`.
  */
 export function summarizePatch(files: PatchFile[], options: PatchStatsOptions = {}): PatchStats {
-  const maxFiles = options.maxFiles || DEFAULT_MAX_FILES;
+  const maxFiles = options.maxFiles ?? DEFAULT_MAX_FILES;
   const counted = files.slice(0, maxFiles);
 
   let additions = 0;
