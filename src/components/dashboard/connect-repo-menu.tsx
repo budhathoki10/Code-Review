@@ -166,3 +166,37 @@ function ConnectAccountSubmit() {
     </button>
   );
 }
+
+/**
+ * The same action as a row inside the header's account menu, styled to match
+ * its sibling links. Account switching is where people look for it, so it
+ * lives there as well as on the connect button.
+ */
+export function ConnectAccountMenuItem() {
+  return (
+    <form action={connectGithubAccount}>
+      <ConnectAccountMenuSubmit />
+    </form>
+  );
+}
+
+function ConnectAccountMenuSubmit() {
+  const { pending } = useFormStatus();
+
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      aria-busy={pending}
+      role="menuitem"
+      className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:pointer-events-none disabled:opacity-60"
+    >
+      {pending ? (
+        <Loader2 className="h-4 w-4 shrink-0 animate-spin text-subtle" aria-hidden="true" />
+      ) : (
+        <UserPlus className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />
+      )}
+      {pending ? "Opening GitHub…" : "Connect a GitHub account"}
+    </button>
+  );
+}

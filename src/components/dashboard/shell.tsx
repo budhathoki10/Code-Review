@@ -8,7 +8,7 @@ import { AnimatePresence, motion } from "motion/react";
 import { ChevronLeft, ChevronRight, FolderGit2, Menu, Search, X } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { CommandPalette, type CommandPaletteHandle } from "@/components/command-palette";
-import { ConnectRepoMenu } from "@/components/dashboard/connect-repo-menu";
+import { ConnectAccountMenuItem, ConnectRepoMenu } from "@/components/dashboard/connect-repo-menu";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { iconButtonClasses, toneDotClasses } from "@/lib/ui";
 import type { LinkedGithubAccount } from "@/lib/github/account";
@@ -171,6 +171,8 @@ export function DashboardShell({
   const paletteRef = useRef<CommandPaletteHandle>(null);
 
   const activeId = pathname.startsWith("/dashboard/repos/") ? pathname.split("/")[3] : undefined;
+  // Logins are missing for accounts linked before they were recorded; those fall back to a count.
+  const knownLogins = accounts.map((account) => account.login).filter((login): login is string => !!login);
 
   useEffect(() => {
     if (!mobileOpen) return;
@@ -299,6 +301,14 @@ export function DashboardShell({
                     className="absolute top-full right-0 z-30 mt-2 w-56 rounded-[2px] border border-border bg-card p-1.5 shadow-[0_18px_48px_rgba(20,20,16,0.14)]"
                     role="menu"
                   >
+                    {accounts.length > 0 && (
+                      <p className="px-2.5 pt-1 pb-1.5 text-[11px] leading-4 text-subtle">
+                        {knownLogins.length > 0
+                          ? `Signed in with ${knownLogins.map((login) => `@${login}`).join(", ")}`
+                          : `${accounts.length} GitHub account${accounts.length > 1 ? "s" : ""} connected`}
+                      </p>
+                    )}
+                    <ConnectAccountMenuItem />
                     <a
                       href="https://github.com/settings/installations"
                       target="_blank"
