@@ -7,7 +7,7 @@ import {
   type PullRequestDoc,
   type ReviewDoc,
 } from "@/lib/db/collections";
-import { getGithubAccountId } from "@/lib/github/account";
+import { getGithubAccountIds } from "@/lib/github/account";
 
 export interface RepoStats {
   lastReviewAt?: Date;
@@ -98,11 +98,11 @@ function healthFor(stats: RepoStats | undefined): RepoSummary["health"] {
 
 /** Full (unpaginated) repo list for the dashboard sidebar's repo switcher — deliberately lightweight, no findings payload. */
 export async function loadRepoSummaries(userId: string): Promise<RepoSummary[]> {
-  const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return [];
+  const githubUserIds = await getGithubAccountIds(userId);
+  if (githubUserIds.length === 0) return [];
 
   const installationsCol = await installations();
-  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  const userInstallations = await installationsCol.find({ githubUserId: { $in: githubUserIds } }).toArray();
   if (userInstallations.length === 0) return [];
 
   const repositoriesCol = await repositories();
@@ -142,11 +142,11 @@ export interface LatestReview {
 
 /** Most recent review across all of the user's repos — powers the dashboard's default "latest review" spotlight. */
 export async function loadLatestReview(userId: string): Promise<LatestReview | null> {
-  const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return null;
+  const githubUserIds = await getGithubAccountIds(userId);
+  if (githubUserIds.length === 0) return null;
 
   const installationsCol = await installations();
-  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  const userInstallations = await installationsCol.find({ githubUserId: { $in: githubUserIds } }).toArray();
   if (userInstallations.length === 0) return null;
 
   const repositoriesCol = await repositories();
@@ -195,11 +195,11 @@ export interface UserOverviewStats {
 export async function loadUserOverviewStats(userId: string): Promise<UserOverviewStats> {
   const empty: UserOverviewStats = { totalRepos: 0, reviewsLast7Days: 0, needsAttention: 0 };
 
-  const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return empty;
+  const githubUserIds = await getGithubAccountIds(userId);
+  if (githubUserIds.length === 0) return empty;
 
   const installationsCol = await installations();
-  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  const userInstallations = await installationsCol.find({ githubUserId: { $in: githubUserIds } }).toArray();
   if (userInstallations.length === 0) return empty;
 
   const installationIds = userInstallations.map((i) => String(i._id));

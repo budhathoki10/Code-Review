@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import { ObjectId } from "mongodb";
 import { ChevronLeft, ChevronRight, GitPullRequest } from "lucide-react";
 import { auth } from "@/auth";
-import { getGithubAccountId } from "@/lib/github/account";
+import { getGithubAccountIds } from "@/lib/github/account";
 import {
   installations,
   pullRequests,
@@ -27,8 +27,8 @@ async function loadRepoAndReviews(
 ) {
   if (!ObjectId.isValid(repositoryId)) return null;
 
-  const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return null;
+  const githubUserIds = await getGithubAccountIds(userId);
+  if (githubUserIds.length === 0) return null;
 
   const repositoriesCol = await repositories();
   const repositoryDoc = await repositoriesCol.findOne({
@@ -36,11 +36,12 @@ async function loadRepoAndReviews(
   });
   if (!repositoryDoc) return null;
 
-  // Ownership check: the repo's installation must belong to this user.
+  // Ownership check: the repo's installation must belong to one of this
+  // user's linked GitHub accounts.
   const installationsCol = await installations();
   const installationDoc = await installationsCol.findOne({
     _id: new ObjectId(repositoryDoc.installationId) as unknown as string,
-    githubUserId,
+    githubUserId: { $in: githubUserIds },
   });
   if (!installationDoc) return null;
 

@@ -2,7 +2,8 @@ import type { CSSProperties } from "react";
 import Link from "next/link";
 import { AlertTriangle, ChevronLeft, ChevronRight, FolderGit2, Search } from "lucide-react";
 import { auth } from "@/auth";
-import { getGithubAccountId } from "@/lib/github/account";
+import { getGithubAccountIds, getLinkedGithubAccounts } from "@/lib/github/account";
+import { getInstallUrl } from "@/lib/github/install-url";
 import {
   installations,
   repositories,
@@ -20,6 +21,7 @@ import {
   type Tone,
 } from "@/lib/ui";
 import { GitHubMark } from "@/components/github-mark";
+import { ConnectAccountButton, ConnectRepoMenu } from "@/components/dashboard/connect-repo-menu";
 import { StatePanel } from "@/components/state-panel";
 import { DisconnectRepoButton } from "../disconnect-repo-button";
 
@@ -34,12 +36,12 @@ async function loadConnectedRepos(
   requestedPage: number,
   query: string,
 ): Promise<{ repos: RepositoryDoc[]; total: number; page: number; stats: Map<string, RepoStats> }> {
-  const githubUserId = await getGithubAccountId(userId);
-  if (!githubUserId) return { repos: [], total: 0, page: 1, stats: new Map() };
+  const githubUserIds = await getGithubAccountIds(userId);
+  if (githubUserIds.length === 0) return { repos: [], total: 0, page: 1, stats: new Map() };
 
   const installationsCol = await installations();
   const userInstallations = await installationsCol
-    .find({ githubUserId })
+    .find({ githubUserId: { $in: githubUserIds } })
     .toArray();
   if (userInstallations.length === 0) return { repos: [], total: 0, page: 1, stats: new Map() };
 
@@ -81,13 +83,16 @@ function EmptyState({ installUrl }: { installUrl?: string }) {
     <StatePanel
       icon={<FolderGit2 className="h-5 w-5" aria-hidden="true" />}
       title="No repositories connected"
-      description="Install the GitHub App on a repository to start getting automated PR reviews."
+      description="Install the GitHub App on a repository to start getting automated PR reviews. If your repositories sit under a different GitHub login, connect that account too — both appear in this one workspace."
       action={
         installUrl ? (
-          <a href={installUrl} className={buttonClasses("primary")}>
-            <GitHubMark className="h-4 w-4" />
-            Connect GitHub
-          </a>
+          <div className="flex flex-wrap items-center gap-2">
+            <a href={installUrl} className={buttonClasses("primary")}>
+              <GitHubMark className="h-4 w-4" />
+              Connect GitHub
+            </a>
+            <ConnectAccountButton />
+          </div>
         ) : (
           <p className="text-sm text-muted">
             GitHub App isn&apos;t configured yet — set{" "}
@@ -308,9 +313,10 @@ export default async function RepositoriesPage(
   const query = typeof searchParams.q === "string" ? searchParams.q : "";
 
   const session = await auth();
-  const installUrl = process.env.GITHUB_APP_SLUG
-    ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new`
-    : undefined;
+  const [installUrl, accounts] = await Promise.all([
+    getInstallUrl(),
+    session?.user?.id ? getLinkedGithubAccounts(session.user.id) : Promise.resolve([]),
+  ]);
 
   let repos: RepositoryDoc[];
   let total: number;
@@ -344,11 +350,7 @@ export default async function RepositoriesPage(
         </h2>
         <div className="flex items-center gap-3">
           <SearchForm query={query} />
-          {installUrl && (
-            <a href={installUrl} className={buttonClasses("secondary")}>
-              Connect another repo
-            </a>
-          )}
+          <ConnectRepoMenu installUrl={installUrl} accounts={accounts} />
         </div>
       </div>
 
