@@ -238,7 +238,7 @@ async function handleFindingReply(
  * handler). Requires the installation to already exist locally — someone
  * completed /api/github/setup for it — so an unknown installation is
  * declined rather than created here, where there is no session to attribute
- * it to. Returns undefined in that case, and the caller drops the delivery
+ * it to. Returns null in that case, and the caller drops the delivery
  * exactly as it did before.
  *
  * The upsert is keyed on `githubRepoId` rather than the name so a renamed or
