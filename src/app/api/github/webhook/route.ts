@@ -6,6 +6,7 @@ import type {
   PullRequestReviewCommentEvent,
 } from "@octokit/webhooks-types";
 import type { Logger } from "pino";
+import type { WithId } from "mongodb";
 import { isForceCommand } from "@/lib/review/gate";
 import { verifyWebhookSignature } from "@/lib/github/webhook";
 import { isTrustedCommenter } from "@/lib/github/commenter";
@@ -13,7 +14,7 @@ import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { enqueueReplyJob } from "@/lib/queue/reply-queue";
 import { claimThrottleWindow, throttleWindowRemainingMs } from "@/lib/queue/pr-throttle";
 import { scheduleThrottleTrailer } from "@/lib/queue/throttle-queue";
-import { ensureIndexes, pullRequests, repositories, reviews } from "@/lib/db/collections";
+import { ensureIndexes, installations, pullRequests, repositories, reviews, type RepositoryDoc } from "@/lib/db/collections";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isDuplicateKeyError } from "@/lib/db/mongo-errors";
@@ -229,6 +230,57 @@ async function handleFindingReply(
   return ok();
 }
 
+/**
+ * Adds a repository we've never seen to the tracked list, using the
+ * installation the delivery itself names.
+ *
+ * Only ever called for a repo that isn't tracked yet (see the pull_request
+ * handler). Requires the installation to already exist locally — someone
+ * completed /api/github/setup for it — so an unknown installation is
+ * declined rather than created here, where there is no session to attribute
+ * it to. Returns undefined in that case, and the caller drops the delivery
+ * exactly as it did before.
+ *
+ * The upsert is keyed on `githubRepoId` rather than the name so a renamed or
+ * transferred repo updates its row instead of gaining a second one.
+ */
+async function registerRepositoryFromEvent(
+  payload: PullRequestEvent,
+  log: Logger,
+): Promise<WithId<RepositoryDoc> | null> {
+  const githubInstallationId = payload.installation?.id;
+  if (githubInstallationId === undefined) {
+    log.info({ repo: payload.repository.full_name }, "webhook ignored — repo isn't tracked and event names no installation");
+    return null;
+  }
+
+  const installationsCol = await installations();
+  const installationDoc = await installationsCol.findOne({ githubInstallationId });
+  if (!installationDoc?._id) {
+    log.info(
+      { repo: payload.repository.full_name, githubInstallationId },
+      "webhook ignored — repo isn't tracked and its installation is unknown",
+    );
+    return null;
+  }
+
+  const repositoriesCol = await repositories();
+  const registered = await repositoriesCol.findOneAndUpdate(
+    { githubRepoId: payload.repository.id },
+    {
+      $set: {
+        installationId: String(installationDoc._id),
+        githubInstallationId,
+        fullName: payload.repository.full_name,
+      },
+    },
+    { upsert: true, returnDocument: "after" },
+  );
+
+  log.info({ repo: payload.repository.full_name, githubInstallationId }, "repo auto-tracked from webhook");
+  return registered;
+}
+
 export async function POST(request: NextRequest) {
   // verifying the signature 
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
@@ -296,14 +348,25 @@ export async function POST(request: NextRequest) {
   await ensureIndexes();
 
   const repositoriesCol = await repositories();
-  const repositoryDoc = await repositoriesCol.findOne({
+  let repositoryDoc = await repositoriesCol.findOne({
     githubRepoId: payload.repository.id,
   });
   if (!repositoryDoc?._id) {
-    // App installed, but this repo isn't one we're tracking — shouldn't
-    // normally happen, but don't fail the delivery over it.
-    log.info({ repo: payload.repository.full_name }, "webhook ignored — repo isn't tracked");
-    return ok();
+    // Not tracked yet. The repository list is otherwise only written by
+    // /api/github/setup, which snapshots the installation's repos at the
+    // moment someone runs it — so a repo created or added AFTER that (very
+    // common on an "All repositories" installation, where GitHub grants
+    // access to "all current and future repositories" without anyone
+    // revisiting the app) would stay invisible until setup was re-run by
+    // hand. Registering it here instead means access granted on GitHub is
+    // all it takes, which is what choosing "All repositories" already says.
+    //
+    // The delivery's own signature is what makes this safe: GitHub only
+    // sends us events for installations we belong to, and the installation
+    // must already be known before we write anything, so this can adopt a
+    // new repo but never invent an installation.
+    repositoryDoc = await registerRepositoryFromEvent(payload, log);
+    if (!repositoryDoc?._id) return ok();
   }
 
   const headSha = payload.pull_request.head.sha;
