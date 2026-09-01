@@ -8,8 +8,10 @@ import { AnimatePresence, motion } from "motion/react";
 import { ChevronLeft, ChevronRight, FolderGit2, Menu, Search, X } from "lucide-react";
 import { BrandMark } from "@/components/brand-mark";
 import { CommandPalette, type CommandPaletteHandle } from "@/components/command-palette";
+import { ConnectRepoMenu } from "@/components/dashboard/connect-repo-menu";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { buttonClasses, iconButtonClasses, toneDotClasses } from "@/lib/ui";
+import { iconButtonClasses, toneDotClasses } from "@/lib/ui";
+import type { LinkedGithubAccount } from "@/lib/github/account";
 import type { RepoSummary } from "@/lib/db/repo-stats";
 
 const HEALTH_TONE: Record<RepoSummary["health"], Parameters<typeof toneDotClasses>[0]> = {
@@ -121,11 +123,13 @@ function SidebarContent({
   repos,
   activeId,
   installUrl,
+  accounts,
   onNavigate,
 }: {
   repos: RepoSummary[];
   activeId?: string;
   installUrl?: string;
+  accounts: LinkedGithubAccount[];
   onNavigate?: () => void;
 }) {
   return (
@@ -137,13 +141,9 @@ function SidebarContent({
 
       <RepoList repos={repos} activeId={activeId} onNavigate={onNavigate} />
 
-      {installUrl && (
-        <div className="border-t border-border p-3">
-          <a href={installUrl} className={`${buttonClasses("secondary")} w-full`}>
-            Connect another repo
-          </a>
-        </div>
-      )}
+      <div className="border-t border-border p-3">
+        <ConnectRepoMenu installUrl={installUrl} accounts={accounts} placement="top" fullWidth />
+      </div>
     </div>
   );
 }
@@ -151,6 +151,7 @@ function SidebarContent({
 export function DashboardShell({
   repos,
   installUrl,
+  accounts,
   userName,
   userImage,
   signOutForm,
@@ -158,6 +159,7 @@ export function DashboardShell({
 }: {
   repos: RepoSummary[];
   installUrl?: string;
+  accounts: LinkedGithubAccount[];
   userName?: string | null;
   userImage?: string | null;
   signOutForm: ReactNode;
@@ -198,7 +200,7 @@ export function DashboardShell({
     <div className="flex flex-1">
       <CommandPalette ref={paletteRef} repos={repos} installUrl={installUrl} />
       <aside className="hidden shrink-0 border-r border-border lg:flex">
-        <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} />
+        <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} accounts={accounts} />
       </aside>
 
       <AnimatePresence>
@@ -236,6 +238,7 @@ export function DashboardShell({
                 repos={repos}
                 activeId={activeId}
                 installUrl={installUrl}
+                accounts={accounts}
                 onNavigate={() => setMobileOpen(false)}
               />
             </motion.aside>

@@ -33,7 +33,23 @@ function getApp() {
   return app;
 }
 
-export async function getInstallationAccountLogin(installationId: number): Promise<string> {
+/**
+ * The app's URL slug, straight from GitHub. Read through
+ * `getGithubAppSlug()` rather than called directly — that wraps this in a
+ * cache and an env fallback.
+ */
+export async function fetchAppSlug(): Promise<string | undefined> {
+  const { data } = await getApp().octokit.request("GET /app");
+  return data?.slug ?? undefined;
+}
+
+export interface InstallationAccount {
+  /** GitHub's account id for the user or organization the app is installed on, stringified to match how account ids are stored. */
+  id: string;
+  login: string;
+}
+
+export async function getInstallationAccount(installationId: number): Promise<InstallationAccount> {
   const { data } = await getApp().octokit.request(
     "GET /app/installations/{installation_id}",
     { installation_id: installationId },
@@ -44,7 +60,7 @@ export async function getInstallationAccountLogin(installationId: number): Promi
     throw new Error(`Installation ${installationId} has no associated account`);
   }
   // "login" exists on User/Organization accounts; Enterprise accounts use "slug" instead.
-  return "login" in account ? account.login : account.slug;
+  return { id: String(account.id), login: "login" in account ? account.login : account.slug };
 }
 
 //access all the repos

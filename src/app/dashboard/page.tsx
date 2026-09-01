@@ -5,21 +5,26 @@ import { auth } from "@/auth";
 import { loadLatestReview, loadUserOverviewStats, type UserOverviewStats, type LatestReview } from "@/lib/db/repo-stats";
 import { buttonClasses, toneTextClasses, type Tone } from "@/lib/ui";
 import { GitHubMark } from "@/components/github-mark";
+import { ConnectAccountButton } from "@/components/dashboard/connect-repo-menu";
 import { StatePanel } from "@/components/state-panel";
 import { ReviewCard } from "@/components/review-card";
+import { getInstallUrl } from "@/lib/github/install-url";
 
 function EmptyState({ installUrl }: { installUrl?: string }) {
   return (
     <StatePanel
       icon={<FolderGit2 className="h-5 w-5" aria-hidden="true" />}
       title="No repositories connected"
-      description="Install the GitHub App on a repository to start getting automated PR reviews."
+      description="Install the GitHub App on a repository to start getting automated PR reviews. If your repositories sit under a different GitHub login, connect that account too — both appear in this one workspace."
       action={
         installUrl ? (
-          <a href={installUrl} className={buttonClasses("primary")}>
-            <GitHubMark className="h-4 w-4" />
-            Connect GitHub
-          </a>
+          <div className="flex flex-wrap items-center gap-2">
+            <a href={installUrl} className={buttonClasses("primary")}>
+              <GitHubMark className="h-4 w-4" />
+              Connect GitHub
+            </a>
+            <ConnectAccountButton />
+          </div>
         ) : (
           <p className="text-sm text-muted">
             GitHub App isn&apos;t configured yet — set{" "}
@@ -146,9 +151,7 @@ function LatestReviewSpotlight({ latest }: { latest: LatestReview | null }) {
 
 export default async function DashboardPage() {
   const session = await auth();
-  const installUrl = process.env.GITHUB_APP_SLUG
-    ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new`
-    : undefined;
+  const installUrl = await getInstallUrl();
 
   let overview: UserOverviewStats;
   let latest: LatestReview | null;

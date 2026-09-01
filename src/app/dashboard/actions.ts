@@ -3,7 +3,7 @@
 import { ObjectId } from "mongodb";
 import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
-import { getGithubAccountId } from "@/lib/github/account";
+import { getGithubAccountIds } from "@/lib/github/account";
 import { installations, repositories, type RepositoryDoc } from "@/lib/db/collections";
 
 /**
@@ -16,12 +16,12 @@ export async function disconnectRepository(githubRepoId: number) {
   const session = await auth();
   if (!session?.user?.id) return;
 
-  const githubUserId = await getGithubAccountId(session.user.id);
-  if (!githubUserId) return;
+  const githubUserIds = await getGithubAccountIds(session.user.id);
+  if (githubUserIds.length === 0) return;
 
   const installationsCol = await installations();
   const userInstallations = await installationsCol
-    .find({ githubUserId })
+    .find({ githubUserId: { $in: githubUserIds } })
     .toArray();
   const installationIds = userInstallations.map((i) => String(i._id));
 
@@ -47,11 +47,11 @@ export async function updateRepositoryConfig(
   const session = await auth();
   if (!session?.user?.id || !ObjectId.isValid(repositoryId)) return;
 
-  const githubUserId = await getGithubAccountId(session.user.id);
-  if (!githubUserId) return;
+  const githubUserIds = await getGithubAccountIds(session.user.id);
+  if (githubUserIds.length === 0) return;
 
   const installationsCol = await installations();
-  const userInstallations = await installationsCol.find({ githubUserId }).toArray();
+  const userInstallations = await installationsCol.find({ githubUserId: { $in: githubUserIds } }).toArray();
   const installationIds = userInstallations.map((i) => String(i._id));
 
   const repositoriesCol = await repositories();

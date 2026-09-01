@@ -3,6 +3,8 @@ import { auth, signOut } from "@/auth";
 import { SubmitButton } from "@/components/submit-button";
 import { DashboardShell } from "@/components/dashboard/shell";
 import { loadRepoSummaries } from "@/lib/db/repo-stats";
+import { getLinkedGithubAccounts } from "@/lib/github/account";
+import { getInstallUrl } from "@/lib/github/install-url";
 
 export default async function DashboardLayout({
   children,
@@ -14,10 +16,11 @@ export default async function DashboardLayout({
     redirect("/");
   }
 
-  const repos = await loadRepoSummaries(session.user.id);
-  const installUrl = process.env.GITHUB_APP_SLUG
-    ? `https://github.com/apps/${process.env.GITHUB_APP_SLUG}/installations/new`
-    : undefined;
+  const [repos, accounts, installUrl] = await Promise.all([
+    loadRepoSummaries(session.user.id),
+    getLinkedGithubAccounts(session.user.id),
+    getInstallUrl(),
+  ]);
 
   const signOutForm = (
     <form
@@ -36,6 +39,7 @@ export default async function DashboardLayout({
     <DashboardShell
       repos={repos}
       installUrl={installUrl}
+      accounts={accounts}
       userName={session.user.name ?? session.user.email}
       userImage={session.user.image}
       signOutForm={signOutForm}

@@ -1,8 +1,8 @@
 // this file to connect to the repo 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
-import { getGithubAccountId } from "@/lib/github/account";
-import { getInstallationAccountLogin, getInstallationRepositories } from "@/lib/github/app";
+import { getGithubAccountIds } from "@/lib/github/account";
+import { getInstallationAccount, getInstallationRepositories } from "@/lib/github/app";
 import { ensureIndexes, installations, repositories } from "@/lib/db/collections";
 
 // Build absolute redirect URLs from the app's known public origin (AUTH_URL)
@@ -29,17 +29,27 @@ export async function GET(request: NextRequest) {
   }
   const githubInstallationId = Number(installationIdParam);
 
-  const githubUserId = await getGithubAccountId(session.user.id);
-  if (!githubUserId) {
+  const githubUserIds = await getGithubAccountIds(session.user.id);
+  if (githubUserIds.length === 0) {
     return NextResponse.redirect(appUrl("/dashboard", request));
   }
 
   await ensureIndexes();
 
-  const [accountLogin, repos] = await Promise.all([
-    getInstallationAccountLogin(githubInstallationId),
+  const [account, repos] = await Promise.all([
+    getInstallationAccount(githubInstallationId),
     getInstallationRepositories(githubInstallationId),
   ]);
+  const accountLogin = account.login;
+
+  // A user can have several GitHub logins linked. For a personal
+  // installation the owning login is knowable — it is the account the app was
+  // installed on — so record that one; an org installation says nothing about
+  // which of the user's logins performed it, so fall back to the first.
+  // Either way ownership checks match on every linked id, so the repos show
+  // up regardless.
+  const githubUserId =
+    githubUserIds.find((id) => id === account.id) ?? githubUserIds[0];
 
   const installationsCol = await installations();
   const result = await installationsCol.findOneAndUpdate(
