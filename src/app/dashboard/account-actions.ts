@@ -1,22 +1,22 @@
 "use server";
 
-import { signIn } from "@/auth";
+import { signIn, signOut } from "@/auth";
 
 /**
- * Starts the GitHub OAuth flow for a user who is *already* signed in.
+ * Signs out, then starts a fresh GitHub sign-in so the chosen account lands
+ * in its own workspace.
  *
- * Auth.js links the returning account to the current session's user instead
- * of creating a second workspace, so repositories installed under either
- * GitHub login end up side by side in one dashboard (ownership lookups match
- * on every linked account id — see `getGithubAccountIds`).
+ * Dropping the session first is the whole point: Auth.js links a returning
+ * OAuth account to whoever is *currently* signed in, so running `signIn`
+ * with a live session would merge the two GitHub logins into one workspace
+ * instead of moving between them. With no session there is nothing to link
+ * to, and the account resolves to its own user (created on first sign-in).
  *
  * `prompt=select_account` asks GitHub for its account chooser. Without it
- * GitHub silently reuses whichever account the browser is already signed in
- * as, which just re-links the account the user has, and the flow looks like
- * it did nothing.
+ * GitHub reuses whichever account the browser is already signed in as and
+ * drops the user straight back where they started.
  */
-
-// select account before going to the dashbaord
-export async function connectGithubAccount() {
-  await signIn("github", { redirectTo: "/dashboard/repos" }, { prompt: "select_account" });
+export async function switchGithubAccount() {
+  await signOut({ redirect: false });
+  await signIn("github", { redirectTo: "/dashboard" }, { prompt: "select_account" });
 }

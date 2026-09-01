@@ -3,8 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
-import { ChevronDown, FolderGit2, Loader2, UserPlus } from "lucide-react";
-import { connectGithubAccount } from "@/app/dashboard/account-actions";
+import { ArrowLeftRight, ChevronDown, FolderGit2, Loader2 } from "lucide-react";
+import { switchGithubAccount } from "@/app/dashboard/account-actions";
 import type { LinkedGithubAccount } from "@/lib/github/account";
 import { buttonClasses } from "@/lib/ui";
 
@@ -20,8 +20,8 @@ function ItemText({ label, hint }: { label: string; hint: string }) {
   );
 }
 
-/** Submit row for the account-linking form — needs its own component so `useFormStatus` sees the form. */
-function ConnectAccountItem() {
+/** Submit row for the account-switch form — needs its own component so `useFormStatus` sees the form. */
+function SwitchAccountItem() {
   const { pending } = useFormStatus();
 
   return (
@@ -29,19 +29,19 @@ function ConnectAccountItem() {
       {pending ? (
         <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-subtle" aria-hidden="true" />
       ) : (
-        <UserPlus className="mt-0.5 h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />
+        <ArrowLeftRight className="mt-0.5 h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />
       )}
       <ItemText
-        label="Connect a GitHub account"
-        hint={pending ? "Opening GitHub…" : "Link another GitHub login to this workspace"}
+        label="Switch GitHub account"
+        hint={pending ? "Opening GitHub…" : "Sign out and continue as a different GitHub login"}
       />
     </button>
   );
 }
 
 /**
- * The connect entry point: install the app on more repositories, or link a
- * second GitHub login so its repositories land in the same workspace.
+ * The connect entry point: install the app on more repositories, or leave
+ * for a different GitHub account's workspace.
  */
 export function ConnectRepoMenu({
   installUrl,
@@ -127,13 +127,13 @@ export function ConnectRepoMenu({
 
             <div className="my-1 border-t border-border" />
 
-            <form action={connectGithubAccount}>
-              <ConnectAccountItem />
+            <form action={switchGithubAccount}>
+              <SwitchAccountItem />
             </form>
 
             {knownLogins.length > 0 && (
               <p className="mt-1 border-t border-border px-2.5 pt-2 pb-1 text-[11px] leading-5 text-subtle">
-                Connected as {knownLogins.map((login) => `@${login}`).join(", ")}
+                Signed in as {knownLogins.map((login) => `@${login}`).join(", ")}
               </p>
             )}
           </motion.div>
@@ -143,16 +143,16 @@ export function ConnectRepoMenu({
   );
 }
 
-/** Standalone account-linking button for first-run states, where there is no menu to hang it off. */
-export function ConnectAccountButton() {
+/** Standalone switch button for first-run states, where there is no menu to hang it off. */
+export function SwitchAccountButton() {
   return (
-    <form action={connectGithubAccount}>
-      <ConnectAccountSubmit />
+    <form action={switchGithubAccount}>
+      <SwitchAccountSubmit />
     </form>
   );
 }
 
-function ConnectAccountSubmit() {
+function SwitchAccountSubmit() {
   const { pending } = useFormStatus();
 
   return (
@@ -160,27 +160,27 @@ function ConnectAccountSubmit() {
       {pending ? (
         <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
       ) : (
-        <UserPlus className="h-4 w-4" aria-hidden="true" />
+        <ArrowLeftRight className="h-4 w-4" aria-hidden="true" />
       )}
-      {pending ? "Opening GitHub…" : "Use a different GitHub account"}
+      {pending ? "Opening GitHub…" : "Switch GitHub account"}
     </button>
   );
 }
 
 /**
  * The same action as a row inside the header's account menu, styled to match
- * its sibling links. Account switching is where people look for it, so it
- * lives there as well as on the connect button.
+ * its sibling links. Switching accounts is something people look for under
+ * their own avatar, so it lives there as well as on the connect button.
  */
-export function ConnectAccountMenuItem() {
+export function SwitchAccountMenuItem() {
   return (
-    <form action={connectGithubAccount}>
-      <ConnectAccountMenuSubmit />
+    <form action={switchGithubAccount}>
+      <SwitchAccountMenuSubmit />
     </form>
   );
 }
 
-function ConnectAccountMenuSubmit() {
+function SwitchAccountMenuSubmit() {
   const { pending } = useFormStatus();
 
   return (
@@ -194,9 +194,9 @@ function ConnectAccountMenuSubmit() {
       {pending ? (
         <Loader2 className="h-4 w-4 shrink-0 animate-spin text-subtle" aria-hidden="true" />
       ) : (
-        <UserPlus className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />
+        <ArrowLeftRight className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />
       )}
-      {pending ? "Opening GitHub…" : "Connect a GitHub account"}
+      {pending ? "Opening GitHub…" : "Switch GitHub account"}
     </button>
   );
 }
