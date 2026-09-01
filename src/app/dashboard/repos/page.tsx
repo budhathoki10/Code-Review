@@ -21,7 +21,7 @@ import {
   type Tone,
 } from "@/lib/ui";
 import { GitHubMark } from "@/components/github-mark";
-import { ConnectAccountButton, ConnectRepoMenu } from "@/components/dashboard/connect-repo-menu";
+import { ConnectRepoMenu, SwitchAccountButton } from "@/components/dashboard/connect-repo-menu";
 import { StatePanel } from "@/components/state-panel";
 import { DisconnectRepoButton } from "../disconnect-repo-button";
 
@@ -83,7 +83,7 @@ function EmptyState({ installUrl }: { installUrl?: string }) {
     <StatePanel
       icon={<FolderGit2 className="h-5 w-5" aria-hidden="true" />}
       title="No repositories connected"
-      description="Install the GitHub App on a repository to start getting automated PR reviews. If your repositories sit under a different GitHub login, connect that account too — both appear in this one workspace."
+      description="Install the GitHub App on a repository to start getting automated PR reviews. If your repositories live under a different GitHub login, switch to that account instead."
       action={
         installUrl ? (
           <div className="flex flex-wrap items-center gap-2">
@@ -91,7 +91,7 @@ function EmptyState({ installUrl }: { installUrl?: string }) {
               <GitHubMark className="h-4 w-4" />
               Connect GitHub
             </a>
-            <ConnectAccountButton />
+            <SwitchAccountButton />
           </div>
         ) : (
           <p className="text-sm text-muted">

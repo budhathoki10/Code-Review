@@ -32,10 +32,11 @@ async function findGithubAccounts(userId: string): Promise<GithubAccountDoc[]> {
  * Every GitHub account id linked to an Auth.js user, via the adapter's
  * `accounts` collection.
  *
- * A user can link more than one GitHub login (see `connectGithubAccount`),
- * so ownership filters have to match on all of them — reading just the first
- * would hide every repo connected under the others, and which one came first
- * is arbitrary.
+ * Normally one, since signing in with another GitHub login switches to that
+ * login's own workspace (see `switchGithubAccount`). Accounts linked before
+ * that was the behavior still have two, so ownership filters match on all of
+ * them — reading just the first would hide every repo connected under the
+ * others, and which one comes back first is arbitrary.
  */
 export async function getGithubAccountIds(userId: string): Promise<string[]> {
   const accounts = await findGithubAccounts(userId);

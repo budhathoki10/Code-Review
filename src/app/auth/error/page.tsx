@@ -5,15 +5,16 @@ import { buttonClasses } from "@/lib/ui";
 
 /**
  * Auth.js sends every sign-in failure here (see `pages.error` in auth.ts).
- * The one users actually hit is OAuthAccountNotLinked — the GitHub account
- * they just picked is already attached to a different workspace, which is
- * exactly the wall someone runs into while connecting a second account.
+ * The one users actually hit is OAuthAccountNotLinked: a workspace already
+ * exists for this account's email address but was created with a different
+ * GitHub login, so Auth.js refuses to hand the existing workspace over.
+ * Switching accounts is where someone runs into it.
  */
 const MESSAGES: Record<string, { title: string; description: string }> = {
   OAuthAccountNotLinked: {
-    title: "That GitHub account is already connected elsewhere",
+    title: "That GitHub account can't sign in here",
     description:
-      "It belongs to another workspace on this app. Sign in with it directly, or pick a different GitHub account to connect to this one.",
+      "A workspace already exists for this account's email address, created with a different GitHub login. Sign in with that original login instead.",
   },
   AccessDenied: {
     title: "GitHub authorization was declined",
