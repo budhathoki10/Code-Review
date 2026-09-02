@@ -1,12 +1,48 @@
 import { parse as parseYaml } from "yaml";
+import type { FindingDoc } from "@/lib/db/collections";
 import { getFileContent, GitHubRateLimitError } from "@/lib/github/file-content";
 import { logger } from "@/lib/logger";
 
 export const CONFIG_PATH = ".prsentry.yaml";
 
+/**
+ * The categories a finding can carry, as a runtime value — the parser has to
+ * validate user-supplied strings against them and name the valid ones back in
+ * an error message, neither of which a type union can do.
+ *
+ * Built from a Record keyed by the union rather than written as a plain array
+ * so the list is provably complete: adding a category to FindingDoc without
+ * adding it here is a compile error. Completeness matters, not just validity —
+ * the "you disabled everything" guard below counts against this list, so a
+ * category missing from it would both be un-disableable and make that guard
+ * fire one category early.
+ */
+const CATEGORY_KEYS = {
+  security: true,
+  bug: true,
+  performance: true,
+  quality: true,
+  testing: true,
+} satisfies Record<FindingDoc["category"], true>;
+
+export const REVIEW_CATEGORIES = Object.keys(CATEGORY_KEYS) as FindingDoc["category"][];
+
 export interface RepoReviewConfig {
   /** Glob patterns; a leading "!" excludes. Merged with the built-in noise list, never replacing it. */
   pathFilters: string[];
+  /**
+   * Categories this repo has switched off entirely. Severity answers "how bad
+   * is it"; this answers "what kind of thing do I even want flagged" — a repo
+   * that wants security findings and nothing else can't express that by
+   * raising severityThreshold, which would drop critical bugs along with the
+   * testing nits.
+   *
+   * Findings in these categories are dropped before the review is stored, so
+   * they also can't fail the check run. A category that is off is off, not
+   * merely hidden: a check failing on a finding the repo asked not to receive
+   * would be the same surprise the setting exists to prevent.
+   */
+  disabledCategories: FindingDoc["category"][];
   /**
    * Optional per-repo cutoffs, STRICTER than the pipeline's own capacity
    * ceiling (see REVIEW_CAPACITY). Undefined — the normal case — means the
@@ -23,6 +59,7 @@ export interface RepoReviewConfig {
 
 export const DEFAULT_CONFIG: RepoReviewConfig = {
   pathFilters: [],
+  disabledCategories: [],
 };
 
 export interface ConfigLoadResult {
@@ -58,6 +95,46 @@ function readPositiveInt(raw: Record<string, unknown>, key: string, errors: stri
     return undefined;
   }
   return Math.floor(value);
+}
+
+/**
+ * Reads the disabled-category list, dropping (and naming) any entry that
+ * isn't a real category. One bad entry never invalidates the good ones: a
+ * repo that misspells "testng" alongside a correct "performance" still gets
+ * performance switched off, and is told about the typo.
+ */
+function readDisabledCategories(raw: Record<string, unknown>, errors: string[]): FindingDoc["category"][] {
+  const value = raw.disabled_categories;
+  if (value === undefined) return [];
+
+  if (!Array.isArray(value)) {
+    errors.push("`reviews.disabled_categories` must be a list of category names — ignoring it.");
+    return [];
+  }
+
+  const valid = new Set<string>(REVIEW_CATEGORIES);
+  const accepted = new Set<FindingDoc["category"]>();
+  for (const entry of value) {
+    if (typeof entry === "string" && valid.has(entry)) {
+      accepted.add(entry as FindingDoc["category"]);
+      continue;
+    }
+    errors.push(
+      `\`reviews.disabled_categories\` contains \`${JSON.stringify(entry)}\`, which is not a category — ignoring that entry. Valid categories: ${REVIEW_CATEGORIES.join(", ")}.`,
+    );
+  }
+
+  // Every category off would silently turn the reviewer into an expensive
+  // no-op that still pays for the model call, which is never what someone
+  // means — they mean "stop reviewing this repo", which is uninstalling.
+  if (accepted.size === REVIEW_CATEGORIES.length) {
+    errors.push(
+      "`reviews.disabled_categories` disables every category, which would leave no findings at all — ignoring it. Remove the app from this repo instead if that's the intent.",
+    );
+    return [];
+  }
+
+  return [...accepted];
 }
 
 /** Parses already-fetched YAML text. Split out from the fetch so it can be tested without any network. */
@@ -104,7 +181,7 @@ export function parseRepoConfig(text: string): ConfigLoadResult {
 
   // Unknown keys are reported but never fatal: a typo shouldn't silently do
   // nothing, and shouldn't stop the review either.
-  const known = new Set(["path_filters", "max_files", "max_changed_lines"]);
+  const known = new Set(["path_filters", "max_files", "max_changed_lines", "disabled_categories"]);
   for (const key of Object.keys(reviewsSection)) {
     if (!known.has(key)) {
       errors.push(`\`reviews.${key}\` is not a recognized setting — ignoring it. Valid keys: ${[...known].join(", ")}.`);
@@ -114,6 +191,7 @@ export function parseRepoConfig(text: string): ConfigLoadResult {
   return {
     config: {
       pathFilters,
+      disabledCategories: readDisabledCategories(reviewsSection, errors),
       maxFiles: readPositiveInt(reviewsSection, "max_files", errors),
       maxChangedLines: readPositiveInt(reviewsSection, "max_changed_lines", errors),
     },

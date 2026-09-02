@@ -110,6 +110,28 @@ function conclusionTitle(conclusion: CheckConclusion): string {
  * the old finding's exact line survived the edit — a deliberate v1
  * simplification, not a correctness guarantee).
  */
+/**
+ * Builds the predicate that drops findings in categories the repo switched
+ * off (`reviews.disabled_categories` in .prsentry.yaml).
+ *
+ * Applied to every source at once — carried-forward, AI and static — so a
+ * category disabled after an earlier review can't reappear through the
+ * carry-forward path, and so the drop happens before the review is stored
+ * rather than at posting time like the severity threshold does. That
+ * difference is deliberate: severity hides low-value findings but still lets
+ * a stale critical one fail the check run, whereas a category the repo has
+ * turned off must not be able to fail anything. Off means off, not hidden.
+ *
+ * Severity and category are independent axes — a repo can say "nothing below
+ * medium" and "no testing findings" at once, and neither can express the
+ * other.
+ */
+export function categoryFilter(disabledCategories: FindingDoc["category"][] | undefined): (finding: FindingDoc) => boolean {
+  if (!disabledCategories?.length) return () => true;
+  const disabled = new Set(disabledCategories);
+  return (finding) => !disabled.has(finding.category);
+}
+
 export function filterCarriedForwardFindings(previousFindings: FindingDoc[], touchedFiles: Set<string>): FindingDoc[] {
   return previousFindings.filter((f) => !touchedFiles.has(f.file));
 }
@@ -548,6 +570,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       selection.chunks.map((chunk) => chunk.files),
       {
         customInstructions: repoConfig?.customInstructions,
+        disabledCategories: reviewConfig.disabledCategories,
         staticFindings: staticFindingsForContext,
         prTitle,
         prBody: prBody ?? undefined,
@@ -635,6 +658,8 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     return { ...finding, originalLine, originalContext: computeContextLines(fileLines, finding.line) };
   };
 
+  const keepsCategory = categoryFilter(reviewConfig.disabledCategories);
+
   const allFindings = [
     // Carried-forward findings are deliberately NOT re-mapped: their line
     // numbers were resolved against an earlier commit's diff, so looking
@@ -648,7 +673,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // them anyway would imply static findings can carry a committable
     // suggestion, which they cannot.
     ...staticFindings,
-  ];
+  ].filter(keepsCategory);
 
   // Anything the last review flagged on a file this push edited, that this
   // review no longer reports, is called out as fixed — otherwise a review
@@ -658,7 +683,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     previousReview?.findings ?? [],
     touchedFiles,
     [...aiResult.findings, ...staticFindings],
-  );
+  ).filter(keepsCategory);
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
   }
