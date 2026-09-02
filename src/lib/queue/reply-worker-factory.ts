@@ -5,13 +5,22 @@ import { runReplyPipeline } from "@/lib/review/reply-pipeline";
 import { logger } from "@/lib/logger";
 
 /**
- * A reply costs one provider call, against a review's worst case of 65, so
- * this gets its own limiter rather than sharing the review worker's — under
- * a shared budget a single in-flight review would starve every question
- * asked while it ran.
+ * How fast accepted reply jobs are DRAINED. A reply costs one provider call,
+ * against a review's worst case of 65, so this gets its own limiter rather
+ * than sharing the review worker's — under a shared budget a single in-flight
+ * review would starve every question asked while it ran.
+ *
+ * Distinct from the webhook door's REPLY_ACCEPT_RATE_LIMIT_* (how many
+ * questions are taken in at all). The two used to share the name
+ * REPLY_RATE_LIMIT_MAX with different defaults. The old names are still read
+ * as a fallback so an existing deployment keeps working.
  */
-const REPLY_RATE_LIMIT_MAX = Number(process.env.REPLY_RATE_LIMIT_MAX ?? 20);
-const REPLY_RATE_LIMIT_DURATION_MS = Number(process.env.REPLY_RATE_LIMIT_DURATION_MS ?? 60_000);
+const REPLY_WORKER_RATE_LIMIT_MAX = Number(
+  process.env.REPLY_WORKER_RATE_LIMIT_MAX ?? process.env.REPLY_RATE_LIMIT_MAX ?? 20,
+);
+const REPLY_WORKER_RATE_LIMIT_DURATION_MS = Number(
+  process.env.REPLY_WORKER_RATE_LIMIT_DURATION_MS ?? process.env.REPLY_RATE_LIMIT_DURATION_MS ?? 60_000,
+);
 
 /**
  * Runs in the same process as the review worker (see
@@ -34,7 +43,7 @@ export function createReplyWorker(options: Partial<WorkerOptions> = {}): Worker<
     {
       connection: getRedisConnection(),
       concurrency: 5,
-      limiter: { max: REPLY_RATE_LIMIT_MAX, duration: REPLY_RATE_LIMIT_DURATION_MS },
+      limiter: { max: REPLY_WORKER_RATE_LIMIT_MAX, duration: REPLY_WORKER_RATE_LIMIT_DURATION_MS },
       ...options,
     },
   );
@@ -63,4 +72,4 @@ export function createReplyWorker(options: Partial<WorkerOptions> = {}): Worker<
   return worker;
 }
 
-export { REPLY_RATE_LIMIT_MAX, REPLY_RATE_LIMIT_DURATION_MS };
+export { REPLY_WORKER_RATE_LIMIT_MAX, REPLY_WORKER_RATE_LIMIT_DURATION_MS };

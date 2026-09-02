@@ -43,12 +43,23 @@ const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_
 const PR_REVIEW_THROTTLE_WINDOW_MS = Number(process.env.PR_REVIEW_THROTTLE_WINDOW_MS ?? 60_000);
 
 /**
- * Questions answered per PR per window. Generous enough for a real
- * back-and-forth, low enough that a comment flood on one PR can't run up an
- * unbounded provider bill.
+ * Questions ACCEPTED per PR per window, at the webhook door. Generous enough
+ * for a real back-and-forth, low enough that a comment flood on one PR can't
+ * run up an unbounded provider bill.
+ *
+ * Distinct from the reply worker's BullMQ limiter (REPLY_WORKER_RATE_LIMIT_*),
+ * which bounds how fast accepted jobs are *drained*. The two used to share the
+ * name REPLY_RATE_LIMIT_MAX while carrying different defaults (10 here, 20
+ * there), so setting it moved both knobs at once and neither to the value the
+ * operator saw documented. The old names are still read as a fallback so an
+ * existing deployment keeps working.
  */
-const REPLY_RATE_LIMIT_MAX = Number(process.env.REPLY_RATE_LIMIT_MAX ?? 10);
-const REPLY_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.REPLY_RATE_LIMIT_WINDOW_SECONDS ?? 600);
+const REPLY_ACCEPT_RATE_LIMIT_MAX = Number(
+  process.env.REPLY_ACCEPT_RATE_LIMIT_MAX ?? process.env.REPLY_RATE_LIMIT_MAX ?? 10,
+);
+const REPLY_ACCEPT_RATE_LIMIT_WINDOW_SECONDS = Number(
+  process.env.REPLY_ACCEPT_RATE_LIMIT_WINDOW_SECONDS ?? process.env.REPLY_RATE_LIMIT_WINDOW_SECONDS ?? 600,
+);
 
 function ok() {
   return NextResponse.json({ ok: true }, { status: 200 });
@@ -218,8 +229,8 @@ async function handleFindingReply(
   const withinLimit = await checkRateLimit(
     getRedisConnection(),
     `ratelimit:reply:${payload.repository.id}:${payload.pull_request.number}`,
-    REPLY_RATE_LIMIT_MAX,
-    REPLY_RATE_LIMIT_WINDOW_SECONDS,
+    REPLY_ACCEPT_RATE_LIMIT_MAX,
+    REPLY_ACCEPT_RATE_LIMIT_WINDOW_SECONDS,
   );
   if (!withinLimit) {
     log.warn({ prNumber: payload.pull_request.number }, "reply rate limit exceeded — dropping");

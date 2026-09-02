@@ -655,8 +655,11 @@ check run.
 window, shared across every event type; a 429 drops the event),
 `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` (60),
 `AI_RATE_LIMIT_MAX` (10), `AI_RATE_LIMIT_DURATION_MS` (60000),
-`REPLY_RATE_LIMIT_MAX`, `REPLY_RATE_LIMIT_DURATION_MS`,
-`REPLY_RATE_LIMIT_WINDOW_SECONDS`, `PR_REVIEW_LOCK_TTL_MS` (300000),
+`REPLY_ACCEPT_RATE_LIMIT_MAX` (10) and `REPLY_ACCEPT_RATE_LIMIT_WINDOW_SECONDS`
+(600) — questions *accepted* per PR at the webhook door;
+`REPLY_WORKER_RATE_LIMIT_MAX` (20) and `REPLY_WORKER_RATE_LIMIT_DURATION_MS`
+(60000) — how fast accepted jobs are *drained*;
+`PR_REVIEW_LOCK_TTL_MS` (300000),
 `PR_REVIEW_LOCK_RETRY_DELAY_MS` (3000), `PR_REVIEW_THROTTLE_WINDOW_MS` (60000),
 `MAX_RATE_LIMIT_WAIT_MS`
 
@@ -666,17 +669,19 @@ window, shared across every event type; a 429 drops the event),
 
 **Cost reporting, caching, cron, misc**
 
-`AI_INPUT_COST_PER_MTOK`, `AI_OUTPUT_COST_PER_MTOK` (both default 0 — set them
-for real numbers), `FILE_CONTENT_CACHE_BYTES`, `FILE_CONTENT_CACHE_ENTRIES`,
+`AI_INPUT_COST_PER_MTOK`, `AI_OUTPUT_COST_PER_MTOK` (both default 0, which is
+deliberate: a fabricated price looks authoritative on a dashboard, so the cost
+cell is **hidden** rather than showing `$0.00` until real rates are set — see
+`review-card.tsx`'s `estimatedCostUsd > 0` guard), `FILE_CONTENT_CACHE_BYTES`, `FILE_CONTENT_CACHE_ENTRIES`,
 `CRON_SECRET`, `CRON_MAX_DURATION_MS`, `LOG_LEVEL`, `GITHUB_APP_SLUG`,
 `DEV_TUNNEL_ORIGIN`
 
-> **One inconsistency worth knowing:** `REPLY_RATE_LIMIT_MAX` is read in two
-> places with *different* defaults — 10 in the webhook route (replies accepted
-> per `REPLY_RATE_LIMIT_WINDOW_SECONDS`) and 20 in the reply worker (jobs
-> processed per `REPLY_RATE_LIMIT_DURATION_MS`). They are genuinely different
-> knobs sharing one name, so setting it moves both. Documented rather than
-> silently renamed, since splitting the name is a behavior change.
+> **Reply limiting has two stages**, and they are named apart on purpose. The
+> *accept* limit decides whether a question is queued at all; the *worker*
+> limit decides how fast queued questions are answered. They previously shared
+> the name `REPLY_RATE_LIMIT_MAX` while carrying different defaults in each
+> place (10 and 20), so setting it moved both knobs and neither to the value
+> the operator had read. The old names are still honoured as a fallback.
 
 ---
 
