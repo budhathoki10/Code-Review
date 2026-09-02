@@ -651,7 +651,9 @@ check run.
 
 **Concurrency and rate limiting**
 
-`WEBHOOK_RATE_LIMIT_MAX` (20), `WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` (60),
+`WEBHOOK_RATE_LIMIT_MAX` (20 — deliveries accepted per **repository** per
+window, shared across every event type; a 429 drops the event),
+`WEBHOOK_RATE_LIMIT_WINDOW_SECONDS` (60),
 `AI_RATE_LIMIT_MAX` (10), `AI_RATE_LIMIT_DURATION_MS` (60000),
 `REPLY_RATE_LIMIT_MAX`, `REPLY_RATE_LIMIT_DURATION_MS`,
 `REPLY_RATE_LIMIT_WINDOW_SECONDS`, `PR_REVIEW_LOCK_TTL_MS` (300000),

@@ -20,7 +20,18 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { isDuplicateKeyError } from "@/lib/db/mongo-errors";
 import { logger } from "@/lib/logger";
 
-const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 2);
+/**
+ * Deliveries accepted per repository per window, across EVERY event type —
+ * the key is the repo id alone, so pushes, PR opens, comment replies and
+ * force-command comments all draw on one budget. Exceeding it returns 429
+ * and the event is dropped, not queued.
+ *
+ * 2 (the previous default) was far too tight for that shared budget: opening
+ * a PR and pushing once to it already spends both, and a developer replying
+ * to two findings exhausts it on its own. Matched to the 20 that
+ * .env.example has always documented.
+ */
+const WEBHOOK_RATE_LIMIT_MAX = Number(process.env.WEBHOOK_RATE_LIMIT_MAX ?? 20);
 const WEBHOOK_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.WEBHOOK_RATE_LIMIT_WINDOW_SECONDS ?? 60);
 
 /**
