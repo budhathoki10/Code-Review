@@ -43,6 +43,16 @@ export interface RepositoryDoc {
     /** Minimum severity that gets posted to GitHub and can fail the check run. Unset = post everything. */
     severityThreshold?: "info" | "low" | "medium" | "high" | "critical";
     customInstructions?: string[];
+    /**
+     * Categories switched off from the dashboard. Unioned with the same
+     * setting in the repo's own `.prsentry.yaml` — a category either side
+     * turns off stays off, which is the only merge rule that can't surprise
+     * someone: neither config can silently re-enable what the other disabled.
+     *
+     * Unlike severityThreshold, this drops findings before they are stored,
+     * so a disabled category can't fail the check run either. Off means off.
+     */
+    disabledCategories?: FindingDoc["category"][];
   };
 }
 

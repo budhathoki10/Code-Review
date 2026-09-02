@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseRepoConfig, DEFAULT_CONFIG, formatConfigErrors } from "@/lib/review/config";
+import { parseRepoConfig, DEFAULT_CONFIG, formatConfigErrors, REVIEW_CATEGORIES } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, isForceCommand, FORCE_COMMAND, estimateReviewCost } from "@/lib/review/gate";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, fileCoverage, charCoverage, REVIEW_CAPACITY, MAX_REVIEW_CHUNKS } from "@/lib/review/diff-selection";
 import { MAX_DIFF_FILES, MAX_DIFF_CHARS } from "@/lib/github/diff";
@@ -97,6 +97,42 @@ describe("parseRepoConfig", () => {
     expect(config.pathFilters).toEqual([]);
   });
 
+  it("reads disabled_categories", () => {
+    const { config, errors } = parseRepoConfig(["reviews:", "  disabled_categories:", "    - testing", "    - performance"].join("\n"));
+
+    expect(errors).toEqual([]);
+    expect(config.disabledCategories).toEqual(["testing", "performance"]);
+  });
+
+  it("defaults disabled_categories to empty — a repo that says nothing gets every category", () => {
+    expect(DEFAULT_CONFIG.disabledCategories).toEqual([]);
+    expect(parseRepoConfig("reviews:\n  max_files: 10").config.disabledCategories).toEqual([]);
+  });
+
+  it("names an unknown category and keeps the valid ones beside it", () => {
+    const { config, errors } = parseRepoConfig(["reviews:", "  disabled_categories:", "    - testng", "    - performance"].join("\n"));
+
+    expect(errors.join(" ")).toContain("testng");
+    // The typo is reported, not fatal — the correctly spelled entry still applies.
+    expect(config.disabledCategories).toEqual(["performance"]);
+  });
+
+  it("rejects disabled_categories that aren't a list", () => {
+    const { config, errors } = parseRepoConfig(["reviews:", "  disabled_categories: testing"].join("\n"));
+
+    expect(errors.join(" ")).toContain("disabled_categories");
+    expect(config.disabledCategories).toEqual([]);
+  });
+
+  it("refuses to disable every category, which would leave nothing to report", () => {
+    const { config, errors } = parseRepoConfig(
+      ["reviews:", "  disabled_categories:", ...REVIEW_CATEGORIES.map((c) => `    - ${c}`)].join("\n"),
+    );
+
+    expect(errors.join(" ")).toContain("every category");
+    expect(config.disabledCategories).toEqual([]);
+  });
+
   it("renders config errors into a comment block naming the file", () => {
     expect(formatConfigErrors(["`reviews.max_files` is wrong."])).toContain(".prsentry.yaml");
     expect(formatConfigErrors([])).toBe("");
@@ -123,7 +159,7 @@ describe("user path filters", () => {
 });
 
 describe("evaluateSizeGate", () => {
-  const config = { pathFilters: [], maxFiles: 150, maxChangedLines: 8000 };
+  const config = { pathFilters: [], disabledCategories: [], maxFiles: 150, maxChangedLines: 8000 };
 
   it("does not bail on a normal PR", () => {
     const selection = selectDiffForReview([srcFile("src/a.ts"), srcFile("src/b.ts")]);
@@ -238,7 +274,7 @@ describe("estimateReviewCost", () => {
     const { selectDiffForReview: select } = await import("@/lib/review/diff-selection");
 
     const selection = select([srcFile("src/a.ts", 200), srcFile("src/b.ts", 200)]);
-    const decision = gateWithLowCeiling(selection, { pathFilters: [] });
+    const decision = gateWithLowCeiling(selection, { pathFilters: [], disabledCategories: [] });
 
     expect(decision.bail).toBe(true);
     expect(decision.reason).toBe("cost-ceiling");
@@ -257,7 +293,7 @@ describe("estimateReviewCost", () => {
 
     // Sized to land between the 60% warn line (12,000) and the 20,000 ceiling.
     const selection = select([bulkyFile("src/a.ts", 1_280)]);
-    const decision = gateWithCeiling(selection, { pathFilters: [] });
+    const decision = gateWithCeiling(selection, { pathFilters: [], disabledCategories: [] });
     const cost = estimateReviewCost(selection);
 
     expect(cost.expectedTokens).toBeGreaterThan(12_000);
@@ -276,7 +312,7 @@ describe("estimateReviewCost", () => {
     const { evaluateSizeGate: gateWithLowCeiling } = await import("@/lib/review/gate");
     const { selectDiffForReview: select } = await import("@/lib/review/diff-selection");
 
-    const decision = gateWithLowCeiling(select([srcFile("src/a.ts", 200)]), { pathFilters: [] }, { forced: true });
+    const decision = gateWithLowCeiling(select([srcFile("src/a.ts", 200)]), { pathFilters: [], disabledCategories: [] }, { forced: true });
     expect(decision.bail).toBe(false);
 
     delete process.env.REVIEW_MAX_ESTIMATED_TOKENS;
@@ -301,12 +337,12 @@ describe("Phase 2 acceptance", () => {
 
     expect(selection.reviewableCount).toBeLessThan(20);
     expect(selection.triaged.filter((t) => t.reason === "whitespace-only")).toHaveLength(395);
-    expect(evaluateSizeGate(selection, { pathFilters: [], maxFiles: 150, maxChangedLines: 8000 }).bail).toBe(false);
+    expect(evaluateSizeGate(selection, { pathFilters: [], disabledCategories: [], maxFiles: 150, maxChangedLines: 8000 }).bail).toBe(false);
   });
 
   it("the bail-out comment shows the actual counts and offers the override", () => {
     const files = Array.from({ length: 200 }, (_, i) => srcFile(`src/f${i}.ts`, 2));
-    const config = { pathFilters: [], maxFiles: 150, maxChangedLines: 8000 };
+    const config = { pathFilters: [], disabledCategories: [], maxFiles: 150, maxChangedLines: 8000 };
     const selection = selectDiffForReview(files);
     const decision = evaluateSizeGate(selection, config);
 

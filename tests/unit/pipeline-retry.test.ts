@@ -101,7 +101,7 @@ vi.mock("@/lib/github/checks", () => ({ createCheckRun: vi.fn(), completeCheckRu
 vi.mock("@/lib/review/static-analysis", () => ({ runStaticAnalysis: vi.fn().mockResolvedValue([]) }));
 vi.mock("@/lib/review/config", async (importOriginal) => ({
   ...(await importOriginal<object>()),
-  loadRepoConfig: vi.fn().mockResolvedValue({ config: { pathFilters: [] }, errors: [], found: false }),
+  loadRepoConfig: vi.fn().mockResolvedValue({ config: { pathFilters: [], disabledCategories: [] }, errors: [], found: false }),
 }));
 vi.mock("@/lib/db/usage", async (importOriginal) => ({
   ...(await importOriginal<object>()),

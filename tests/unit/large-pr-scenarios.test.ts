@@ -100,7 +100,7 @@ describe("large PR scenarios", () => {
     // No opinion configured: the pipeline's own capacity decides.
     expect(evaluateSizeGate(selection, DEFAULT_CONFIG).bail).toBe(false);
     // An explicit repo cutoff still wins.
-    expect(evaluateSizeGate(selection, { pathFilters: [], maxChangedLines: 8_000 }).reason).toBe(
+    expect(evaluateSizeGate(selection, { pathFilters: [], disabledCategories: [], maxChangedLines: 8_000 }).reason).toBe(
       "too-many-changed-lines",
     );
   });
