@@ -112,7 +112,12 @@ function conclusionTitle(conclusion: CheckConclusion): string {
  */
 /**
  * Builds the predicate that drops findings in categories the repo switched
- * off (`reviews.disabled_categories` in .prsentry.yaml).
+ * off, from either config surface: the dashboard's review settings
+ * (`RepositoryDoc.config`) or `reviews.disabled_categories` in
+ * .prsentry.yaml. The sources are UNIONED — a category either one turns off
+ * stays off. That is the only merge rule that can't surprise anyone: no
+ * config can silently re-enable a category the other disabled, which is what
+ * a precedence rule would do to whichever surface lost.
  *
  * Applied to every source at once — carried-forward, AI and static — so a
  * category disabled after an earlier review can't reappear through the
@@ -126,9 +131,11 @@ function conclusionTitle(conclusion: CheckConclusion): string {
  * medium" and "no testing findings" at once, and neither can express the
  * other.
  */
-export function categoryFilter(disabledCategories: FindingDoc["category"][] | undefined): (finding: FindingDoc) => boolean {
-  if (!disabledCategories?.length) return () => true;
-  const disabled = new Set(disabledCategories);
+export function categoryFilter(
+  ...sources: (FindingDoc["category"][] | undefined)[]
+): (finding: FindingDoc) => boolean {
+  const disabled = new Set(sources.flatMap((source) => source ?? []));
+  if (disabled.size === 0) return () => true;
   return (finding) => !disabled.has(finding.category);
 }
 
@@ -364,6 +371,12 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     log.warn({ reviewId, configErrors }, "problems in .prsentry.yaml — continuing with defaults for those keys");
   }
 
+  // Both config surfaces, merged once here so the prompt and the finding
+  // filter below can never disagree about which categories are off.
+  const mergedDisabledCategories = [
+    ...new Set([...(repoConfig?.disabledCategories ?? []), ...reviewConfig.disabledCategories]),
+  ];
+
   // Filtering runs before the size gate so the gate measures real reviewable
   // work: a 400-file formatting PR is usually under 20 files by this count,
   // and gating on GitHub's raw file count would refuse a PR there is nothing
@@ -570,7 +583,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       selection.chunks.map((chunk) => chunk.files),
       {
         customInstructions: repoConfig?.customInstructions,
-        disabledCategories: reviewConfig.disabledCategories,
+        disabledCategories: mergedDisabledCategories,
         staticFindings: staticFindingsForContext,
         prTitle,
         prBody: prBody ?? undefined,
@@ -658,7 +671,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     return { ...finding, originalLine, originalContext: computeContextLines(fileLines, finding.line) };
   };
 
-  const keepsCategory = categoryFilter(reviewConfig.disabledCategories);
+  const keepsCategory = categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories);
 
   const allFindings = [
     // Carried-forward findings are deliberately NOT re-mapped: their line

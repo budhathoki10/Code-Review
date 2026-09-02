@@ -83,6 +83,28 @@ describe("categoryFilter", () => {
     expect(findings.filter(categoryFilter(["testing", "performance"])).map((f) => f.category)).toEqual(["bug"]);
   });
 
+  it("unions the dashboard and .prsentry.yaml lists rather than letting one win", () => {
+    const findings = [
+      finding({ category: "testing" }),
+      finding({ category: "performance" }),
+      finding({ category: "bug" }),
+    ];
+
+    // Dashboard disables testing, the repo file disables performance. Neither
+    // config can re-enable what the other switched off, so both are dropped.
+    const kept = findings.filter(categoryFilter(["testing"], ["performance"]));
+
+    expect(kept.map((f) => f.category)).toEqual(["bug"]);
+  });
+
+  it("tolerates either config source being absent", () => {
+    const findings = [finding({ category: "testing" }), finding({ category: "bug" })];
+
+    expect(findings.filter(categoryFilter(undefined, ["testing"])).map((f) => f.category)).toEqual(["bug"]);
+    expect(findings.filter(categoryFilter(["testing"], undefined)).map((f) => f.category)).toEqual(["bug"]);
+    expect(findings.filter(categoryFilter(undefined, undefined))).toEqual(findings);
+  });
+
   it("applies to static-analysis findings the same as to AI ones", () => {
     // Static findings are only ever "security" or "quality" — a repo that
     // turns off quality must stop receiving the linter's quality output too,
