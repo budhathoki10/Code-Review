@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createHmac } from "crypto";
-import { verifyWebhookSignature } from "@/lib/github/webhook";
+import { shouldQueuePullRequestReview, verifyWebhookSignature } from "@/lib/github/webhook";
 
 const ORIGINAL_SECRET = process.env.GITHUB_WEBHOOK_SECRET;
 
@@ -58,5 +58,24 @@ describe("verifyWebhookSignature", () => {
 
     expect(() => verifyWebhookSignature(body, "not-a-real-signature")).not.toThrow();
     expect(verifyWebhookSignature(body, "not-a-real-signature")).toBe(false);
+  });
+});
+
+describe("shouldQueuePullRequestReview", () => {
+  it.each([
+    ["opened", false],
+    ["synchronize", false],
+    ["closed", true],
+  ])("queues the %s action when merged is %s", (action, merged) => {
+    expect(shouldQueuePullRequestReview(action, merged)).toBe(true);
+  });
+
+  it.each([
+    ["closed", false],
+    ["closed", null],
+    ["reopened", false],
+    ["edited", false],
+  ])("ignores the %s action when merged is %s", (action, merged) => {
+    expect(shouldQueuePullRequestReview(action, merged)).toBe(false);
   });
 });
