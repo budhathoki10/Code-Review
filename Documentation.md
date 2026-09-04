@@ -268,7 +268,7 @@ silently without the last two):
 
 | Event | Why |
 |---|---|
-| `pull_request` | Opens and pushes — the main review trigger |
+| `pull_request` | Opens, pushes, and completed merges — the main review trigger |
 | `issue_comment` | The `@prsentry review --force` override on a bailed-out PR |
 | `pull_request_review_comment` | Replies to an inline finding — see §12 |
 

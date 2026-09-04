@@ -8,7 +8,7 @@ import type {
 import type { Logger } from "pino";
 import type { WithId } from "mongodb";
 import { isForceCommand } from "@/lib/review/gate";
-import { verifyWebhookSignature } from "@/lib/github/webhook";
+import { shouldQueuePullRequestReview, verifyWebhookSignature } from "@/lib/github/webhook";
 import { isTrustedCommenter } from "@/lib/github/commenter";
 import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { enqueueReplyJob } from "@/lib/queue/reply-queue";
@@ -362,7 +362,7 @@ export async function POST(request: NextRequest) {
   const payload = rawPayload as unknown as PullRequestEvent;
   log.info({ action: payload.action, prNumber: payload.number }, "pull_request event");
 
-  if (payload.action !== "opened" && payload.action !== "synchronize") {
+  if (!shouldQueuePullRequestReview(payload.action, payload.pull_request.merged)) {
     log.info({ action: payload.action }, "webhook ignored — action not tracked");
     return ok();
   }
