@@ -75,10 +75,19 @@ function wireResponses(findingsResponses: unknown, verdictArgs: unknown) {
   });
 }
 
-async function loadGenerateReview() {
+/**
+ * `toolRounds` is explicit because REVIEW_FINDINGS_TOOL_ROUNDS defaults to 0
+ * — every findings call is then a single forced submit_findings and
+ * fetch_file is never offered. The investigation tests below are about that
+ * loop, so they have to turn it on rather than inherit a default that
+ * switches off the very behaviour under test.
+ */
+async function loadGenerateReview(toolRounds?: number) {
   vi.resetModules();
   process.env.NVIDIA_API_KEY = "test-key";
   process.env.NVIDIA_BASE_URL = "https://example.test/v1";
+  if (toolRounds === undefined) delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS;
+  else process.env.REVIEW_FINDINGS_TOOL_ROUNDS = String(toolRounds);
   const mod = await import("@/lib/ai/review");
   return mod;
 }
@@ -258,7 +267,7 @@ describe("generateReview", () => {
   });
 
   it("calls fetch_file to investigate before finalizing findings", async () => {
-    const { generateReview } = await loadGenerateReview();
+    const { generateReview } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue("export function foo() { return 1; }");
     wireResponses(
       [
@@ -295,7 +304,7 @@ describe("generateReview", () => {
   });
 
   it("forces submit_findings once the tool-call round cap is reached", async () => {
-    const { generateReview, MAX_FINDINGS_TOOL_ROUNDS } = await loadGenerateReview();
+    const { generateReview, MAX_FINDINGS_TOOL_ROUNDS } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue("some content");
     const fetchFileRound = toolCallResponse([{ name: "fetch_file", args: { path: "src/f.ts" } }]);
     wireResponses(
@@ -357,7 +366,7 @@ describe("generateReview", () => {
   });
 
   it("reaches submit_findings after fetch_file fails on a nonexistent path", async () => {
-    const { generateReview } = await loadGenerateReview();
+    const { generateReview } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue(undefined);
     wireResponses(
       [

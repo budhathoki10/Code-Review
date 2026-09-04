@@ -28,6 +28,7 @@ import {
   type RepositoryDoc,
 } from "@/lib/db/collections";
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
+import { normalizeDisabledSeverities } from "@/lib/review/severity";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
@@ -154,8 +155,8 @@ export function categoryFilter(
 export function severityFilter(
   ...sources: (FindingDoc["severity"][] | undefined)[]
 ): (finding: FindingDoc) => boolean {
-  const disabled = new Set(sources.flatMap((source) => source ?? []));
-  if (disabled.size === 0 || disabled.size >= SEVERITY_ORDER.length) return () => true;
+  const disabled = new Set(normalizeDisabledSeverities(sources.flatMap((source) => source ?? [])));
+  if (disabled.size === 0) return () => true;
   return (finding) => !disabled.has(finding.severity);
 }
 
@@ -393,6 +394,14 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
   // Both config surfaces, merged once here so the prompt and the finding
   // filter below can never disagree about which categories are off.
+  // Normalized ONCE, here, because the list has two consumers that must agree:
+  // the prompt (which tells the model which severities to skip) and
+  // severityFilter (which drops them). Applying the all-off guard only in the
+  // filter left the prompt still instructing the model to omit every
+  // severity — it returned nothing, and the filter then had nothing to
+  // preserve. The guard has to come before the earliest consumer.
+  const effectiveDisabledSeverities = normalizeDisabledSeverities(repoConfig?.disabledSeverities);
+
   const mergedDisabledCategories = [
     ...new Set([...(repoConfig?.disabledCategories ?? []), ...reviewConfig.disabledCategories]),
   ];
@@ -604,7 +613,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       {
         customInstructions: repoConfig?.customInstructions,
         disabledCategories: mergedDisabledCategories,
-        disabledSeverities: repoConfig?.disabledSeverities,
+        disabledSeverities: effectiveDisabledSeverities,
         staticFindings: staticFindingsForContext,
         prTitle,
         prBody: prBody ?? undefined,
@@ -695,7 +704,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const keepsCategory = categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories);
   // Severity is dashboard-only — .prsentry.yaml has no equivalent key — so
   // unlike keepsCategory this has a single source.
-  const keepsSeverity = severityFilter(repoConfig?.disabledSeverities);
+  const keepsSeverity = severityFilter(effectiveDisabledSeverities);
   const keepsFinding = (finding: FindingDoc) => keepsCategory(finding) && keepsSeverity(finding);
 
   const allFindings = [

@@ -196,7 +196,17 @@ function ToggleList<T extends string>({
   footnote: React.ReactNode;
 }) {
   const all = items.map((item) => item.value);
-  const [enabled, setEnabled] = useState<T[]>(() => all.filter((value) => !saved?.includes(value)));
+  // Falls back to everything-on when the saved list disables every value.
+  // That state can exist in the database even though this control can't
+  // produce it (an older write, or a hand-edited document), and initializing
+  // `enabled` to empty would leave nothing locked — so the form would happily
+  // submit the all-off list straight back and make the state permanent. The
+  // server action refuses it too; this is the half that lets the user see and
+  // fix it rather than facing a dead settings panel.
+  const [enabled, setEnabled] = useState<T[]>(() => {
+    const on = all.filter((value) => !saved?.includes(value));
+    return on.length > 0 ? on : all;
+  });
 
   const disabled = all.filter((value) => !enabled.includes(value));
 

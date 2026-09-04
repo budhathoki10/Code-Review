@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { filterCarriedForwardFindings, categoryFilter, severityFilter } from "@/lib/review/pipeline";
+import { normalizeDisabledSeverities, REVIEW_SEVERITIES } from "@/lib/review/severity";
 import type { FindingDoc } from "@/lib/db/collections";
 
 function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
@@ -187,5 +188,40 @@ describe("severityFilter", () => {
     const kept = findings.filter((f) => keepsCategory(f) && keepsSeverity(f));
 
     expect(kept).toEqual([finding({ severity: "high", category: "bug" })]);
+  });
+});
+
+describe("normalizeDisabledSeverities", () => {
+  it("passes a partial list through unchanged", () => {
+    expect(normalizeDisabledSeverities(["medium", "low"])).toEqual(["medium", "low"]);
+  });
+
+  it("treats an all-off list as no filtering at all", () => {
+    // The bug this guards: the same list is ALSO rendered into the review
+    // prompt. Applying the guard only inside severityFilter left the model
+    // instructed to omit every severity — it returned nothing, and the
+    // filter then had nothing left to preserve. The guard has to run before
+    // the earliest consumer, so it lives here rather than in the filter.
+    expect(normalizeDisabledSeverities(REVIEW_SEVERITIES)).toEqual([]);
+  });
+
+  it("collapses duplicates before deciding whether every severity is off", () => {
+    // Four entries, but only two distinct — nowhere near all-off, so it must
+    // survive rather than being miscounted toward the guard.
+    expect(normalizeDisabledSeverities(["low", "low", "info", "info"])).toEqual(["low", "info"]);
+  });
+
+  it("returns an empty list for undefined or empty input", () => {
+    expect(normalizeDisabledSeverities(undefined)).toEqual([]);
+    expect(normalizeDisabledSeverities([])).toEqual([]);
+  });
+
+  it("keeps severityFilter and the prompt agreeing on an all-off list", () => {
+    const findings = [finding({ severity: "critical" }), finding({ severity: "info" })];
+    // Both consumers derive from the same normalized value, so neither can
+    // act on a list the other has already discarded.
+    const normalized = normalizeDisabledSeverities(REVIEW_SEVERITIES);
+    expect(normalized).toEqual([]);
+    expect(findings.filter(severityFilter(normalized))).toEqual(findings);
   });
 });
