@@ -139,6 +139,26 @@ export function categoryFilter(
   return (finding) => !disabled.has(finding.category);
 }
 
+/**
+ * Drops findings whose severity the repo switched off.
+ *
+ * Deliberately separate from the posting threshold: that one hides a finding
+ * from GitHub while still storing it, this one discards it. Same "off means
+ * off" rule categoryFilter follows — a check run must never fail on a
+ * finding the repo explicitly asked not to receive.
+ *
+ * Every severity off would leave nothing at all, which is never what someone
+ * means, so an all-off set is ignored rather than obeyed — the same guard
+ * readDisabledCategories applies to categories.
+ */
+export function severityFilter(
+  ...sources: (FindingDoc["severity"][] | undefined)[]
+): (finding: FindingDoc) => boolean {
+  const disabled = new Set(sources.flatMap((source) => source ?? []));
+  if (disabled.size === 0 || disabled.size >= SEVERITY_ORDER.length) return () => true;
+  return (finding) => !disabled.has(finding.severity);
+}
+
 export function filterCarriedForwardFindings(previousFindings: FindingDoc[], touchedFiles: Set<string>): FindingDoc[] {
   return previousFindings.filter((f) => !touchedFiles.has(f.file));
 }
@@ -584,6 +604,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       {
         customInstructions: repoConfig?.customInstructions,
         disabledCategories: mergedDisabledCategories,
+        disabledSeverities: repoConfig?.disabledSeverities,
         staticFindings: staticFindingsForContext,
         prTitle,
         prBody: prBody ?? undefined,
@@ -672,6 +693,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   };
 
   const keepsCategory = categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories);
+  // Severity is dashboard-only — .prsentry.yaml has no equivalent key — so
+  // unlike keepsCategory this has a single source.
+  const keepsSeverity = severityFilter(repoConfig?.disabledSeverities);
+  const keepsFinding = (finding: FindingDoc) => keepsCategory(finding) && keepsSeverity(finding);
 
   const allFindings = [
     // Carried-forward findings are deliberately NOT re-mapped: their line
@@ -686,7 +711,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // them anyway would imply static findings can carry a committable
     // suggestion, which they cannot.
     ...staticFindings,
-  ].filter(keepsCategory);
+  ].filter(keepsFinding);
 
   // Anything the last review flagged on a file this push edited, that this
   // review no longer reports, is called out as fixed — otherwise a review
@@ -696,7 +721,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     previousReview?.findings ?? [],
     touchedFiles,
     [...aiResult.findings, ...staticFindings],
-  ).filter(keepsCategory);
+  ).filter(keepsFinding);
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
   }
