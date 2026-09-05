@@ -6,6 +6,8 @@ import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { SuggestionBlock } from "@/components/suggestion-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
+import { ReviewFeedback } from "@/components/review-feedback";
+import { evidenceLabel } from "@/lib/review/finding-policy";
 
 const CATEGORY_ICON: Record<FindingDoc["category"], typeof Bug> = {
   security: ShieldAlert,
@@ -84,6 +86,13 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
         )}
       </p>
       <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
+      <p className="mt-2 text-xs text-subtle">{evidenceLabel(finding)}</p>
+      {finding.verification?.status === "accepted" && <p className="mt-1 text-xs text-muted">Assessment: {finding.verification.reason}</p>}
+      {finding.verification?.evidence.map((evidence, index) => <p key={index} className="mt-1 break-words font-mono text-xs text-muted">{evidence.file}:{evidence.line} — {evidence.quote}</p>)}
+      {finding.proof && <details className="mt-2 text-xs text-muted"><summary className="cursor-pointer">Regression test: {finding.proof.status}</summary>
+        <p className="mt-1">{finding.proof.reason}</p>
+        <pre className="mt-1 overflow-x-auto">{JSON.stringify({ base: finding.proof.baseSha, head: finding.proof.headSha, ...finding.proof.test }, null, 2)}</pre>
+      </details>}
       {/* Both halves present means this is a committable one-line replacement,
           so it's shown before/after like GitHub's suggestion widget. Prose
           suggestions and older findings have no originalLine and keep the
@@ -306,6 +315,18 @@ export function ReviewCard({
           )}
 
           {review.metrics && <MetricsStrip metrics={review.metrics} />}
+          {repositoryId && review.status === "completed" && (
+            <ReviewFeedback reviewId={String(review._id)} repositoryId={repositoryId} value={review.feedback?.label} />
+          )}
+          {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
+            Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
+          </p>}
+          {!!review.verificationCheckpoint?.rejected.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Rejected findings ({review.verificationCheckpoint.rejected.length})</summary>
+            <ul className="mt-2 space-y-2">{review.verificationCheckpoint.rejected.map((finding, index) => <li key={index}>{finding.file}: {finding.title} — {finding.verification?.reason}</li>)}</ul>
+          </details>}
+          {!!review.riskFiles?.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Sensitive changes prioritized ({review.riskFiles.length})</summary>
+            <ul className="mt-2 space-y-1">{review.riskFiles.map((risk) => <li key={risk.file}>{risk.file}: {risk.reasons.join(", ")}</li>)}</ul>
+          </details>}
         </div>
       </details>
     </li>

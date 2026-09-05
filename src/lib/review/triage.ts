@@ -1,4 +1,5 @@
 import type { PullRequestFile } from "@/lib/github/diff";
+import { riskReasons } from "@/lib/review/risk";
 
 /**
  * Why a file was triaged out of the AI review. Kept as a discriminated
@@ -145,7 +146,8 @@ export function hasGeneratedMarker(text: string): boolean {
 const DOCUMENTATION_PATTERN = /\.(md|mdx)$/i;
 
 export function triageFile(file: PullRequestFile, generatedText?: string): TriageResult {
-  if (file.status === "removed") return { skip: "file-deleted" };
+  const sensitive = riskReasons(file).length > 0;
+  if (file.status === "removed" && !sensitive) return { skip: "file-deleted" };
   if (DOCUMENTATION_PATTERN.test(file.filename)) return { skip: "documentation" };
 
   const text = generatedText ?? file.patch ?? "";
@@ -153,6 +155,10 @@ export function triageFile(file: PullRequestFile, generatedText?: string): Triag
   // and scanning the whole body would match any file that merely discusses
   // code generation — this file included.
   if (text && hasGeneratedMarker(text.slice(0, 2000))) return { skip: "generated" };
+
+  // Sensitive changes, including deletions, must reach the reviewer. Text-only
+  // whitespace/import heuristics cannot establish that their behavior is unchanged.
+  if (sensitive) return { skip: undefined };
 
   if (!file.patch) return { skip: undefined };
 

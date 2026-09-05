@@ -263,6 +263,11 @@ function formatInlineComment(finding: FindingDoc): string {
   const lines = [
     ` **AI Reviewer** — ${capitalize(finding.category)} · ${capitalize(finding.severity)}`,
     finding.explanation,
+    finding.proof?.status === "reproduced" ? "Regression reproduced — proposed test passes on base and fails on head."
+      : finding.verification?.status === "accepted"
+      ? "Probable — evidence checked by AI; not test-proven."
+      : finding.verification ? `Advisory — ${finding.verification.reason}` : "",
+    ...(finding.verification?.status === "accepted" ? [`Assessment: ${finding.verification.reason}`, ...finding.verification.evidence.map((e) => `Evidence at \`${e.file}:${e.line}\`: \`${e.quote.replace(/`/g, "'")}\``)] : []),
   ];
   if (finding.suggestion) {
     const committable = looksLikeCleanCodeSuggestion(finding.suggestion);

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { PullRequestFile } from "@/lib/github/diff";
 
 const { createMock, getFileContentMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -13,6 +14,9 @@ vi.mock("openai", () => ({
 
 vi.mock("@/lib/github/file-content", () => ({
   getFileContent: getFileContentMock,
+  // The chunked path distinguishes a GitHub rate limit from a provider
+  // failure, so the mock has to carry the real class.
+  GitHubRateLimitError: class GitHubRateLimitError extends Error {},
 }));
 
 /** One raw chat-completion response carrying one or more tool calls. */
@@ -56,7 +60,7 @@ function toolNames(params: CreateParams): string[] {
  * unchanged) or an ORDERED ARRAY of raw responses, one per expected
  * findings-branch `create()` call (round 0, round 1, ..., final).
  */
-function wireResponses(findingsResponses: unknown, verdictArgs: unknown) {
+function wireResponses(findingsResponses: unknown) {
   const queue = Array.isArray(findingsResponses)
     ? [...(findingsResponses as unknown[])]
     : [toolResponse("submit_findings", findingsResponses)];
@@ -68,11 +72,15 @@ function wireResponses(findingsResponses: unknown, verdictArgs: unknown) {
       if (!next) throw new Error("findings-branch create() called more times than the test wired responses for");
       return Promise.resolve(next);
     }
-    if (names.includes("submit_verdict")) {
-      return Promise.resolve(toolResponse("submit_verdict", verdictArgs));
-    }
     throw new Error(`unexpected tools in params: ${names.join(",")}`);
   });
+}
+
+/** Minimal file whose patch renders to the diff text these tests assert on. */
+function file(name = "src/foo.ts"): PullRequestFile {
+  return { filename: name, status: "modified", patch: `@@ -1,2 +1,3 @@
+ context
++// change in ${name}` };
 }
 
 /**
@@ -98,100 +106,35 @@ function findingsBranchCalls(): CreateParams[] {
   return createMock.mock.calls.map((call: unknown[]) => call[0] as CreateParams).filter((params) => toolNames(params).includes("submit_findings"));
 }
 
-describe("generateReview", () => {
+describe("generateChunkedReview findings pass", () => {
   beforeEach(() => {
     createMock.mockReset();
     getFileContentMock.mockReset();
   });
 
-  it("combines findings and verdict/summary from two concurrent calls", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses(
-      {
-        findings: [
-          {
-            severity: "medium",
-            category: "quality",
-            file: "src/foo.ts",
-            line: 3,
-            title: "unused var",
-            explanation: "x is never used",
-          },
-        ],
-      },
-      { verdict: "comment", summary: "Looks reasonable overall." },
-    );
 
-    const result = await generateReview("diff --git a/foo b/foo");
 
-    expect(result.findings).toHaveLength(1);
-    expect(result.findings[0].title).toBe("unused var");
-    expect(result.verdict).toBe("comment");
-    expect(result.summary).toContain("Looks reasonable overall.");
-    expect(result.summary).toContain("*Current review: COMMENT.*");
-    expect(createMock).toHaveBeenCalledTimes(2);
-  });
 
-  it("overrides an approve verdict to request_changes when a high/critical finding is present", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses(
-      {
-        findings: [
-          {
-            severity: "critical",
-            category: "security",
-            file: "src/auth.ts",
-            title: "hardcoded secret",
-            explanation: "a secret is committed in plaintext",
-          },
-        ],
-      },
-      { verdict: "approve", summary: "Nothing concerning here." },
-    );
+  it("reports the file as unreviewed rather than failing the whole review", async () => {
+    // A failed findings pass must not throw: the review still publishes, and
+    // the file it could not read is named instead of silently omitted.
+    const { generateChunkedReview } = await loadGenerateReview();
+    createMock.mockRejectedValue(new Error("provider error"));
 
-    const result = await generateReview("diff --git a/auth b/auth");
+    const result = await generateChunkedReview([[file()]]);
 
-    expect(result.verdict).toBe("request_changes");
-    expect(result.summary).toContain("*Current review: REQUEST CHANGES.*");
-  });
-
-  it("does not downgrade an independent request_changes verdict when findings are empty", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "request_changes", summary: "The design here is unsafe." });
-
-    const result = await generateReview("diff --git a/design b/design");
-
-    expect(result.verdict).toBe("request_changes");
+    expect(result.unreviewedFiles).toEqual(["src/foo.ts"]);
     expect(result.findings).toHaveLength(0);
   });
 
-  it("propagates a rejection if the findings call fails", async () => {
-    const { generateReview } = await loadGenerateReview();
-    createMock.mockImplementation((params: CreateParams) => {
-      if (toolNames(params).includes("submit_findings")) return Promise.reject(new Error("provider error"));
-      return Promise.resolve(toolResponse("submit_verdict", { verdict: "approve", summary: "ok" }));
-    });
 
-    await expect(generateReview("diff --git a/x b/x")).rejects.toThrow("provider error");
-  });
+  it("includes customInstructions in the findings request", async () => {
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: [] });
 
-  it("propagates a rejection if the verdict call fails", async () => {
-    const { generateReview } = await loadGenerateReview();
-    createMock.mockImplementation((params: CreateParams) => {
-      if (toolNames(params).includes("submit_verdict")) return Promise.reject(new Error("provider timeout"));
-      return Promise.resolve(toolResponse("submit_findings", { findings: [] }));
-    });
+    await generateChunkedReview([[file()]], { customInstructions: ["ignore generated files"] });
 
-    await expect(generateReview("diff --git a/x b/x")).rejects.toThrow("provider timeout");
-  });
-
-  it("includes customInstructions in both calls' user messages", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
-
-    await generateReview("diff --git a/x b/x", { customInstructions: ["ignore generated files"] });
-
-    expect(createMock).toHaveBeenCalledTimes(2);
+    expect(createMock).toHaveBeenCalledTimes(1);
     for (const call of createMock.mock.calls) {
       const params = call[0] as { messages: { role: string; content: string }[] };
       const userMessage = params.messages.find((m) => m.role === "user");
@@ -199,11 +142,11 @@ describe("generateReview", () => {
     }
   });
 
-  it("includes static-analysis findings in both calls' context, framed as already-reported", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+  it("includes static-analysis findings in the findings context, framed as already-reported", async () => {
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: [] });
 
-    await generateReview("diff --git a/x b/x", {
+    await generateChunkedReview([[file()]], {
       staticFindings: [
         {
           severity: "medium",
@@ -224,11 +167,11 @@ describe("generateReview", () => {
     }
   });
 
-  it("includes PR title and description in both calls' context", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+  it("includes PR title and description in the findings context", async () => {
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: [] });
 
-    await generateReview("diff --git a/x b/x", {
+    await generateChunkedReview([[file()]], {
       prTitle: "Fix login button on mobile",
       prBody: "The submit button was unreachable below the fold on small screens.",
     });
@@ -242,10 +185,10 @@ describe("generateReview", () => {
   });
 
   it("omits the static-findings and PR-metadata sections entirely when not provided", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: [] });
 
-    await generateReview("diff --git a/x b/x");
+    await generateChunkedReview([[file()]]);
 
     for (const call of createMock.mock.calls) {
       const params = call[0] as { messages: { role: string; content: string }[] };
@@ -256,10 +199,10 @@ describe("generateReview", () => {
   });
 
   it("does not offer fetch_file when no repoContext is provided (unchanged single-call behavior)", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: [] }, { verdict: "approve", summary: "fine" });
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: [] });
 
-    await generateReview("diff --git a/x b/x");
+    await generateChunkedReview([[file()]]);
 
     expect(findingsBranchCalls()).toHaveLength(1);
     const params = findingsBranchCalls()[0];
@@ -267,10 +210,9 @@ describe("generateReview", () => {
   });
 
   it("calls fetch_file to investigate before finalizing findings", async () => {
-    const { generateReview } = await loadGenerateReview(3);
+    const { generateChunkedReview } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue("export function foo() { return 1; }");
-    wireResponses(
-      [
+    wireResponses([
         toolCallResponse([{ name: "fetch_file", args: { path: "src/lib/foo.ts" } }]),
         toolResponse("submit_findings", {
           findings: [
@@ -284,13 +226,12 @@ describe("generateReview", () => {
           ],
         }),
       ],
-      { verdict: "comment", summary: "Needs a null check." },
     );
 
-    const result = await generateReview("diff --git a/foo b/foo", { repoContext: SAMPLE_REPO_CONTEXT });
+    const result = await generateChunkedReview([[file()]], { repoContext: SAMPLE_REPO_CONTEXT });
 
     expect(result.findings).toHaveLength(1);
-    expect(getFileContentMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/lib/foo.ts", "deadbeef");
+    expect(getFileContentMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/lib/foo.ts", "deadbeef", { signal: expect.any(AbortSignal) });
 
     const calls = findingsBranchCalls();
     expect(calls).toHaveLength(2); // fetch_file round + final submit
@@ -304,15 +245,13 @@ describe("generateReview", () => {
   });
 
   it("forces submit_findings once the tool-call round cap is reached", async () => {
-    const { generateReview, MAX_FINDINGS_TOOL_ROUNDS } = await loadGenerateReview(3);
+    const { generateChunkedReview, MAX_FINDINGS_TOOL_ROUNDS } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue("some content");
     const fetchFileRound = toolCallResponse([{ name: "fetch_file", args: { path: "src/f.ts" } }]);
-    wireResponses(
-      [fetchFileRound, fetchFileRound, fetchFileRound, toolResponse("submit_findings", { findings: [] })],
-      { verdict: "approve", summary: "fine" },
+    wireResponses([fetchFileRound, fetchFileRound, fetchFileRound, toolResponse("submit_findings", { findings: [] })],
     );
 
-    const result = await generateReview("diff --git a/x b/x", { repoContext: SAMPLE_REPO_CONTEXT });
+    const result = await generateChunkedReview([[file()]], { repoContext: SAMPLE_REPO_CONTEXT });
 
     expect(result.findings).toHaveLength(0);
     const calls = findingsBranchCalls();
@@ -323,12 +262,11 @@ describe("generateReview", () => {
   });
 
   it("accepts a findings array the model double-encoded as a JSON string", async () => {
-    const { generateReview } = await loadGenerateReview();
+    const { generateChunkedReview } = await loadGenerateReview();
     // Observed against the NVIDIA endpoint: `{"findings": "[{...}]"}` instead
     // of `{"findings": [{...}]}`. Deterministic per response, so BullMQ's
     // retries couldn't clear it and the review dead-lettered.
-    wireResponses(
-      {
+    wireResponses({
         findings: JSON.stringify([
           {
             severity: "low",
@@ -339,44 +277,46 @@ describe("generateReview", () => {
           },
         ]),
       },
-      { verdict: "comment", summary: "One small nit." },
     );
 
-    const result = await generateReview("diff --git a/foo b/foo");
+    const result = await generateChunkedReview([[file()]]);
 
     expect(result.findings).toHaveLength(1);
     expect(result.findings[0].title).toBe("nit");
   });
 
   it("accepts an empty findings array double-encoded as a JSON string", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: "[]" }, { verdict: "approve", summary: "All good." });
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: "[]" });
 
-    const result = await generateReview("diff --git a/x b/x");
+    const result = await generateChunkedReview([[file()]]);
 
     expect(result.findings).toHaveLength(0);
     expect(result.verdict).toBe("approve");
   });
 
-  it("still rejects a findings string that isn't valid JSON", async () => {
-    const { generateReview } = await loadGenerateReview();
-    wireResponses({ findings: "no issues found" }, { verdict: "approve", summary: "fine" });
+  it("does not accept a findings string that isn't valid JSON", async () => {
+    // The double-encoding tolerance above must not become "accept anything":
+    // an unparseable payload is a failed pass, reported as unreviewed.
+    const { generateChunkedReview } = await loadGenerateReview();
+    wireResponses({ findings: "no issues found" });
 
-    await expect(generateReview("diff --git a/x b/x")).rejects.toThrow();
+    const result = await generateChunkedReview([[file()]]);
+
+    expect(result.findings).toHaveLength(0);
+    expect(result.unreviewedFiles).toEqual(["src/foo.ts"]);
   });
 
   it("reaches submit_findings after fetch_file fails on a nonexistent path", async () => {
-    const { generateReview } = await loadGenerateReview(3);
+    const { generateChunkedReview } = await loadGenerateReview(3);
     getFileContentMock.mockResolvedValue(undefined);
-    wireResponses(
-      [
+    wireResponses([
         toolCallResponse([{ name: "fetch_file", args: { path: "src/does/not/exist.ts" } }]),
         toolResponse("submit_findings", { findings: [] }),
       ],
-      { verdict: "approve", summary: "fine" },
     );
 
-    const result = await generateReview("diff --git a/x b/x", { repoContext: SAMPLE_REPO_CONTEXT });
+    const result = await generateChunkedReview([[file()]], { repoContext: SAMPLE_REPO_CONTEXT });
 
     expect(result.findings).toHaveLength(0);
     const calls = findingsBranchCalls();
