@@ -133,6 +133,13 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
 
   // Count attempts even if the provider fails without reporting usage.
   result.usage = { ...EMPTY_USAGE, calls: 1 };
+  // Snapshot taken before any decision is applied. The proof step runs inside
+  // the try after decisions have been written, so a container failure there
+  // used to leave rejections standing while the checkpoint reported that
+  // verification never happened — findings silently dropped by an assessment
+  // the review then disowned. On failure nothing this pass concluded may
+  // survive, rejections included.
+  const beforeDecisions = result.findings;
   try {
     const response = await getClient().chat.completions.create(paramsFor(payload), { maxRetries: 0, timeout: Math.max(1, Math.min(30000, deadlineAt - Date.now())), signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) });
     result.usage = usageFromResponse(response.usage);
@@ -173,7 +180,8 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
       if (candidate && test) candidate.proof = await reproduceFinding(candidate, { ...test, expected: test.expected }, repoContext, baseSha);
     }
   } catch {
-    result.findings = result.findings.map((finding) => payload.some((item) => item.id === finding.id)
+    result.rejected = [];
+    result.findings = beforeDecisions.map((finding) => payload.some((item) => item.id === finding.id)
       ? { ...finding, verification: { status: "skipped", reason: "Verification unavailable; not eligible to block.", evidence: [] } } : finding);
   }
   return result;

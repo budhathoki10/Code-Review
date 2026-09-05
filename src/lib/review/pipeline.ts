@@ -748,7 +748,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // occupies that number — a confidently wrong "before" line is worse
     // than none, and they keep whatever originalLine they were stored with.
     ...carriedForwardFindings,
-    ...(previousReview?.findings ?? []).filter((finding) => unreviewedFiles.includes(finding.file)).map((finding) => ({ ...finding, verification: undefined })),
+    // Findings on files this run could not reach keep the assessment they
+    // already earned. Clearing it demoted a previously accepted high/critical
+    // finding to advisory — canBlock() requires "accepted" — so a provider
+    // blip on an unrelated chunk silently stopped a confirmed bug from
+    // blocking the merge. Nothing about this run showed the bug was fixed;
+    // the reviewer simply did not look, and "did not look" must not read as
+    // "no longer a problem". Only an assessment this run actually performed
+    // may lower one, which the verification merge below still does.
+    ...(previousReview?.findings ?? []).filter((finding) => unreviewedFiles.includes(finding.file)),
     ...aiResult.findings.map(withOriginalLine),
     // Not mapped: no scanner in static-analysis.ts ever sets `suggestion`,
     // so withOriginalLine would return every one of these unchanged. Mapping
@@ -758,7 +766,12 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   ].filter(keepsFinding));
 
   markStage("mergeAndCheckpoint");
-  const currentFindings = allFindings.filter((finding) => touchedFiles.has(finding.file));
+  // A file discovery could not read is a file this run has no fresh evidence
+  // about, so its findings are held out of assessment entirely rather than
+  // assessed on nothing and marked "skipped" — which would erase an accept an
+  // earlier run had genuinely earned and stop a confirmed bug from blocking.
+  const assessable = (finding: FindingDoc) => touchedFiles.has(finding.file) && !unreviewedFiles.includes(finding.file);
+  const currentFindings = allFindings.filter(assessable);
   let verification = existingReview?.verificationCheckpoint;
   if (!verification && verificationCandidates(currentFindings).length > 0) {
     const reservation = { ...skippedVerification(currentFindings, "Verification interrupted; not eligible to block."), state: "reserved" as const };
@@ -786,7 +799,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   }
   if (verification) {
     allFindings = dedupeFindings([
-      ...allFindings.filter((finding) => !touchedFiles.has(finding.file)),
+      ...allFindings.filter((finding) => !assessable(finding)),
       ...verification.findings.filter(keepsFinding),
     ]);
     reviewUsage = addUsage(reviewUsage, verification.usage);

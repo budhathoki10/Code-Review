@@ -368,6 +368,48 @@ describe("predictable discovery budget", () => {
     expect(result.verdict).toBe("comment");
   });
 
+  it("keeps reviewing after a single transient provider failure", async () => {
+    // One 500 is not an outage. The endpoint returns intermittent failures
+    // with successful calls either side, so abandoning the queue on the first
+    // one discarded chunks that had never been attempted.
+    const { generateChunkedReview } = await loadModule();
+    createMock
+      .mockRejectedValueOnce(Object.assign(new Error("blip"), { status: 500 }))
+      .mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")], [file("src/b.ts")], [file("src/c.ts")]]);
+
+    // Only the chunk that actually failed is unreviewed; the rest still ran.
+    expect(result.unreviewedFiles).toEqual(["src/a.ts"]);
+    expect(createMock.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("abandons the review once provider failures repeat", async () => {
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockRejectedValue(Object.assign(new Error("down"), { status: 503 }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")], [file("src/b.ts")], [file("src/c.ts")]]);
+
+    // Two failures reach the threshold, so the third chunk is never attempted.
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(result.unreviewedFiles).toHaveLength(3);
+  });
+
+  it("runs unbounded when the caller passes no deadline", async () => {
+    // The pipeline always supplies a deadline; a caller that omits one is
+    // asking for no limit, and substituting a default made that inexpressible.
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")]]);
+
+    expect(result.unreviewedFiles).toHaveLength(0);
+    // No deadline means no abort signal on the request — the call is allowed
+    // to take as long as it takes.
+    const requestOptions = (createMock.mock.calls[0] as unknown[])[1] as { signal?: AbortSignal } | undefined;
+    expect(requestOptions?.signal).toBeUndefined();
+  });
+
   it("does not split real SDK connection and timeout errors", async () => {
     const { APIConnectionTimeoutError, APIConnectionError } = await import("openai/core/error");
     const { generateChunkedReview } = await loadModule();

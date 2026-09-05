@@ -124,6 +124,7 @@ vi.mock("@/lib/db/usage", async (importOriginal) => ({
 import { runReviewPipeline } from "@/lib/review/pipeline";
 import { skippedVerification } from "@/lib/review/verification";
 import type { FindingDoc } from "@/lib/db/collections";
+import { canBlock } from "@/lib/review/finding-policy";
 
 beforeEach(() => {
   verifyBlockingFindingsMock.mockImplementation(async (findings: FindingDoc[]) => ({
@@ -212,6 +213,38 @@ describe("retry reuses the AI checkpoint", () => {
     expect(reviewDocs[0].verdict).toBe("comment");
     expect((reviewDocs[0].metrics as Doc).filesReviewed).toBe(0);
     expect((reviewDocs[0].metrics as Doc).stages).toHaveProperty("discovery");
+  });
+
+  it("keeps a previously accepted finding blocking when its file cannot be re-reviewed", async () => {
+    // "Did not look" must not read as "no longer a problem". Clearing the
+    // assessment demoted the finding to advisory — canBlock() requires
+    // "accepted" — so a provider blip on an unrelated chunk silently stopped
+    // a confirmed bug from failing the check.
+    reviewDocs.push({
+      _id: "review-0",
+      pullRequestId: JOB.pullRequestId,
+      // Same head as the job: this test is about carrying an assessment across
+      // an unreviewable file, not about the incremental-diff path.
+      headSha: JOB.headSha,
+      status: "completed",
+      createdAt: Date.now() - 1000,
+      findings: [{
+        file: "src/a.ts", line: 4, title: "Unchecked input", explanation: "Reaches the sink.",
+        category: "security", severity: "critical",
+        verification: { status: "accepted", reason: "Confirmed against source.", evidence: [{ file: "src/a.ts", line: 4, quote: "sink(input)" }] },
+      }],
+    });
+    generateChunkedReviewMock.mockResolvedValueOnce({
+      verdict: "approve", summary: "No issues", findings: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, calls: 1 },
+      chunkCount: 1, unreviewedFiles: ["src/a.ts"],
+    });
+
+    await runReviewPipeline(JOB, log);
+
+    const carried = (reviewDocs[0].findings as FindingDoc[]).find((f) => f.file === "src/a.ts");
+    expect(carried?.verification?.status).toBe("accepted");
+    expect(canBlock(carried as FindingDoc)).toBe(true);
   });
 
   it("writes a checkpoint as soon as generation finishes", async () => {

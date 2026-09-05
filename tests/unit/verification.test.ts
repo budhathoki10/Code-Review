@@ -3,9 +3,11 @@ import type { FindingDoc } from "@/lib/db/collections";
 import { findingId, canBlock, dedupeFindings } from "@/lib/review/finding-policy";
 import { feedbackStats } from "@/lib/review/feedback";
 
-const { create, fetchFile } = vi.hoisted(() => ({ create: vi.fn(), fetchFile: vi.fn() }));
+const { create, fetchFile, proofImage, reproduce } = vi.hoisted(() => ({ create: vi.fn(), fetchFile: vi.fn(), proofImage: vi.fn(), reproduce: vi.fn() }));
 vi.mock("@/lib/ai/review", () => ({ DEFAULT_MODEL: "test-model", getClient: () => ({ chat: { completions: { create } } }), thinkingKwargs: () => ({}) }));
 vi.mock("@/lib/github/file-content", () => ({ getFileContent: fetchFile }));
+// Mocked so the proof step is controllable and never reaches a real container.
+vi.mock("@/lib/review/test-proof", () => ({ proofImage, reproduceFinding: reproduce }));
 import { verifyBlockingFindings } from "@/lib/review/verification";
 
 const context = { installationId: 1, owner: "test", repo: "repo", ref: "head-sha" };
@@ -18,7 +20,7 @@ function response(decisions: unknown[]) {
 }
 function decision(overrides = {}) { return { id: findingId(finding), decision: "accept", reason: "Zero reaches the division after the guard removal.", evidence, ...overrides }; }
 
-beforeEach(() => { vi.clearAllMocks(); fetchFile.mockResolvedValue(source); create.mockResolvedValue(response([decision()])); });
+beforeEach(() => { vi.clearAllMocks(); fetchFile.mockResolvedValue(source); create.mockResolvedValue(response([decision()])); proofImage.mockReturnValue(undefined); });
 afterEach(() => vi.unstubAllEnvs());
 
 describe("bounded blocking verification", () => {
@@ -28,6 +30,29 @@ describe("bounded blocking verification", () => {
     expect(fetchFile).not.toHaveBeenCalled();
     expect(canBlock(result.findings[0])).toBe(false);
   });
+  it("discards its own rejections when the pass fails partway", async () => {
+    // The proof step runs after decisions are applied. A failure there used
+    // to leave a rejection standing while the checkpoint reported that
+    // verification never happened — a finding dropped by an assessment the
+    // review then disowned. Either the pass counts or none of it does.
+    const other: FindingDoc = { ...finding, title: "Unchecked index", line: 3 };
+    create.mockResolvedValue(response([
+      // Accepted, and carrying the proposed test that makes the proof step run.
+      { id: findingId(finding), decision: "accept", reason: "Reachable.", evidence, test: { exportName: "divide", args: [0], expected: 0 } },
+      { id: findingId(other), decision: "reject", reason: "Guarded upstream.", evidence: [] },
+    ]));
+    // Force a throw after the decisions have already been written.
+    proofImage.mockReturnValue("node@sha256:" + "a".repeat(64));
+    reproduce.mockRejectedValue(new Error("container unavailable"));
+
+    const result = await verifyBlockingFindings([finding, other], [file], context, "basesha", Date.now() + 120_000);
+
+    expect(result.rejected).toHaveLength(0);
+    expect(result.findings).toHaveLength(2);
+    expect(result.findings.every((f) => f.verification?.status === "skipped")).toBe(true);
+    expect(result.findings.some((f) => canBlock(f))).toBe(false);
+  });
+
   it("shrinks source context to fit instead of dropping a verifiable candidate", async () => {
     vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "8000");
     fetchFile.mockResolvedValue(source + ("x".repeat(400) + "\n").repeat(20));

@@ -40,12 +40,6 @@ const findingsSchema = z.object({
 });
 type FindingsResult = z.infer<typeof findingsSchema>;
 
-const verdictSchema = z.object({
-  verdict: z.enum(["approve", "request_changes", "comment"]),
-  summary: z.string(),
-});
-type VerdictResult = z.infer<typeof verdictSchema>;
-
 // Merged public shape — composed from the two calls below, not from a single
 // model response. Kept as the external contract so callers never see the split.
 const reviewSchema = z.object({
@@ -131,6 +125,8 @@ export const MAX_FINDINGS_TOOL_ROUNDS = (() => {
 const MAX_FETCH_FILE_CALLS = 5;
 /** Per-file truncation — 5 × 20k ≈ one MAX_DIFF_CHARS-sized addition worst case. */
 const MAX_FETCHED_FILE_CHARS = 20_000;
+/** Ceiling for one investigation read when the review itself is unbounded. */
+const FETCH_FILE_TIMEOUT_MS = 10_000;
 
 /**
  * Only described to the model when investigation rounds actually exist.
@@ -154,19 +150,6 @@ Prioritize concrete bugs, security defects and observable regressions introduced
 If an "AUTOMATED LINT/STATIC-ANALYSIS FINDINGS" section is present below, treat those as already reported — do not include them again in your own findings list. Focus on what deterministic tools can't catch: logic errors, security issues requiring reasoning, missing tests, design concerns.
 
 ${INVESTIGATION_GUIDANCE}Call the submit_findings tool with your findings when you are done investigating, or immediately if the diff alone is already sufficient. If there are no issues, call it with an empty findings array.`;
-
-const VERDICT_SYSTEM_PROMPT = `You are a senior engineer conducting a real pull request review. ${INJECTION_DEFENSE}
-
-Write the "summary" field as a real review comment, in Markdown, the way an experienced engineer would actually write it — not a bulleted list of generic observations. Structure and depth should scale with what the diff actually needs:
-
-- For a substantial or architectural change: open with a short section analyzing the design (use an ASCII diagram in a fenced code block if it genuinely clarifies a data/request flow — never add one decoratively), then a "### Merge decision" section that states your reasoning in prose, explicitly lists anything that must be fixed before merge ("I would block this PR on...") ahead of nice-to-haves, and gives a concrete recommendation.
-- For a small, low-risk change (a typo fix, a one-line tweak, a config value): a short paragraph is enough. Do not manufacture an architecture discussion or diagram for a diff that doesn't warrant one — padding a trivial PR with unnecessary structure is itself a review-quality failure.
-
-You will not see a separately-generated findings list — write the summary from your own reading of the diff, using the same "strong evidence only" standard: don't assert specific bugs/vulnerabilities you're not confident are actually present.
-
-Do not add a verdict line yourself — it's appended automatically from the "verdict" field after you respond. Just write the review content.
-
-Call the submit_verdict tool with your verdict and summary. If there are no issues, call it with verdict "approve" and a summary saying so.`;
 
 const FINDINGS_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   type: "function",
@@ -205,31 +188,6 @@ const FINDINGS_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
         },
       },
       required: ["findings"],
-    },
-  },
-};
-
-const VERDICT_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "submit_verdict",
-    description: "Submit the overall verdict and written review summary for this pull request diff.",
-    parameters: {
-      type: "object",
-      properties: {
-        verdict: {
-          type: "string",
-          enum: ["approve", "request_changes", "comment"],
-          description:
-            "Your overall recommendation: 'approve' if the PR is safe to merge as-is, 'request_changes' if something must be fixed first, 'comment' for feedback that isn't blocking.",
-        },
-        summary: {
-          type: "string",
-          description:
-            "The full review comment, in Markdown, matching the structure and depth described in the system prompt. Do not include a verdict line — that's added automatically.",
-        },
-      },
-      required: ["verdict", "summary"],
     },
   },
 };
@@ -286,58 +244,6 @@ function envNumber(name: string, fallback: number): number {
 }
 
 /**
- * The verdict call never sees the findings call's output (that's the whole
- * point of running them concurrently — see generateReview), so it can land
- * on "approve"/"comment" even when the findings call independently surfaced
- * a critical/high finding. The GitHub check-run gate (pipeline.ts
- * computeConclusion) already has its own severity safety net, so the merge
- * outcome was never at risk — this exists to keep the *displayed* PR
- * comment from looking self-contradictory (an "APPROVE" line directly above
- * a listed critical bug). Uses critical/high specifically because that
- * matches pipeline.ts's own default gate threshold ("high"), so the comment
- * text agrees with the check-run's default behavior. Never downgrades
- * request_changes -> approve: a model-judged concern from reading the diff
- * itself is worth keeping even without a matching line-level finding.
- */
-function reconcileVerdict(
-  verdict: ReviewResult["verdict"],
-  findings: ReviewResult["findings"],
-): ReviewResult["verdict"] {
-  if (verdict === "request_changes") return verdict;
-  const hasBlockingFinding = findings.some((f) => f.severity === "critical" || f.severity === "high");
-  if (!hasBlockingFinding) return verdict;
-
-  logger.warn(
-    { modelVerdict: verdict, overriddenTo: "request_changes" },
-    "verdict overridden by finding-severity reconciliation",
-  );
-  return "request_changes";
-}
-
-async function callStructured<T>(
-  params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
-  schema: z.ZodType<T>,
-  expectedToolName: string,
-): Promise<{ value: T; usage: TokenUsage }> {
-  const response = await getClient().chat.completions.create(params);
-  const usage = usageFromResponse(response.usage);
-
-  const toolCall = response.choices[0]?.message?.tool_calls?.[0];
-  if (!toolCall || toolCall.type !== "function") {
-    throw new Error(`Model did not return a tool call (expected ${expectedToolName})`);
-  }
-
-  let parsedArgs: unknown;
-  try {
-    parsedArgs = JSON.parse(toolCall.function.arguments);
-  } catch {
-    throw new Error(`Model returned invalid JSON in ${expectedToolName} tool call arguments`);
-  }
-
-  return { value: schema.parse(parsedArgs), usage };
-}
-
-/**
  * Resolves one fetch_file tool call. Never throws — a bad/nonexistent path
  * the model guesses becomes an error string tool result instead, so the
  * model can adapt and still reach submit_findings. getFileContent already
@@ -347,7 +253,7 @@ async function callStructured<T>(
  * guess. fetch_file is deliberately NOT restricted to files already in the
  * diff — that would defeat the point of investigating beyond the diff.
  */
-async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<string, string>, deadlineAt: number): Promise<string> {
+async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<string, string>, deadlineAt?: number): Promise<string> {
   let path: string;
   try {
     const parsed = JSON.parse(rawArgs) as { path?: unknown };
@@ -368,7 +274,15 @@ async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<st
     return `Error: file-fetch budget (${MAX_FETCH_FILE_CALLS} distinct files) exhausted for this review — proceed with the evidence you already have.`;
   }
 
-  const content = await getFileContent(ctx.installationId, ctx.owner, ctx.repo, path, ctx.ref, { signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) });
+  // getFileContent rethrows every error once a signal is supplied, so the
+  // catch is what preserves this function's documented contract: a failed
+  // investigation becomes a tool result the model can read and work around,
+  // never an exception that fails the whole findings pass.
+  const timeoutMs = deadlineAt === undefined ? FETCH_FILE_TIMEOUT_MS : Math.max(1, deadlineAt - Date.now());
+  const content = await getFileContent(
+    ctx.installationId, ctx.owner, ctx.repo, path, ctx.ref,
+    { signal: AbortSignal.timeout(timeoutMs) },
+  ).catch(() => undefined);
   if (content === undefined) {
     const result = `Error: could not read "${path}" (not found, not a regular file, or the fetch failed).`;
     cache.set(path, result);
@@ -397,7 +311,7 @@ async function runFindingsLoop(
   diffBlock: string,
   repoContext: RepoContext | undefined,
   fileCache: Map<string, string>,
-  deadlineAt = Date.now() + 180_000,
+  deadlineAt?: number,
 ): Promise<{ value: FindingsResult; usage: TokenUsage }> {
   const usageSink: TokenUsage[] = [];
   try {
@@ -443,7 +357,7 @@ async function runFindingsLoopInner(
    * its chunk's own multi-round conversation.
    */
   fileCache: Map<string, string>,
-  deadlineAt = Date.now() + 180_000,
+  deadlineAt?: number,
 ): Promise<{ value: FindingsResult; usage: TokenUsage }> {
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: FINDINGS_SYSTEM_PROMPT },
@@ -458,8 +372,10 @@ async function runFindingsLoopInner(
   for (let round = 0; round <= roundsAvailable; round++) {
     const isFinalRound = round === roundsAvailable;
 
-    const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) throw new Error("Review deadline exceeded");
+    // Undefined means the caller asked for no deadline; only a configured one
+    // can expire, and only then does the request carry an abort signal.
+    const remainingMs = deadlineAt === undefined ? undefined : deadlineAt - Date.now();
+    if (remainingMs !== undefined && remainingMs <= 0) throw new Error("Review deadline exceeded");
     const callStartedAt = Date.now();
     usageSink[0] = { ...totalUsage, calls: totalUsage.calls + 1 };
     const response = await getClient().chat.completions.create({
@@ -468,7 +384,13 @@ async function runFindingsLoopInner(
       messages,
       tools: isFinalRound ? [FINDINGS_TOOL] : [FINDINGS_TOOL, FETCH_FILE_TOOL],
       tool_choice: isFinalRound ? { type: "function", function: { name: "submit_findings" } } : "required",
-    }, { maxRetries: 0, timeout: Math.min(remainingMs, envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000)), signal: AbortSignal.timeout(remainingMs) });
+    }, {
+      maxRetries: 0,
+      timeout: remainingMs === undefined
+        ? envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000)
+        : Math.min(remainingMs, envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000)),
+      ...(remainingMs === undefined ? {} : { signal: AbortSignal.timeout(remainingMs) }),
+    });
     logger.info({ durationMs: Date.now() - callStartedAt, round, finishReason: response.choices[0]?.finish_reason }, "finding model call completed");
     totalUsage = addUsage(totalUsage, usageFromResponse(response.usage));
     // Mirrored out so the wrapper can still recover it if a later round throws.
@@ -606,47 +528,6 @@ export interface GenerateReviewOptions {
   disabledSeverities?: FindingDoc["severity"][];
 }
 
-export async function generateReview(
-  diffText: string,
-  options?: GenerateReviewOptions,
-): Promise<ReviewResult & { usage: TokenUsage }> {
-  const model = process.env.NVIDIA_MODEL ?? DEFAULT_MODEL;
-
-  const diffBlock = buildDiffBlock(diffText, options);
-
-  const sharedParams = buildSharedParams(options?.thinking);
-
-  const verdictParams: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
-    model,
-    ...buildSharedParams(false),
-    messages: [
-      { role: "system", content: VERDICT_SYSTEM_PROMPT },
-      { role: "user", content: diffBlock },
-    ],
-    tools: [VERDICT_TOOL],
-    tool_choice: { type: "function", function: { name: "submit_verdict" } },
-  };
-
-  const [findings, verdictCall] = await Promise.all([
-    runFindingsLoop(model, sharedParams, diffBlock, options?.repoContext, new Map<string, string>()),
-    callStructured<VerdictResult>(verdictParams, verdictSchema, "submit_verdict"),
-  ]);
-
-  const usage = addUsage(findings.usage, verdictCall.usage);
-  const verdict = reconcileVerdict(verdictCall.value.verdict, findings.value.findings);
-  const result = reviewSchema.parse({
-    verdict,
-    summary: verdictCall.value.summary,
-    findings: findings.value.findings,
-  });
-
-  return {
-    ...result,
-    summary: appendVerdictLine(result.summary, result.verdict),
-    usage,
-  };
-}
-
 /**
  * How many chunk passes may be in flight at once. Kept low deliberately:
  * fanning every chunk out concurrently is the fastest way to hit the
@@ -706,9 +587,32 @@ function dedupeFindings(findings: ReviewResult["findings"]): ReviewResult["findi
  */
 const MAX_BISECT_ATTEMPTS = Number(process.env.REVIEW_MAX_BISECT_ATTEMPTS ?? 12);
 
+/**
+ * How many chunks must fail against the provider before the rest of the
+ * review is abandoned.
+ *
+ * One failure is not an outage. This endpoint returns intermittent 500s and
+ * timeouts — measured at roughly one call in three during a bad stretch,
+ * while the calls either side of it succeed. Tripping on the first failure
+ * meant a single blip discarded chunks that had not been attempted, which is
+ * how a 31-file review returned findings for none of them.
+ */
+const PROVIDER_FAILURE_THRESHOLD = Number(process.env.REVIEW_PROVIDER_FAILURE_THRESHOLD ?? 2);
+
 interface BisectBudget {
   remaining: number;
-  providerUnavailable?: boolean;
+  /**
+   * Counted, not latched. A chunk records its own provider failure here and
+   * later chunks give up only once the count shows the provider is actually
+   * down rather than briefly unlucky.
+   */
+  providerFailures: number;
+  /**
+   * Latched on the first unrecoverable rejection — a bad key, a revoked
+   * permission, a malformed request. Unlike a 5xx these never come good on
+   * the next chunk, so counting them would only buy identical failures.
+   */
+  fatal?: boolean;
 }
 
 interface ChunkFindingsResult {
@@ -751,7 +655,7 @@ async function runFindingsWithBisect(
   budget: BisectBudget,
   fileCache: Map<string, string>,
 ): Promise<ChunkFindingsResult> {
-  if (budget.providerUnavailable || (options?.deadlineAt !== undefined && Date.now() >= options.deadlineAt)) {
+  if (budget.fatal || budget.providerFailures >= PROVIDER_FAILURE_THRESHOLD || (options?.deadlineAt !== undefined && Date.now() >= options.deadlineAt)) {
     return { findings: [], usage: EMPTY_USAGE, unreviewedFiles: files.map((file) => file.filename) };
   }
   if (files.length === 0) {
@@ -774,10 +678,30 @@ async function runFindingsWithBisect(
     if (underlying instanceof GitHubRateLimitError) throw underlying;
     const status = (underlying as { status?: number })?.status;
     const name = underlying instanceof Error ? `${underlying.name} ${underlying.constructor.name}` : "";
-    if ((status !== undefined && status !== 413) || /Connection|Timeout|Abort/.test(name) ||
-        (options?.deadlineAt !== undefined && Date.now() >= options.deadlineAt)) {
-      budget.providerUnavailable = true;
-      logger.warn({ files: names, status, name, deadlineRemainingMs: (options?.deadlineAt ?? Date.now()) - Date.now() }, "provider failure: no splitting; coverage incomplete");
+    const transportFailure = /Connection|Timeout|Abort/.test(name);
+    // 413 is the only status splitting can actually repair — it genuinely is
+    // about size. Every other status fails identically on both halves, so
+    // splitting only re-pays the tokens to prove that. An error carrying no
+    // status at all (a truncated response, a schema violation) is about this
+    // chunk's content and stays splittable.
+    const splittable = status === 413 || (status === undefined && !transportFailure);
+    // Counted separately from "unsplittable": capacity and availability are
+    // transient and worth abandoning the review over once repeated, while a
+    // 401 or 400 is our own configuration and should not be reported to the
+    // author as the provider being down.
+    const providerRefused = transportFailure || (status !== undefined && (status >= 500 || status === 429));
+    // Rejected for what the request *is*, not for how busy the provider is:
+    // the next chunk sends the same credentials and the same shape, so it
+    // earns the same answer. Stop the review rather than prove that N times.
+    const unrecoverable = status !== undefined && status >= 400 && status < 500 && status !== 413 && status !== 429;
+    const outOfTime = options?.deadlineAt !== undefined && Date.now() >= options.deadlineAt;
+    if (!splittable || outOfTime) {
+      if (providerRefused) budget.providerFailures += 1;
+      if (unrecoverable) budget.fatal = true;
+      logger.warn(
+        { files: names, status, name, providerFailures: budget.providerFailures, deadlineRemainingMs: (options?.deadlineAt ?? Date.now()) - Date.now() },
+        "provider failure: no splitting; coverage incomplete",
+      );
       return { findings: [], usage: spent, unreviewedFiles: names };
     }
 
@@ -831,11 +755,15 @@ export async function generateChunkedReview(
   const sharedParams = buildSharedParams(options?.thinking);
   // Shared across every chunk, so a review with several failing chunks
   // can't multiply the retry cost by the number of chunks.
-  const budget: BisectBudget = { remaining: MAX_BISECT_ATTEMPTS };
+  const budget: BisectBudget = { remaining: MAX_BISECT_ATTEMPTS, providerFailures: 0 };
   // One fetch_file budget for the whole review, not one per chunk.
   const fileCache = new Map<string, string>();
 
-  options = { ...options, deadlineAt: options?.deadlineAt ?? Date.now() + 180_000 };
+  // A caller that passes no deadline is asking for no deadline, and the
+  // pipeline — the only caller that must be bounded — always passes one.
+  // Substituting a default here made "unbounded" inexpressible and silently
+  // capped callers that had deliberately opted out.
+  if (options?.deadlineAt !== undefined) options = { ...options, deadlineAt: options.deadlineAt };
   const results = await mapWithConcurrency(chunks, Number.isFinite(CHUNK_CONCURRENCY) ? Math.min(4, CHUNK_CONCURRENCY) : 2, (files) =>
     runFindingsWithBisect(model, sharedParams, files, options, budget, fileCache),
   );
