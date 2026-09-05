@@ -297,7 +297,7 @@ async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<st
 }
 
 /**
- * Runs the findings side of generateReview as a bounded multi-turn
+ * Runs the findings side of a review as a bounded multi-turn
  * tool-calling loop instead of one forced call. Without repoContext (e.g. a
  * caller that can't authenticate to GitHub), fetch_file could never be
  * resolved, so it isn't offered at all and this behaves exactly like the
