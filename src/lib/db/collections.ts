@@ -98,7 +98,6 @@ export interface FindingDoc {
     reason: string;
     evidence: { file: string; line: number; quote: string }[];
   };
-  feedback?: { label: "correct" | "false-positive" | "duplicate"; userId: string; at: Date };
   proof?: {
     status: "reproduced" | "not-reproduced" | "unavailable";
     reason: string;
@@ -182,6 +181,17 @@ export interface ReviewMetrics {
 
 export interface ReviewDoc {
   /** Persist the reservation BEFORE calling the verifier so retries cannot spend again. */
+  /**
+   * One rating for the review as a whole, not per finding.
+   *
+   * Per-finding ratings asked the reader to judge each item separately, which
+   * put the control under every finding in every file and made the common
+   * case — "this review was useful" — cost N clicks instead of one. A single
+   * verdict is also the honest granularity: the thing a reader forms an
+   * opinion about is the review, and a false-positive rate over reviews is
+   * the measure that matches how the tool is actually experienced.
+   */
+  feedback?: { label: "correct" | "false-positive" | "duplicate"; userId: string; at: Date };
   verificationCheckpoint?: {
     state: "reserved" | "completed";
     findings: FindingDoc[];

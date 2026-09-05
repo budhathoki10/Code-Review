@@ -202,8 +202,7 @@ function withPersistedCommentIds(findings: FindingDoc[], stored: FindingDoc[] | 
   }
   return findings.map((finding) => {
     const githubCommentId = byPosition.get(`${finding.file}::${finding.line}::${finding.title}`);
-    const feedback = stored?.find((item) => findingKey(item) === findingKey(finding))?.feedback;
-    return { ...finding, ...(githubCommentId === undefined ? {} : { githubCommentId }), ...(feedback ? { feedback } : {}) };
+    return { ...finding, ...(githubCommentId === undefined ? {} : { githubCommentId }) };
   });
 }
 

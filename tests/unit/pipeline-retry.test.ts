@@ -354,10 +354,12 @@ describe("retry does not duplicate or orphan inline comments", () => {
 
   it("preserves a developer's feedback when a completed review is retried", async () => {
     await runReviewPipeline(JOB, log);
-    const stored = reviewDocs[0].findings as FindingDoc[];
-    stored[0].feedback = { label: "false-positive", userId: "user", at: new Date() };
+    // Feedback rates the review, not an individual finding, so a retry that
+    // rewrites the findings array must leave the rating alone rather than
+    // carrying it item by item.
+    (reviewDocs[0] as { feedback?: unknown }).feedback = { label: "false-positive", userId: "user", at: new Date() };
     await runReviewPipeline(JOB, log);
-    expect((reviewDocs[0].findings as FindingDoc[])[0].feedback?.label).toBe("false-positive");
+    expect((reviewDocs[0] as { feedback?: { label: string } }).feedback?.label).toBe("false-positive");
     expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
   });
 

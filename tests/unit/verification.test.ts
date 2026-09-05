@@ -109,12 +109,12 @@ describe("bounded blocking verification", () => {
     expect(dedupeFindings([finding, { ...finding, category: "security" }])).toHaveLength(2);
   });
   it("does not fabricate false-positive rates from unlabelled findings", () => {
-    expect(feedbackStats([finding]).falsePositiveRate).toBeNull();
+    expect(feedbackStats([{}]).falsePositiveRate).toBeNull();
     const feedback = { userId: "user", at: new Date() };
     expect(feedbackStats([
-      { ...finding, feedback: { ...feedback, label: "correct" } },
-      { ...finding, feedback: { ...feedback, label: "false-positive" } },
-      { ...finding, feedback: { ...feedback, label: "duplicate" } }, finding,
+      { feedback: { ...feedback, label: "correct" } },
+      { feedback: { ...feedback, label: "false-positive" } },
+      { feedback: { ...feedback, label: "duplicate" } }, {},
     ])).toEqual({ correct: 1, falsePositive: 1, duplicate: 1, assessed: 2, falsePositiveRate: 0.5 });
   });
 });
