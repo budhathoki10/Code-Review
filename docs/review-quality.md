@@ -110,3 +110,54 @@ exact evidence, malformed responses, deduplication, retry reservations,
 authorization, feedback denominators, risk selection and sandbox invocation.
 Mocked execution tests verify control flow, not live Docker isolation or live
 model accuracy. Measure a labeled PR sample before making performance claims.
+
+
+## Accuracy-first latency controls
+
+The worker configuration uses Ultra, thinking enabled for discovery, 8192 maximum
+output tokens, temperature 0.2 and one optional investigation round. Investigation
+requires a tool call; the final round forces submit_findings. Cheap triage still
+skips formatting/comment-only changes. Verification disables thinking and keeps
+its independent evidence check. A second model is not required.
+
+The production chunked path generates its summary deterministically from assessed
+findings, with no summary model call. All chunks enter a scheduler capped at two
+concurrent calls by default. Static analysis and sensitive-file context start
+together. SDK retries are disabled for discovery and verification. Provider HTTP,
+connection and timeout failures do not trigger file splitting; queued chunks stop
+on provider failure, while already-running chunks can finish. Malformed output
+can still be split within the shared deadline and bisect allowance.
+
+REVIEW_DEADLINE_MS defaults to 180000 and REVIEW_RISKY_DEADLINE_MS to 240000
+(milliseconds from pipeline start). Forty seconds are reserved for verification
+and finishing analysis. Each discovery request and investigation fetch receives
+the remaining discovery budget; the request timeout can shorten it further.
+Static analysis stops starting files at that deadline; an already-running linter
+can finish under its existing timeout. Verification receives the remaining total
+budget. Optional Docker proof starts only with at least 30 seconds left.
+These are analysis budgets, not guaranteed webhook-to-comment service times:
+queue/throttle delay, worker startup, database operations and GitHub publication
+can add time. They cannot make an overloaded provider complete successfully.
+
+Incomplete discovery is disclosed, cannot produce an approval, and does not
+advance the incremental baseline. Earlier findings on failed files remain advisory.
+A partial review is excluded from baseline fallback on the next push. High/critical
+findings still require accepted evidence to block; no deadline bypasses that rule.
+
+Review metrics now include stages (loadAndSelect, prepare, context, discovery,
+staticAnalysis, staticTail, mergeAndCheckpoint, verification and publish) and
+queueWaitMs. StaticAnalysis overlaps discovery; do not sum overlapping durations.
+QueueWaitMs is elapsed time from review-document creation and includes earlier
+attempts on retries. Each successful discovery request logs duration, round and
+finish reason. Failed attempts count as calls even when token usage is unknown.
+
+Validation of runtime policy is separate from detection accuracy. Before claiming
+better recall or unchanged precision, replay labeled buggy and clean PRs against
+both configurations, using the same SHAs and several runs. Compare confirmed bugs,
+false positives, missed bugs, incomplete coverage, tokens and p50/p95 duration.
+The regression suite exercises scheduling, provider failures, deadlines, evidence
+validation and incremental baselines; it does not establish live model accuracy.
+
+Local .env changes require a worker restart. Render blueprint settings require
+application to the deployed service; editing this repository does not change a
+running worker's environment automatically.

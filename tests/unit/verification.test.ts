@@ -22,6 +22,22 @@ beforeEach(() => { vi.clearAllMocks(); fetchFile.mockResolvedValue(source); crea
 afterEach(() => vi.unstubAllEnvs());
 
 describe("bounded blocking verification", () => {
+  it("skips all paid work after the review deadline", async () => {
+    const result = await verifyBlockingFindings([finding], [file], context, undefined, Date.now() - 1);
+    expect(create).not.toHaveBeenCalled();
+    expect(fetchFile).not.toHaveBeenCalled();
+    expect(canBlock(result.findings[0])).toBe(false);
+  });
+  it("shrinks source context to fit instead of dropping a verifiable candidate", async () => {
+    vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "8000");
+    fetchFile.mockResolvedValue(source + ("x".repeat(400) + "\n").repeat(20));
+    const result = await verifyBlockingFindings([finding], [file], context);
+    expect(create).toHaveBeenCalledTimes(1);
+    const params = create.mock.calls[0][0];
+    expect(JSON.parse(params.messages[1].content)[0].headContext.length).toBeLessThan(4500);
+    expect(Buffer.byteLength(JSON.stringify(params), "utf8") + params.max_tokens + 512).toBeLessThanOrEqual(8000);
+    expect(canBlock(result.findings[0])).toBe(true);
+  });
   it("spends no calls or file reads without high/critical findings", async () => {
     const result = await verifyBlockingFindings([{ ...finding, severity: "medium" }], [file], context);
     expect(result.usage.calls).toBe(0);
@@ -40,7 +56,7 @@ describe("bounded blocking verification", () => {
     const [params, options] = create.mock.calls[0];
     expect(JSON.stringify(params)).not.toContain("UNRELATED_PRIVATE_CONTEXT");
     expect(JSON.stringify(params)).not.toContain("UNRELATED_DIFF");
-    expect(options).toEqual({ maxRetries: 0, timeout: 30000 });
+    expect(options).toMatchObject({ maxRetries: 0, timeout: 30000, signal: expect.any(AbortSignal) });
     expect(fetchFile).toHaveBeenCalledWith(1, "test", "repo", finding.file, "head-sha", { signal: expect.any(AbortSignal) });
   });
   it("does not accept invented evidence or a quote on the wrong line", async () => {

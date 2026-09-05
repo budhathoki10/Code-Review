@@ -42,7 +42,12 @@ const pullRequestDocs: Doc[] = [];
 function matches(doc: Doc, query: Doc): boolean {
   return Object.entries(query).every(([k, v]) => {
     if (k === "_id") return String(doc._id) === String(v);
-    return doc[k] === v;
+    const actual = k.split(".").reduce<unknown>((value, part) => value && typeof value === "object" ? (value as Doc)[part] : undefined, doc);
+    if (v && typeof v === "object") {
+      if ("$exists" in v) return (actual !== undefined) === (v as Doc).$exists;
+      if ("$ne" in v) return actual !== (v as Doc).$ne;
+    }
+    return actual === v;
   });
 }
 
@@ -197,6 +202,16 @@ describe("retry reuses the AI checkpoint", () => {
     });
 
     postSummaryCommentMock.mockResolvedValue(999);
+  });
+
+  it("does not advance the baseline or approve when discovery misses a file", async () => {
+    generateChunkedReviewMock.mockResolvedValueOnce({ verdict: "approve", summary: "No issues", findings: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, calls: 1 }, chunkCount: 1, unreviewedFiles: ["src/a.ts"] });
+    await runReviewPipeline(JOB, log);
+    expect(pullRequestDocs[0].lastReviewedSha).toBeUndefined();
+    expect(reviewDocs[0].coverageComplete).toBe(false);
+    expect(reviewDocs[0].verdict).toBe("comment");
+    expect((reviewDocs[0].metrics as Doc).filesReviewed).toBe(0);
+    expect((reviewDocs[0].metrics as Doc).stages).toHaveProperty("discovery");
   });
 
   it("writes a checkpoint as soon as generation finishes", async () => {

@@ -28,13 +28,23 @@ services:
       - key: NVIDIA_BASE_URL
         sync: false
       - key: NVIDIA_MODEL
-        sync: false
+        value: nvidia/nemotron-3-ultra-550b-a55b
       - key: NVIDIA_TEMPERATURE
-        sync: false
+        value: "0.2"
       - key: NVIDIA_TOP_P
         sync: false
       - key: NVIDIA_MAX_TOKENS
-        sync: false
+        value: "8192"
+      - key: NVIDIA_THINKING
+        value: "true"
+      - key: REVIEW_FINDINGS_TOOL_ROUNDS
+        value: "1"
+      - key: REVIEW_VERIFICATION_MAX_FINDINGS
+        value: "3"
+      - key: REVIEW_DEADLINE_MS
+        value: "180000"
+      - key: REVIEW_RISKY_DEADLINE_MS
+        value: "240000"
       - key: GITHUB_APP_ID
         sync: false
       - key: GITHUB_APP_PRIVATE_KEY

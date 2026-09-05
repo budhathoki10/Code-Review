@@ -158,6 +158,9 @@ export interface FindingDoc {
 
 /** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */
 export interface ReviewMetrics {
+  stages?: Record<string, number>;
+  /** Time since enqueue document creation; may include earlier attempts. */
+  queueWaitMs?: number;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -200,6 +203,7 @@ export interface ReviewDoc {
     candidates: number;
     at: Date;
   };
+  coverageComplete?: boolean;
   riskFiles?: { file: string; reasons: string[] }[];
   _id?: string;
   pullRequestId: string;

@@ -134,7 +134,8 @@ describe("generateChunkedReview failure isolation", () => {
 
     expect(result.findings).toEqual([]);
     expect(result.unreviewedFiles.sort()).toEqual([...ALL_FILES].sort());
-    expect(result.summary).toContain("Reviewed.");
+    expect(result.summary).toContain("Review incomplete");
+    expect(result.verdict).toBe("comment");
   });
 
   it("stops splitting once the shared bisect budget is exhausted", async () => {
@@ -209,7 +210,7 @@ describe("generateChunkedReview failure isolation", () => {
     expect(result.usage.totalTokens).toBeGreaterThan(15);
   });
 
-  it("reconciles the verdict against findings merged from all chunks", async () => {
+  it("keeps serious candidates advisory until pipeline verification", async () => {
     const { generateChunkedReview } = await loadModule();
     wireChunked(
       (files) =>
@@ -221,9 +222,9 @@ describe("generateChunkedReview failure isolation", () => {
 
     const result = await generateChunkedReview([[file("src/a.ts")], [file("src/d.ts")]]);
 
-    // The verdict call only ever saw chunk 1; a critical finding from chunk 2
-    // still has to override its "approve".
-    expect(result.verdict).toBe("request_changes");
+    expect(result.findings[0].severity).toBe("critical");
+    expect(result.verdict).toBe("comment");
+    expect(createMock.mock.calls.every(([params]) => !toolNames(params).includes("submit_verdict"))).toBe(true);
   });
 });
 
@@ -350,5 +351,62 @@ describe("bisect budget scoping", () => {
     const afterSecond = createMock.mock.calls.length;
 
     expect(afterSecond - afterFirst).toBe(afterFirst);
+  });
+});
+
+
+describe("predictable discovery budget", () => {
+  beforeEach(() => { createMock.mockReset(); getFileContentMock.mockReset(); delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS; });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([429, 500, 503, 401])("does not split provider status %s or start queued work", async (status) => {
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockRejectedValue(Object.assign(new Error("provider unavailable"), { status }));
+    const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")], [file("src/d.ts")], [file("src/poison.ts")]]);
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(result.unreviewedFiles).toHaveLength(4);
+    expect(result.verdict).toBe("comment");
+  });
+
+  it("does not split real SDK connection and timeout errors", async () => {
+    const { APIConnectionTimeoutError, APIConnectionError } = await import("openai/core/error");
+    const { generateChunkedReview } = await loadModule();
+    for (const error of [new APIConnectionTimeoutError({}), new APIConnectionError({})]) {
+      createMock.mockReset().mockRejectedValue(error);
+      const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")]]);
+      expect(createMock).toHaveBeenCalledTimes(1);
+      expect(result.unreviewedFiles).toHaveLength(2);
+      expect(result.usage.calls).toBe(1);
+    }
+  });
+
+  it("makes no calls after the shared deadline", async () => {
+    const { generateChunkedReview } = await loadModule();
+    const result = await generateChunkedReview([[file("src/a.ts")]], { deadlineAt: Date.now() - 1 });
+    expect(createMock).not.toHaveBeenCalled();
+    expect(result.unreviewedFiles).toEqual(["src/a.ts"]);
+    expect(result.verdict).toBe("comment");
+  });
+
+  it("limits each request to remaining time and disables hidden SDK retries", async () => {
+    const { generateChunkedReview } = await loadModule();
+    wireChunked(() => [], {});
+    await generateChunkedReview([[file("src/a.ts")]], { deadlineAt: Date.now() + 2000 });
+    const options = createMock.mock.calls[0][1];
+    expect(options.maxRetries).toBe(0);
+    expect(options.timeout).toBeGreaterThan(0);
+    expect(options.timeout).toBeLessThanOrEqual(2000);
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("starts the second chunk while the first is still running", async () => {
+    const { generateChunkedReview } = await loadModule();
+    let release!: (value: unknown) => void;
+    createMock.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }))
+      .mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+    const review = generateChunkedReview([[file("src/a.ts")], [file("src/b.ts")]]);
+    expect(createMock).toHaveBeenCalledTimes(2);
+    release(toolResponse("submit_findings", { findings: [] }));
+    await review;
   });
 });

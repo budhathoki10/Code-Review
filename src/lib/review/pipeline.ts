@@ -336,6 +336,9 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
 async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise<void> {
   const { reviewId, pullRequestId, headSha, githubInstallationId, owner, repo, prNumber, prTitle, prBody, forced } = data;
   const startedAt = Date.now();
+  const stages: Record<string, number> = {};
+  let stageStartedAt = startedAt;
+  const markStage = (name: string) => { stages[name] = Date.now() - stageStartedAt; stageStartedAt = Date.now(); };
   const reviewsCol = await reviews();
 
   // first finding the most recent document
@@ -343,7 +346,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const [repoConfig, existingReview, previousReview, pullRequestDoc] = await Promise.all([
     loadRepositoryConfig(pullRequestId),
     reviewsCol.findOne({ pullRequestId, headSha }),
-    reviewsCol.findOne({ pullRequestId, status: "completed" }, { sort: { createdAt: -1 } }),
+    reviewsCol.findOne({ pullRequestId, status: "completed", "aiCheckpoint.unreviewedFiles.0": { $exists: false }, "incomplete": { $exists: false }, coverageComplete: { $ne: false } }, { sort: { createdAt: -1 } }),
     loadPullRequestDoc(pullRequestId),
   ]);
 
@@ -504,6 +507,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     return;
   }
 
+  markStage("loadAndSelect");
   // Created early (before the slow AI call) so the PR shows "review in
   // progress" quickly. Reused across retries via the stored checkRunId
   // instead of creating a duplicate check run on every attempt.
@@ -540,6 +544,11 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   let unreviewedFiles: string[] = [];
   const riskFiles = selection.analyzableFiles.map((file) => ({ file: file.filename, reasons: riskReasons(file) }))
     .filter((file) => file.reasons.length > 0);
+
+  const configuredDeadline = Number(process.env[riskFiles.length ? "REVIEW_RISKY_DEADLINE_MS" : "REVIEW_DEADLINE_MS"] ?? (riskFiles.length ? 240_000 : 180_000));
+  const deadlineAt = startedAt + (Number.isFinite(configuredDeadline) ? Math.max(60_000, Math.min(240_000, configuredDeadline)) : 180_000);
+  const discoveryDeadlineAt = deadlineAt - 40_000;
+  markStage("prepare");
 
   if (selection.chunks.length === 0 && !(baselineSha && diff.fileCount === 0)) {
     // Nothing with a reviewable text patch survived selection — a PR of only
@@ -604,27 +613,30 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // must never shrink their coverage. A file the AI had no room for still
     // gets linted, which is what keeps an oversized PR from going completely
     // unexamined.
-    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, selection.analyzableFiles, commentableLines, log).catch(
+    const staticStartedAt = Date.now();
+    const staticFindingsPromise = runStaticAnalysis(githubInstallationId, owner, repo, headSha, selection.analyzableFiles, commentableLines, log, discoveryDeadlineAt).then((findings) => { stages.staticAnalysis = Date.now() - staticStartedAt; return findings; }).catch(
       (staticError) => {
         log.warn({ reviewId, err: staticError }, "static analysis stage failed, continuing without it");
         return [] as FindingDoc[];
       },
     );
 
+    // Two sensitive files at most, pinned to the reviewed SHA. Shared file cache
+    // also serves static analysis and verification; no extra model round.
+    const riskContextSignal = AbortSignal.timeout(3000);
+    const riskContextPromise = Promise.all(riskFiles.slice(0, 2).map(async (risk) => {
+      const file = selection.analyzableFiles.find((item) => item.filename === risk.file)!;
+      const firstLine = Number(file.patch?.match(/@@ -\d+(?:,\d+)? \+(\d+)/)?.[1] ?? 1);
+      const content = await getFileContent(githubInstallationId, owner, repo, risk.file, headSha, { signal: riskContextSignal }).catch(() => undefined);
+      return `${risk.file}: ${risk.reasons.join(", ")}\n${content === undefined ? "Surrounding code unavailable." : codeWindow(content, firstLine, 25, 3000)}`;
+    })).then((windows) => windows.join("\n\n"));
     const staticFindingsForContext = await Promise.race([
       staticFindingsPromise,
       new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
     ]);
 
-    // Two sensitive files at most, pinned to the reviewed SHA. Shared file cache
-    // also serves static analysis and verification; no extra model round.
-    const riskContextSignal = AbortSignal.timeout(3000);
-    const riskContext = (await Promise.all(riskFiles.slice(0, 2).map(async (risk) => {
-      const file = selection.analyzableFiles.find((item) => item.filename === risk.file)!;
-      const firstLine = Number(file.patch?.match(/@@ -\d+(?:,\d+)? \+(\d+)/)?.[1] ?? 1);
-      const content = await getFileContent(githubInstallationId, owner, repo, risk.file, headSha, { signal: riskContextSignal }).catch(() => undefined);
-      return `${risk.file}: ${risk.reasons.join(", ")}\n${content === undefined ? "Surrounding code unavailable." : codeWindow(content, firstLine, 25, 3000)}`;
-    }))).join("\n\n");
+    const riskContext = await riskContextPromise;
+    markStage("context");
     const generated = await generateChunkedReview(
       selection.chunks.map((chunk) => chunk.files),
       {
@@ -636,8 +648,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         prBody: prBody ?? undefined,
         repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
         riskContext,
+        deadlineAt: discoveryDeadlineAt,
       },
     );
+    markStage("discovery");
     // Step 4 of the large-PR plan: whatever the budget couldn't cover is
     // stated in the posted comment. A partial review that reads like a full
     // one is worse than no review, because "no issues found" gets taken as a
@@ -668,6 +682,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // posting/gating correctness is unaffected even when the race above timed
     // out and the AI call proceeded without seeing static findings that time.
     staticFindings = await staticFindingsPromise;
+    markStage("staticTail");
     log.info(
       { reviewId, aiFindings: aiResult.findings.length, staticFindings: staticFindings.length },
       "model + static analysis returned",
@@ -733,6 +748,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // occupies that number — a confidently wrong "before" line is worse
     // than none, and they keep whatever originalLine they were stored with.
     ...carriedForwardFindings,
+    ...(previousReview?.findings ?? []).filter((finding) => unreviewedFiles.includes(finding.file)).map((finding) => ({ ...finding, verification: undefined })),
     ...aiResult.findings.map(withOriginalLine),
     // Not mapped: no scanner in static-analysis.ts ever sets `suggestion`,
     // so withOriginalLine would return every one of these unchanged. Mapping
@@ -741,6 +757,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     ...staticFindings,
   ].filter(keepsFinding));
 
+  markStage("mergeAndCheckpoint");
   const currentFindings = allFindings.filter((finding) => touchedFiles.has(finding.file));
   let verification = existingReview?.verificationCheckpoint;
   if (!verification && verificationCandidates(currentFindings).length > 0) {
@@ -763,7 +780,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         }
       } catch (err) { log.warn({ err }, "test proof base unavailable; retaining AI assessment only"); }
     }
-    verification = await verifyBlockingFindings(currentFindings, diff.files, { installationId: githubInstallationId, owner, repo, ref: headSha }, proofBaseSha);
+    verification = await verifyBlockingFindings(currentFindings, diff.files, { installationId: githubInstallationId, owner, repo, ref: headSha }, proofBaseSha, deadlineAt);
     await recordUsage(verification.usage, false).catch((err) => log.warn({ err }, "failed to record verification usage"));
     await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { verificationCheckpoint: verification } });
   }
@@ -774,13 +791,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     ]);
     reviewUsage = addUsage(reviewUsage, verification.usage);
   }
+  markStage("verification");
   const blocking = allFindings.filter((finding) => canBlock(finding) && meetsThreshold(finding.severity, resolveGateThreshold(repoConfig)));
-  const previousVerdict = aiResult.verdict;
+  const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
+  const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
   aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
-  if (verification || previousVerdict === "request_changes") {
+  if (selection.chunks.length > 0) {
     // The first-pass prose can contain a rejected accusation or obsolete merge
     // recommendation. Rebuild it from assessed findings, with no additional call.
-    aiResult.summary = `Reviewed ${selection.coveredCount} file(s). ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
+    aiResult.summary = `Reviewed ${Math.max(0, selection.coveredCount - unreviewedFiles.length)} file(s). ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
       `Retained ${allFindings.length} finding(s)${verification ? `; rejected ${verification.rejected.length} after assessment` : ""}. AI assessment is not test-backed proof. Unchecked findings are advisory.\n\n` +
       `*Current review: ${aiResult.verdict === "request_changes" ? "REQUEST CHANGES" : aiResult.verdict.toUpperCase()}.*` +
       formatCoverageNote(selection, unreviewedFiles);
@@ -815,6 +834,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         touchedFiles: Array.from(touchedFiles),
         filteredFiles,
         riskFiles,
+        coverageComplete: !incompleteCoverage,
       },
     },
   );
@@ -822,7 +842,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
   // Records how far this PR has actually been reviewed, so the next push's
   // incremental diff starts from here.
-  if (ObjectId.isValid(pullRequestId)) {
+  if (!incompleteCoverage && ObjectId.isValid(pullRequestId)) {
     const pullRequestsCol = await pullRequests();
     await pullRequestsCol.updateOne(
       { _id: new ObjectId(pullRequestId) as unknown as string },
@@ -941,7 +961,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     }
   }
 
+  markStage("publish");
   const metrics = {
+    stages,
+    queueWaitMs: existingReview?.createdAt ? Math.max(0, startedAt - new Date(existingReview.createdAt).getTime()) : undefined,
     inputTokens: reviewUsage.inputTokens,
     outputTokens: reviewUsage.outputTokens,
     totalTokens: reviewUsage.totalTokens,
@@ -950,7 +973,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     durationMs: Date.now() - startedAt,
     filesSeen: diff.fileCount,
     filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,
-    filesReviewed: selection.analyzableFiles.length - selection.skippedForBudget.length,
+    filesReviewed: Math.max(0, selection.coveredCount - unreviewedFiles.length),
     findingsProduced: allFindings.length,
     commentsPosted: posted.length,
     estimatedCostUsd: estimateCost(reviewUsage),

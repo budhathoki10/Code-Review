@@ -63,9 +63,9 @@ export function skippedVerification(findings: FindingDoc[], reason: string): Che
 }
 
 /** One batch, no SDK retries, bounded request bytes + output tokens, per PR head SHA. */
-export async function verifyBlockingFindings(findings: FindingDoc[], files: PullRequestFile[], repoContext: RepoContext, baseSha?: string): Promise<Checkpoint> {
+export async function verifyBlockingFindings(findings: FindingDoc[], files: PullRequestFile[], repoContext: RepoContext, baseSha?: string, deadlineAt = Date.now() + 40_000): Promise<Checkpoint> {
   const result = skippedVerification(findings, "Insufficient verification context or budget; not eligible to block.");
-  if (result.candidates === 0) return result;
+  if (result.candidates === 0 || Date.now() >= deadlineAt) return result;
   const maxFindings = boundedEnv("REVIEW_VERIFICATION_MAX_FINDINGS", 3, 8);
   const budget = boundedEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", 12000, 32000);
   const outputTokens = Math.min(1800, Math.floor(budget / 3));
@@ -80,7 +80,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   const payload: { id: string; finding: Pick<FindingDoc, "file" | "line" | "title" | "explanation" | "severity">; patch: string; headContext: string }[] = [];
   const source = new Map<string, Map<number, string>>();
   const contentCache = new Map<string, string | undefined>();
-  const contextSignal = AbortSignal.timeout(6000);
+  const contextSignal = AbortSignal.timeout(Math.max(1, Math.min(6000, deadlineAt - Date.now())));
 
   const paramsFor = (items: typeof payload): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
     model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
@@ -90,6 +90,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   });
 
   for (const finding of ordered.slice(0, maxFindings)) {
+    if (Date.now() >= deadlineAt) break;
     const file = byFile.get(finding.file);
     if (!file?.patch || !finding.line || !lines.get(finding.file)?.has(finding.line)) continue;
     // Fetch only candidate files. No model-driven exploration loop.
@@ -113,22 +114,27 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
     const item = { id: finding.id!, finding: { file: finding.file, line: finding.line, title: finding.title.slice(0, 300), explanation: finding.explanation.slice(0, 1500), severity: finding.severity }, patch: hunk.slice(0, 3500), headContext };
     // UTF-8 bytes are a deliberately conservative token proxy, not a tokenizer claim.
     // Include schemas, metadata and a framing allowance; never send a batch exceeding it.
+    while (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") + outputTokens + 512 > budget && item.headContext.length > 500) {
+      const radius = Math.max(1, Math.floor(item.headContext.split("\n").length / 4));
+      item.headContext = item.headContext.split("\n").filter((line) => Math.abs(Number(line.match(/^(\d+):/)?.[1]) - finding.line!) <= radius).join("\n");
+      if (radius === 1) break;
+    }
     if (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") + outputTokens + 512 > budget) continue;
     payload.push(item);
     const evidenceLines = source.get(finding.file) ?? new Map<number, string>();
-    for (const line of headContext.split("\n")) {
+    for (const line of item.headContext.split("\n")) {
       const match = line.match(/^(\d+): (.*)$/);
       const canonical = content === undefined ? lines.get(finding.file)?.get(Number(match?.[1])) : content.split("\n")[Number(match?.[1]) - 1];
       if (match && canonical === match[2]) evidenceLines.set(Number(match[1]), match[2]);
     }
     source.set(finding.file, evidenceLines);
   }
-  if (!payload.length) return result;
+  if (!payload.length || Date.now() >= deadlineAt) return result;
 
   // Count attempts even if the provider fails without reporting usage.
   result.usage = { ...EMPTY_USAGE, calls: 1 };
   try {
-    const response = await getClient().chat.completions.create(paramsFor(payload), { maxRetries: 0, timeout: 30000 });
+    const response = await getClient().chat.completions.create(paramsFor(payload), { maxRetries: 0, timeout: Math.max(1, Math.min(30000, deadlineAt - Date.now())), signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) });
     result.usage = usageFromResponse(response.usage);
     const call = response.choices[0]?.message.tool_calls?.[0];
     if (response.choices[0]?.finish_reason === "length" || call?.type !== "function" || call.function.name !== "submit_verification") throw new Error("Invalid verifier response");
@@ -161,7 +167,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
     });
     // At most ONE proposed test (two containers) per reviewed head, within the
     // same durable reservation as the AI pass. Never execute on the worker host.
-    if (proofImage() && baseSha) {
+    if (proofImage() && baseSha && deadlineAt - Date.now() >= 30_000) {
       const candidate = result.findings.find((finding) => finding.verification?.status === "accepted" && parsed.decisions.some((decision) => decision.id === finding.id && decision.test && Object.hasOwn(decision.test, "expected")));
       const test = candidate && parsed.decisions.find((decision) => decision.id === candidate.id)?.test;
       if (candidate && test) candidate.proof = await reproduceFinding(candidate, { ...test, expected: test.expected }, repoContext, baseSha);

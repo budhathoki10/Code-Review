@@ -290,7 +290,7 @@ describe("generateReview", () => {
     const result = await generateReview("diff --git a/foo b/foo", { repoContext: SAMPLE_REPO_CONTEXT });
 
     expect(result.findings).toHaveLength(1);
-    expect(getFileContentMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/lib/foo.ts", "deadbeef");
+    expect(getFileContentMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/lib/foo.ts", "deadbeef", { signal: expect.any(AbortSignal) });
 
     const calls = findingsBranchCalls();
     expect(calls).toHaveLength(2); // fetch_file round + final submit
