@@ -91,6 +91,21 @@ export interface PullRequestDoc {
 }
 
 export interface FindingDoc {
+  /** Stable within a PR, independent of wording in the explanation and line movement. */
+  id?: string;
+  verification?: {
+    status: "accepted" | "downgraded" | "rejected" | "skipped";
+    reason: string;
+    evidence: { file: string; line: number; quote: string }[];
+  };
+  feedback?: { label: "correct" | "false-positive" | "duplicate"; userId: string; at: Date };
+  proof?: {
+    status: "reproduced" | "not-reproduced" | "unavailable";
+    reason: string;
+    baseSha?: string;
+    headSha: string;
+    test: { exportName: string; args: unknown[]; expected: unknown };
+  };
   severity: "critical" | "high" | "medium" | "low" | "info";
   category: "security" | "bug" | "performance" | "quality" | "testing";
   file: string;
@@ -166,6 +181,16 @@ export interface ReviewMetrics {
 }
 
 export interface ReviewDoc {
+  /** Persist the reservation BEFORE calling the verifier so retries cannot spend again. */
+  verificationCheckpoint?: {
+    state: "reserved" | "completed";
+    findings: FindingDoc[];
+    rejected: FindingDoc[];
+    usage: { inputTokens: number; outputTokens: number; totalTokens: number; calls: number };
+    candidates: number;
+    at: Date;
+  };
+  riskFiles?: { file: string; reasons: string[] }[];
   _id?: string;
   pullRequestId: string;
   headSha: string;

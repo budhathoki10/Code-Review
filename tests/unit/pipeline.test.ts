@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { filterCarriedForwardFindings, categoryFilter, severityFilter } from "@/lib/review/pipeline";
+import { filterCarriedForwardFindings, categoryFilter, severityFilter, computeConclusion } from "@/lib/review/pipeline";
 import { normalizeDisabledSeverities, REVIEW_SEVERITIES } from "@/lib/review/severity";
 import type { FindingDoc } from "@/lib/db/collections";
 
@@ -13,6 +13,20 @@ function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
     ...overrides,
   };
 }
+
+describe("evidence-based merge checks", () => {
+  it("a model verdict or high confidence alone cannot fail a check", () => {
+    expect(computeConclusion("request_changes", [finding({ severity: "critical", confidence: "high" })], "high")).toBe("neutral");
+  });
+  it("requires accepted evidence and the repository threshold", () => {
+    const assessed = finding({ severity: "high", verification: { status: "accepted", reason: "Guard removed", evidence: [{ file: "a.ts", line: 1, quote: "return 10/x" }] } });
+    expect(computeConclusion("approve", [assessed], "high")).toBe("failure");
+    expect(computeConclusion("request_changes", [assessed], "critical")).toBe("neutral");
+  });
+  it("lowering the threshold never makes medium advice block", () => {
+    expect(computeConclusion("comment", [finding({ severity: "medium" })], "info")).toBe("neutral");
+  });
+});
 
 describe("filterCarriedForwardFindings", () => {
   it("keeps findings on files the new delta did not touch", () => {

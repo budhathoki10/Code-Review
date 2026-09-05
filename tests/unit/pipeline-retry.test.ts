@@ -19,12 +19,14 @@ const {
   postSummaryCommentMock,
   updateSummaryCommentMock,
   postInlineReviewMock,
+  verifyBlockingFindingsMock,
 } = vi.hoisted(() => ({
   generateChunkedReviewMock: vi.fn(),
   getPullRequestDiffMock: vi.fn(),
   postSummaryCommentMock: vi.fn(),
   updateSummaryCommentMock: vi.fn(),
   postInlineReviewMock: vi.fn(),
+  verifyBlockingFindingsMock: vi.fn(),
 }));
 
 /** Fails the write that sets `status`, i.e. the first thing after the checkpoint. */
@@ -89,6 +91,12 @@ vi.mock("@/lib/ai/review", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   generateChunkedReview: generateChunkedReviewMock,
 }));
+vi.mock("@/lib/review/verification", async (importOriginal) => ({
+  ...(await importOriginal<object>()), verifyBlockingFindings: verifyBlockingFindingsMock,
+}));
+vi.mock("@/lib/github/file-content", async (importOriginal) => ({
+  ...(await importOriginal<object>()), getFileContent: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock("@/lib/github/comment", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -109,6 +117,15 @@ vi.mock("@/lib/db/usage", async (importOriginal) => ({
 }));
 
 import { runReviewPipeline } from "@/lib/review/pipeline";
+import { skippedVerification } from "@/lib/review/verification";
+import type { FindingDoc } from "@/lib/db/collections";
+
+beforeEach(() => {
+  verifyBlockingFindingsMock.mockImplementation(async (findings: FindingDoc[]) => ({
+    ...skippedVerification(findings, "test advisory"),
+    usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120, calls: 1 },
+  }));
+});
 
 const log = {
   info: vi.fn(),
@@ -317,6 +334,7 @@ describe("retry does not duplicate or orphan inline comments", () => {
     // Attempt 1 posts, then the write after it fails.
     await runReviewPipeline(JOB, log);
     expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
+    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
 
     // Attempt 2: BullMQ retries the same job against the same head SHA.
     await runReviewPipeline(JOB, log);
@@ -332,6 +350,41 @@ describe("retry does not duplicate or orphan inline comments", () => {
     // findFindingByCommentId queries findings.githubCommentId; losing it
     // drops every developer reply as "no finding maps to this comment".
     expect(storedFindings().find((f) => f.title === "Off-by-one")?.githubCommentId).toBe(5000);
+  });
+
+  it("preserves a developer's feedback when a completed review is retried", async () => {
+    await runReviewPipeline(JOB, log);
+    const stored = reviewDocs[0].findings as FindingDoc[];
+    stored[0].feedback = { label: "false-positive", userId: "user", at: new Date() };
+    await runReviewPipeline(JOB, log);
+    expect((reviewDocs[0].findings as FindingDoc[])[0].feedback?.label).toBe("false-positive");
+    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the verification result and accounts for its tokens once", async () => {
+    await runReviewPipeline(JOB, log);
+    await runReviewPipeline(JOB, log);
+    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
+    expect(reviewDocs[0].metrics).toMatchObject({ totalTokens: 1320, calls: 4 });
+    expect(reviewDocs[0].verdict).toBe("comment");
+    expect(reviewDocs[0].summary).not.toContain("REQUEST CHANGES");
+  });
+
+  it("does not spend again when an attempt died after reserving its budget", async () => {
+    reviewDocs[0].verificationCheckpoint = { ...skippedVerification([{ severity: "high", category: "bug", file: "src/a.ts", line: 1, title: "Off-by-one", explanation: "x should stay 1." }], "Interrupted"), state: "reserved" };
+    await runReviewPipeline(JOB, log);
+    expect(verifyBlockingFindingsMock).not.toHaveBeenCalled();
+    expect(reviewDocs[0].verdict).toBe("comment");
+  });
+
+  it("removes rejected accusations from findings and summary", async () => {
+    verifyBlockingFindingsMock.mockImplementation(async (findings: FindingDoc[]) => ({
+      ...skippedVerification(findings, "test"), findings: [], rejected: findings,
+    }));
+    await runReviewPipeline(JOB, log);
+    expect(reviewDocs[0].findings).toEqual([]);
+    expect(reviewDocs[0].summary).not.toContain("Off-by-one");
+    expect(reviewDocs[0].summary).not.toContain("REQUEST CHANGES");
   });
 
   it("still posts inline comments on a retry that never got to post", async () => {

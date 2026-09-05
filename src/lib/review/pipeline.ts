@@ -3,7 +3,13 @@ import { ObjectId } from "mongodb";
 import type { Logger } from "pino";
 import { getPullRequestDiff, getIncrementalDiff, type PullRequestDiff } from "@/lib/github/diff";
 import { GitHubRateLimitError } from "@/lib/github/file-content";
-import { generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
+import { DEFAULT_MODEL, generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
+import { getFileContent } from "@/lib/github/file-content";
+import { canBlock, dedupeFindings } from "@/lib/review/finding-policy";
+import { skippedVerification, verificationCandidates, verifyBlockingFindings } from "@/lib/review/verification";
+import { codeWindow, riskReasons } from "@/lib/review/risk";
+import { proofImage } from "@/lib/review/test-proof";
+import { getInstallationOctokit } from "@/lib/github/app";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
 import { describeSkipReason } from "@/lib/review/triage";
 import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
@@ -19,7 +25,7 @@ import {
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
-import { recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
+import { addUsage, recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
 import {
   reviews,
   pullRequests,
@@ -85,15 +91,15 @@ async function loadRepositoryConfig(pullRequestId: string): Promise<RepositoryDo
   return repositoryDoc?.config;
 }
 
-function computeConclusion(
+export function computeConclusion(
   verdict: ReviewResult["verdict"],
   findings: FindingDoc[],
   gateThreshold: FindingDoc["severity"],
 ): CheckConclusion {
-  if (verdict === "request_changes" || findings.some((f) => meetsThreshold(f.severity, gateThreshold))) {
+  if (findings.some((f) => canBlock(f) && meetsThreshold(f.severity, gateThreshold))) {
     return "failure";
   }
-  if (verdict === "comment") return "neutral";
+  if (verdict !== "approve" || findings.length > 0) return "neutral";
   return "success";
 }
 
@@ -194,11 +200,10 @@ function withPersistedCommentIds(findings: FindingDoc[], stored: FindingDoc[] | 
       byPosition.set(`${finding.file}::${finding.line}::${finding.title}`, finding.githubCommentId);
     }
   }
-  if (byPosition.size === 0) return findings;
-
   return findings.map((finding) => {
     const githubCommentId = byPosition.get(`${finding.file}::${finding.line}::${finding.title}`);
-    return githubCommentId === undefined ? finding : { ...finding, githubCommentId };
+    const feedback = stored?.find((item) => findingKey(item) === findingKey(finding))?.feedback;
+    return { ...finding, ...(githubCommentId === undefined ? {} : { githubCommentId }), ...(feedback ? { feedback } : {}) };
   });
 }
 
@@ -527,12 +532,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const touchedFiles = new Set(diff.files.map((file) => file.filename));
   const carriedForwardFindings = filterCarriedForwardFindings(previousReview?.findings ?? [], touchedFiles);
 
-  let aiResult: Pick<ReviewResult, "verdict" | "summary" | "findings">;
+  let aiResult: { verdict: ReviewResult["verdict"]; summary: string; findings: FindingDoc[] };
   let staticFindings: FindingDoc[];
   // Tracked across every branch, including the ones that spend nothing, so a
   // review that made zero provider calls records that as a fact rather than
   // as a missing field.
   let reviewUsage: TokenUsage = EMPTY_USAGE;
+  let unreviewedFiles: string[] = [];
+  const riskFiles = selection.analyzableFiles.map((file) => ({ file: file.filename, reasons: riskReasons(file) }))
+    .filter((file) => file.reasons.length > 0);
 
   if (selection.chunks.length === 0 && !(baselineSha && diff.fileCount === 0)) {
     // Nothing with a reviewable text patch survived selection — a PR of only
@@ -563,6 +571,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // re-spending the whole token budget — the diff is byte-identical, so a
     // second generation would buy nothing but cost everything.
     const checkpoint = existingReview.aiCheckpoint;
+    unreviewedFiles = checkpoint.unreviewedFiles;
     log.info(
       { reviewId, checkpointedAt: checkpoint.at, calls: checkpoint.calls, totalTokens: checkpoint.totalTokens },
       "reusing the model output from a previous attempt — skipping generation",
@@ -608,6 +617,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
     ]);
 
+    // Two sensitive files at most, pinned to the reviewed SHA. Shared file cache
+    // also serves static analysis and verification; no extra model round.
+    const riskContextSignal = AbortSignal.timeout(3000);
+    const riskContext = (await Promise.all(riskFiles.slice(0, 2).map(async (risk) => {
+      const file = selection.analyzableFiles.find((item) => item.filename === risk.file)!;
+      const firstLine = Number(file.patch?.match(/@@ -\d+(?:,\d+)? \+(\d+)/)?.[1] ?? 1);
+      const content = await getFileContent(githubInstallationId, owner, repo, risk.file, headSha, { signal: riskContextSignal }).catch(() => undefined);
+      return `${risk.file}: ${risk.reasons.join(", ")}\n${content === undefined ? "Surrounding code unavailable." : codeWindow(content, firstLine, 25, 3000)}`;
+    }))).join("\n\n");
     const generated = await generateChunkedReview(
       selection.chunks.map((chunk) => chunk.files),
       {
@@ -618,6 +636,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         prTitle,
         prBody: prBody ?? undefined,
         repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
+        riskContext,
       },
     );
     // Step 4 of the large-PR plan: whatever the budget couldn't cover is
@@ -636,6 +655,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     }
 
     reviewUsage = generated.usage;
+    unreviewedFiles = generated.unreviewedFiles;
 
     // Token accounting is a side metric, not part of the review — a failure
     // writing it must never fail an otherwise-good review, so it's logged and
@@ -707,7 +727,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const keepsSeverity = severityFilter(effectiveDisabledSeverities);
   const keepsFinding = (finding: FindingDoc) => keepsCategory(finding) && keepsSeverity(finding);
 
-  const allFindings = [
+  let allFindings = dedupeFindings([
     // Carried-forward findings are deliberately NOT re-mapped: their line
     // numbers were resolved against an earlier commit's diff, so looking
     // them up in this one would pair a suggestion with whatever text now
@@ -720,7 +740,52 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // them anyway would imply static findings can carry a committable
     // suggestion, which they cannot.
     ...staticFindings,
-  ].filter(keepsFinding);
+  ].filter(keepsFinding));
+
+  const currentFindings = allFindings.filter((finding) => touchedFiles.has(finding.file));
+  let verification = existingReview?.verificationCheckpoint;
+  if (!verification && verificationCandidates(currentFindings).length > 0) {
+    const reservation = { ...skippedVerification(currentFindings, "Verification interrupted; not eligible to block."), state: "reserved" as const };
+    // Mandatory durable reservation. A crash or lost completion write must not
+    // buy a second verification call on BullMQ retry for this PR/head pair.
+    const reserved = await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { verificationCheckpoint: reservation } });
+    if (reserved.matchedCount !== 1) throw new Error("Could not reserve verification budget");
+    let proofBaseSha: string | undefined;
+    if (proofImage()) {
+      // Resolve the actual PR merge base, not the previous reviewed push: a
+      // failing test should demonstrate a regression introduced by this PR.
+      try {
+        const octokit = await getInstallationOctokit(githubInstallationId);
+        const signal = AbortSignal.timeout(5000);
+        const { data: pr } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { owner, repo, pull_number: prNumber, request: { signal } });
+        if (pr.head.sha === headSha) {
+          const { data: comparison } = await octokit.request("GET /repos/{owner}/{repo}/compare/{basehead}", { owner, repo, basehead: `${pr.base.sha}...${headSha}`, request: { signal } });
+          proofBaseSha = comparison.merge_base_commit.sha;
+        }
+      } catch (err) { log.warn({ err }, "test proof base unavailable; retaining AI assessment only"); }
+    }
+    verification = await verifyBlockingFindings(currentFindings, diff.files, { installationId: githubInstallationId, owner, repo, ref: headSha }, proofBaseSha);
+    await recordUsage(verification.usage, false).catch((err) => log.warn({ err }, "failed to record verification usage"));
+    await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { verificationCheckpoint: verification } });
+  }
+  if (verification) {
+    allFindings = dedupeFindings([
+      ...allFindings.filter((finding) => !touchedFiles.has(finding.file)),
+      ...verification.findings.filter(keepsFinding),
+    ]);
+    reviewUsage = addUsage(reviewUsage, verification.usage);
+  }
+  const blocking = allFindings.filter((finding) => canBlock(finding) && meetsThreshold(finding.severity, resolveGateThreshold(repoConfig)));
+  const previousVerdict = aiResult.verdict;
+  aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
+  if (verification || previousVerdict === "request_changes") {
+    // The first-pass prose can contain a rejected accusation or obsolete merge
+    // recommendation. Rebuild it from assessed findings, with no additional call.
+    aiResult.summary = `Reviewed ${selection.coveredCount} file(s). ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
+      `Retained ${allFindings.length} finding(s)${verification ? `; rejected ${verification.rejected.length} after assessment` : ""}. AI assessment is not test-backed proof. Unchecked findings are advisory.\n\n` +
+      `*Current review: ${aiResult.verdict === "request_changes" ? "REQUEST CHANGES" : aiResult.verdict.toUpperCase()}.*` +
+      formatCoverageNote(selection, unreviewedFiles);
+  }
 
   // Anything the last review flagged on a file this push edited, that this
   // review no longer reports, is called out as fixed — otherwise a review
@@ -728,28 +793,33 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // that forgot about it.
   const resolvedFindings = findResolvedFindings(
     previousReview?.findings ?? [],
-    touchedFiles,
-    [...aiResult.findings, ...staticFindings],
+    new Set(selection.chunks.flatMap((chunk) => chunk.files.map((file) => file.filename)).filter((file) => !unreviewedFiles.includes(file))),
+    [...allFindings, ...(verification?.rejected ?? [])],
   ).filter(keepsFinding);
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
   }
   const summaryWithResolved = `${aiResult.summary}${formatResolvedNote(resolvedFindings)}`;
 
-// saves  the review in mongo db
-  await reviewsCol.updateOne(
-    { pullRequestId, headSha },
+  // Preserve feedback written during this attempt. A concurrent array rewrite
+  // makes this write retry instead of silently discarding someone's rating.
+  const storedBeforePublish = await reviewsCol.findOne({ pullRequestId, headSha });
+  if (!storedBeforePublish) throw new Error("Review disappeared before publication");
+  const savedReview = await reviewsCol.updateOne(
+    { pullRequestId, headSha, findings: storedBeforePublish.findings },
     {
       $set: {
         status: "completed",
         verdict: aiResult.verdict,
         summary: summaryWithResolved,
-        findings: withPersistedCommentIds(allFindings, existingReview?.findings),
+        findings: withPersistedCommentIds(allFindings, storedBeforePublish.findings),
         touchedFiles: Array.from(touchedFiles),
         filteredFiles,
+        riskFiles,
       },
     },
   );
+  if (savedReview.matchedCount !== 1) throw new Error("Review changed during publication; retrying without regenerating");
 
   // Records how far this PR has actually been reviewed, so the next push's
   // incremental diff starts from here.
@@ -877,7 +947,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     outputTokens: reviewUsage.outputTokens,
     totalTokens: reviewUsage.totalTokens,
     calls: reviewUsage.calls,
-    model: process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b",
+    model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
     durationMs: Date.now() - startedAt,
     filesSeen: diff.fileCount,
     filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,

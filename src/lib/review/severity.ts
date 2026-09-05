@@ -27,6 +27,12 @@ export function normalizeDisabledSeverities(
   disabled: FindingDoc["severity"][] | undefined,
 ): FindingDoc["severity"][] {
   if (!disabled?.length) return [];
-  const unique = new Set(disabled);
+  // Filtered to known severities BEFORE counting. Without this, a value that
+  // is not a severity at all still counts toward the all-off total: four real
+  // severities plus one bogus string reached five, tripped the guard, and
+  // silently re-enabled all four the repo had deliberately switched off.
+  // The list can carry junk because it is persisted from a form post and a
+  // repo config, neither of which the type system reaches at runtime.
+  const unique = new Set(disabled.filter((severity) => REVIEW_SEVERITIES.includes(severity)));
   return unique.size >= REVIEW_SEVERITIES.length ? [] : [...unique];
 }

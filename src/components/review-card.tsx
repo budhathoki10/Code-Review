@@ -6,6 +6,9 @@ import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
 import { SuggestionBlock } from "@/components/suggestion-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
+import { FindingFeedback } from "@/components/finding-feedback";
+import { evidenceLabel, findingId } from "@/lib/review/finding-policy";
+import { feedbackStats } from "@/lib/review/feedback";
 
 const CATEGORY_ICON: Record<FindingDoc["category"], typeof Bug> = {
   security: ShieldAlert,
@@ -60,7 +63,7 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
 }
 
 /** One finding, numbered within its severity group. `file`/`line` are shown here now — no longer implied by a per-file group header, since the grouping key is severity. */
-function FindingItem({ finding, number }: { finding: FindingDoc; number: number }) {
+function FindingItem({ finding, number, reviewId, repositoryId }: { finding: FindingDoc; number: number; reviewId?: string; repositoryId?: string }) {
   const CategoryIcon = CATEGORY_ICON[finding.category];
   return (
     <li className="py-4 first:pt-0 last:pb-0">
@@ -84,6 +87,14 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
         )}
       </p>
       <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
+      <p className="mt-2 text-xs text-subtle">{evidenceLabel(finding)}</p>
+      {finding.verification?.status === "accepted" && <p className="mt-1 text-xs text-muted">Assessment: {finding.verification.reason}</p>}
+      {finding.verification?.evidence.map((evidence, index) => <p key={index} className="mt-1 break-words font-mono text-xs text-muted">{evidence.file}:{evidence.line} — {evidence.quote}</p>)}
+      {finding.proof && <details className="mt-2 text-xs text-muted"><summary className="cursor-pointer">Regression test: {finding.proof.status}</summary>
+        <p className="mt-1">{finding.proof.reason}</p>
+        <pre className="mt-1 overflow-x-auto">{JSON.stringify({ base: finding.proof.baseSha, head: finding.proof.headSha, ...finding.proof.test }, null, 2)}</pre>
+      </details>}
+      {reviewId && repositoryId && <FindingFeedback reviewId={reviewId} repositoryId={repositoryId} findingId={findingId(finding)} value={finding.feedback?.label} />}
       {/* Both halves present means this is a committable one-line replacement,
           so it's shown before/after like GitHub's suggestion widget. Prose
           suggestions and older findings have no originalLine and keep the
@@ -113,7 +124,7 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
  * dozen findings across five severities should land as five compact rows,
  * not everything already unfurled.
  */
-function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"]; findings: FindingDoc[] }) {
+function SeverityGroup({ severity, findings, reviewId, repositoryId }: { severity: FindingDoc["severity"]; findings: FindingDoc[]; reviewId?: string; repositoryId?: string }) {
   const tone = SEVERITY_TONE[severity];
   return (
     <li>
@@ -129,7 +140,7 @@ function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"
         </summary>
         <ul className="divide-y divide-border border-t border-border pl-5">
           {findings.map((finding, i) => (
-            <FindingItem key={i} finding={finding} number={i + 1} />
+            <FindingItem key={i} finding={finding} number={i + 1} reviewId={reviewId} repositoryId={repositoryId} />
           ))}
         </ul>
       </details>
@@ -222,6 +233,7 @@ export function ReviewCard({
   repositoryId?: string;
 }) {
   const findings = visibleFindings(review);
+  const feedback = feedbackStats(findings);
   const severityGroups = groupFindingsBySeverity(findings);
   const hasReviewDetails = Boolean(
     review.summary ||
@@ -300,12 +312,25 @@ export function ReviewCard({
           {severityGroups.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
               {severityGroups.map((group) => (
-                <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} />
+                <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} reviewId={String(review._id)} repositoryId={repositoryId} />
               ))}
             </ul>
           )}
 
           {review.metrics && <MetricsStrip metrics={review.metrics} />}
+          {(feedback.assessed > 0 || feedback.duplicate > 0) && <p className="mt-3 text-xs text-muted">
+            Rated findings: {feedback.correct} correct · {feedback.falsePositive} false positives · {feedback.duplicate} duplicates.
+            {feedback.falsePositiveRate !== null && ` False-positive rate in this rated sample: ${Math.round(feedback.falsePositiveRate * 100)}% (${feedback.assessed} assessed).`}
+          </p>}
+          {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
+            Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
+          </p>}
+          {!!review.verificationCheckpoint?.rejected.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Rejected findings ({review.verificationCheckpoint.rejected.length})</summary>
+            <ul className="mt-2 space-y-2">{review.verificationCheckpoint.rejected.map((finding, index) => <li key={index}>{finding.file}: {finding.title} — {finding.verification?.reason}</li>)}</ul>
+          </details>}
+          {!!review.riskFiles?.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Sensitive changes prioritized ({review.riskFiles.length})</summary>
+            <ul className="mt-2 space-y-1">{review.riskFiles.map((risk) => <li key={risk.file}>{risk.file}: {risk.reasons.join(", ")}</li>)}</ul>
+          </details>}
         </div>
       </details>
     </li>

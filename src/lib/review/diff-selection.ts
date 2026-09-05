@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 import { MAX_DIFF_CHARS, MAX_DIFF_FILES, buildDiffText, type PullRequestFile } from "@/lib/github/diff";
 import { triageFile, describeSkipReason, type SkipReason } from "@/lib/review/triage";
+import { riskReasons } from "@/lib/review/risk";
 
 /**
  * Hard ceiling on how many AI passes one review may spend on an oversized
@@ -274,6 +275,8 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
   }
 
   const ranked = [...analyzableFiles].sort((a, b) => {
+    const riskDelta = riskReasons(b).length - riskReasons(a).length;
+    if (riskDelta !== 0) return riskDelta;
     const priorityDelta = filePriority(a.filename) - filePriority(b.filename);
     if (priorityDelta !== 0) return priorityDelta;
     return patchSize(a) - patchSize(b);
