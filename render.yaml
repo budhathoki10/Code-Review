@@ -28,7 +28,7 @@ services:
       - key: NVIDIA_BASE_URL
         sync: false
       - key: NVIDIA_MODEL
-        value: nvidia/nemotron-3-ultra-550b-a55b
+        value: nvidia/nemotron-3-super-120b-a12b
       - key: NVIDIA_TEMPERATURE
         value: "0.2"
       - key: NVIDIA_TOP_P
@@ -36,7 +36,7 @@ services:
       - key: NVIDIA_MAX_TOKENS
         value: "8192"
       - key: NVIDIA_THINKING
-        value: "true"
+        value: "false"
       - key: REVIEW_FINDINGS_TOOL_ROUNDS
         value: "1"
       - key: REVIEW_VERIFICATION_MAX_FINDINGS
