@@ -53,6 +53,21 @@ export interface RepositoryDoc {
      * so a disabled category can't fail the check run either. Off means off.
      */
     disabledCategories?: FindingDoc["category"][];
+    /**
+     * Severities switched off from the dashboard.
+     *
+     * Distinct from `severityThreshold`, which only decides what gets
+     * *posted*: these findings are dropped before the review is stored, so a
+     * switched-off severity reaches nothing — not GitHub, not the dashboard,
+     * not the check run. The model is told about them too, so it does not
+     * spend output tokens on findings that are guaranteed to be discarded.
+     *
+     * A set rather than a floor, because the two express different things: a
+     * threshold cannot say "I want critical bugs and info notes but nothing
+     * in between", and every level in between is exactly the noise someone
+     * reaches for this control to silence.
+     */
+    disabledSeverities?: FindingDoc["severity"][];
   };
 }
 

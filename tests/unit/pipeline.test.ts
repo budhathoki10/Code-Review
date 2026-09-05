@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { filterCarriedForwardFindings, categoryFilter } from "@/lib/review/pipeline";
+import { filterCarriedForwardFindings, categoryFilter, severityFilter } from "@/lib/review/pipeline";
+import { normalizeDisabledSeverities, REVIEW_SEVERITIES } from "@/lib/review/severity";
 import type { FindingDoc } from "@/lib/db/collections";
 
 function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
@@ -116,5 +117,111 @@ describe("categoryFilter", () => {
 
     expect(findings.filter(categoryFilter(["quality"])).map((f) => f.source)).toEqual(["static-analysis"]);
     expect(findings.filter(categoryFilter(["quality"])).map((f) => f.category)).toEqual(["security"]);
+  });
+});
+
+describe("severityFilter", () => {
+  it("keeps everything when the repo disabled nothing", () => {
+    const findings = [finding({ severity: "low" }), finding({ severity: "critical" })];
+
+    expect(findings.filter(severityFilter([]))).toEqual(findings);
+    expect(findings.filter(severityFilter(undefined))).toEqual(findings);
+  });
+
+  it("drops only the disabled severity, leaving the other axes alone", () => {
+    const findings = [
+      finding({ severity: "medium", category: "bug" }),
+      finding({ severity: "critical", category: "bug" }),
+      finding({ severity: "info", category: "bug" }),
+    ];
+
+    // The reported case: medium off must drop a medium *bug* while leaving
+    // every other level of bug untouched — severity is not a category filter.
+    const kept = findings.filter(severityFilter(["medium"]));
+
+    expect(kept.map((f) => f.severity)).toEqual(["critical", "info"]);
+  });
+
+  it("is a set, not a floor — disabling the middle keeps both ends", () => {
+    const findings = [
+      finding({ severity: "critical" }),
+      finding({ severity: "high" }),
+      finding({ severity: "medium" }),
+      finding({ severity: "low" }),
+      finding({ severity: "info" }),
+    ];
+
+    // A threshold could not express this: "critical and info, nothing
+    // between" is exactly what the switches buy over the old dropdown.
+    const kept = findings.filter(severityFilter(["high", "medium", "low"]));
+
+    expect(kept.map((f) => f.severity)).toEqual(["critical", "info"]);
+  });
+
+  it("ignores an all-off list rather than silencing the whole review", () => {
+    const findings = [finding({ severity: "critical" }), finding({ severity: "info" })];
+
+    // Every severity off would leave no findings at all while still paying
+    // for the model call, which is never what someone means.
+    expect(findings.filter(severityFilter(["critical", "high", "medium", "low", "info"]))).toEqual(findings);
+  });
+
+  it("applies to static-analysis findings the same as to AI ones", () => {
+    const findings = [
+      finding({ severity: "medium", source: "static-analysis" }),
+      finding({ severity: "critical", source: "static-analysis" }),
+    ];
+
+    expect(findings.filter(severityFilter(["medium"])).map((f) => f.severity)).toEqual(["critical"]);
+  });
+
+  it("composes with categoryFilter — a finding must pass both", () => {
+    const findings = [
+      finding({ severity: "medium", category: "testing" }),
+      finding({ severity: "medium", category: "bug" }),
+      finding({ severity: "high", category: "testing" }),
+      finding({ severity: "high", category: "bug" }),
+    ];
+
+    const keepsCategory = categoryFilter(["testing"]);
+    const keepsSeverity = severityFilter(["medium"]);
+    const kept = findings.filter((f) => keepsCategory(f) && keepsSeverity(f));
+
+    expect(kept).toEqual([finding({ severity: "high", category: "bug" })]);
+  });
+});
+
+describe("normalizeDisabledSeverities", () => {
+  it("passes a partial list through unchanged", () => {
+    expect(normalizeDisabledSeverities(["medium", "low"])).toEqual(["medium", "low"]);
+  });
+
+  it("treats an all-off list as no filtering at all", () => {
+    // The bug this guards: the same list is ALSO rendered into the review
+    // prompt. Applying the guard only inside severityFilter left the model
+    // instructed to omit every severity — it returned nothing, and the
+    // filter then had nothing left to preserve. The guard has to run before
+    // the earliest consumer, so it lives here rather than in the filter.
+    expect(normalizeDisabledSeverities(REVIEW_SEVERITIES)).toEqual([]);
+  });
+
+  it("collapses duplicates before deciding whether every severity is off", () => {
+    // Four entries, but only two distinct — nowhere near all-off, so it must
+    // survive rather than being miscounted toward the guard.
+    expect(normalizeDisabledSeverities(["low", "low", "info", "info"])).toEqual(["low", "info"]);
+  });
+
+  it("returns an empty list for undefined or empty input", () => {
+    expect(normalizeDisabledSeverities(undefined)).toEqual([]);
+    expect(normalizeDisabledSeverities([])).toEqual([]);
+  });
+
+  it("keeps severityFilter and the prompt agreeing on an all-off list", () => {
+    const findings = [finding({ severity: "critical" }), finding({ severity: "info" })];
+    // Both consumers derive from the same normalized value, so neither can
+    // act on a list the other has already discarded.
+    const normalized = normalizeDisabledSeverities(REVIEW_SEVERITIES);
+    expect(normalized).toEqual([]);
+    expect(findings.filter(severityFilter(normalized))).toEqual(findings);
   });
 });

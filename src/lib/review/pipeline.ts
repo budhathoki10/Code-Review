@@ -28,6 +28,7 @@ import {
   type RepositoryDoc,
 } from "@/lib/db/collections";
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
+import { normalizeDisabledSeverities } from "@/lib/review/severity";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
@@ -137,6 +138,26 @@ export function categoryFilter(
   const disabled = new Set(sources.flatMap((source) => source ?? []));
   if (disabled.size === 0) return () => true;
   return (finding) => !disabled.has(finding.category);
+}
+
+/**
+ * Drops findings whose severity the repo switched off.
+ *
+ * Deliberately separate from the posting threshold: that one hides a finding
+ * from GitHub while still storing it, this one discards it. Same "off means
+ * off" rule categoryFilter follows — a check run must never fail on a
+ * finding the repo explicitly asked not to receive.
+ *
+ * Every severity off would leave nothing at all, which is never what someone
+ * means, so an all-off set is ignored rather than obeyed — the same guard
+ * readDisabledCategories applies to categories.
+ */
+export function severityFilter(
+  ...sources: (FindingDoc["severity"][] | undefined)[]
+): (finding: FindingDoc) => boolean {
+  const disabled = new Set(normalizeDisabledSeverities(sources.flatMap((source) => source ?? [])));
+  if (disabled.size === 0) return () => true;
+  return (finding) => !disabled.has(finding.severity);
 }
 
 export function filterCarriedForwardFindings(previousFindings: FindingDoc[], touchedFiles: Set<string>): FindingDoc[] {
@@ -373,6 +394,14 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
   // Both config surfaces, merged once here so the prompt and the finding
   // filter below can never disagree about which categories are off.
+  // Normalized ONCE, here, because the list has two consumers that must agree:
+  // the prompt (which tells the model which severities to skip) and
+  // severityFilter (which drops them). Applying the all-off guard only in the
+  // filter left the prompt still instructing the model to omit every
+  // severity — it returned nothing, and the filter then had nothing to
+  // preserve. The guard has to come before the earliest consumer.
+  const effectiveDisabledSeverities = normalizeDisabledSeverities(repoConfig?.disabledSeverities);
+
   const mergedDisabledCategories = [
     ...new Set([...(repoConfig?.disabledCategories ?? []), ...reviewConfig.disabledCategories]),
   ];
@@ -584,6 +613,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       {
         customInstructions: repoConfig?.customInstructions,
         disabledCategories: mergedDisabledCategories,
+        disabledSeverities: effectiveDisabledSeverities,
         staticFindings: staticFindingsForContext,
         prTitle,
         prBody: prBody ?? undefined,
@@ -672,6 +702,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   };
 
   const keepsCategory = categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories);
+  // Severity is dashboard-only — .prsentry.yaml has no equivalent key — so
+  // unlike keepsCategory this has a single source.
+  const keepsSeverity = severityFilter(effectiveDisabledSeverities);
+  const keepsFinding = (finding: FindingDoc) => keepsCategory(finding) && keepsSeverity(finding);
 
   const allFindings = [
     // Carried-forward findings are deliberately NOT re-mapped: their line
@@ -686,7 +720,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // them anyway would imply static findings can carry a committable
     // suggestion, which they cannot.
     ...staticFindings,
-  ].filter(keepsCategory);
+  ].filter(keepsFinding);
 
   // Anything the last review flagged on a file this push edited, that this
   // review no longer reports, is called out as fixed — otherwise a review
@@ -696,7 +730,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     previousReview?.findings ?? [],
     touchedFiles,
     [...aiResult.findings, ...staticFindings],
-  ).filter(keepsCategory);
+  ).filter(keepsFinding);
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
   }

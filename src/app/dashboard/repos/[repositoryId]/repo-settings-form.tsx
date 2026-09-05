@@ -9,15 +9,22 @@ import { useToast } from "@/components/toast";
 import { updateRepositoryConfig } from "@/app/dashboard/actions";
 import type { FindingDoc, RepositoryDoc } from "@/lib/db/collections";
 
-const SEVERITIES: NonNullable<RepositoryDoc["config"]>["severityThreshold"][] = [
-  "info",
-  "low",
-  "medium",
-  "high",
-  "critical",
-];
-
 type Category = FindingDoc["category"];
+type Severity = FindingDoc["severity"];
+
+/**
+ * Severity switches, ordered worst-first so the levels someone is most
+ * likely to keep sit at the top and the noisy end is where the eye lands.
+ * Glossed for the same reason as CATEGORIES: "info" and "low" don't say
+ * anything on their own about what you'd actually be silencing.
+ */
+const SEVERITIES: { value: Severity; label: string; hint: string }[] = [
+  { value: "critical", label: "Critical", hint: "Exploitable or data-losing — fix before merge" },
+  { value: "high", label: "High", hint: "Real bugs and security holes" },
+  { value: "medium", label: "Medium", hint: "Likely defects and risky patterns" },
+  { value: "low", label: "Low", hint: "Minor issues and small cleanups" },
+  { value: "info", label: "Info", hint: "Observations, not problems" },
+];
 
 /**
  * Listed with a plain-English gloss rather than the bare enum value: "quality"
@@ -57,9 +64,6 @@ export function RepoSettingsForm({
   }, [open]);
 
   async function handleSubmit(formData: FormData) {
-    const severityThreshold = formData.get("severityThreshold") as NonNullable<
-      RepositoryDoc["config"]
-    >["severityThreshold"];
     const customInstructions = String(formData.get("customInstructions") ?? "")
       .split("\n")
       .map((line) => line.trim())
@@ -72,11 +76,19 @@ export function RepoSettingsForm({
     const disabledCategories = String(formData.get("disabledCategories") ?? "")
       .split(",")
       .filter((value): value is Category => CATEGORIES.some((c) => c.value === value));
+    const disabledSeverities = String(formData.get("disabledSeverities") ?? "")
+      .split(",")
+      .filter((value): value is Severity => SEVERITIES.some((sev) => sev.value === value));
 
     await updateRepositoryConfig(repositoryId, {
-      severityThreshold,
+      // Carried through untouched: the posting threshold no longer has a
+      // control here (severity is a set of switches now, not a floor), but
+      // it still gates the check run, so dropping it from the payload would
+      // silently reset a value the repo had deliberately set.
+      severityThreshold: config?.severityThreshold,
       customInstructions,
       disabledCategories,
+      disabledSeverities,
     });
     toast({ title: "Review settings saved" });
     setOpen(false);
@@ -121,27 +133,7 @@ export function RepoSettingsForm({
               </div>
 
               <form action={handleSubmit} className="mt-3 space-y-4">
-                <div>
-                  <label htmlFor="severityThreshold" className="text-xs font-medium text-muted">
-                    Post to GitHub from severity
-                  </label>
-                  <select
-                    id="severityThreshold"
-                    name="severityThreshold"
-                    defaultValue={config?.severityThreshold ?? "info"}
-                    className="mt-1.5 h-9 w-full rounded-[2px] border border-border bg-background px-2.5 text-sm text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                  >
-                    {SEVERITIES.map((severity) => (
-                      <option key={severity} value={severity}>
-                        {severity === "info" ? "info (everything)" : severity}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="mt-1 text-xs text-subtle">
-                    Findings below this level still show on the dashboard, just not on GitHub.
-                    Also gates the check run (defaults to high/critical if left unset).
-                  </p>
-                </div>
+                <SeverityToggles saved={config?.disabledSeverities} />
 
                 <CategoryToggles saved={config?.disabledCategories} />
 
@@ -170,40 +162,71 @@ export function RepoSettingsForm({
 }
 
 /**
- * The category switches, kept in their own component so their state is owned
- * by something that only exists while the popover is open. Closing the
- * popover unmounts this, so edits abandoned that way are discarded for free —
- * no effect resetting state on the way back in, which is what
- * react-hooks/set-state-in-effect exists to prevent.
+ * One list of on/off switches backed by a hidden "disabled" field.
+ *
+ * Shared by the category and severity lists because they are the same
+ * control with different labels — the toggle markup, the last-one-locked
+ * rule and the hidden-field encoding were identical, and two copies of a
+ * switch this fiddly drift apart the first time one gets a fix.
+ *
+ * State is owned here rather than by the popover so it only exists while the
+ * popover is open: closing it unmounts this and abandoned edits are
+ * discarded for free, with no effect resetting state on the way back in
+ * (which is what react-hooks/set-state-in-effect exists to prevent).
  *
  * The value reaches the form through a hidden field rather than through the
- * checkboxes: the last enabled category's checkbox is `disabled` so it can't
- * be switched off, and a disabled input submits nothing.
+ * checkboxes themselves: the last enabled item's checkbox is `disabled` so
+ * it can't be switched off, and a disabled input contributes nothing to
+ * FormData — reading the boxes directly would silently drop exactly the item
+ * the lock exists to protect.
  */
-function CategoryToggles({ saved }: { saved?: Category[] }) {
-  const [enabled, setEnabled] = useState<Category[]>(() =>
-    CATEGORIES.map((c) => c.value).filter((c) => !saved?.includes(c)),
-  );
+function ToggleList<T extends string>({
+  name,
+  legend,
+  items,
+  saved,
+  lastOnHint,
+  footnote,
+}: {
+  name: string;
+  legend: string;
+  items: { value: T; label: string; hint: string }[];
+  saved?: T[];
+  lastOnHint: string;
+  footnote: React.ReactNode;
+}) {
+  const all = items.map((item) => item.value);
+  // Falls back to everything-on when the saved list disables every value.
+  // That state can exist in the database even though this control can't
+  // produce it (an older write, or a hand-edited document), and initializing
+  // `enabled` to empty would leave nothing locked — so the form would happily
+  // submit the all-off list straight back and make the state permanent. The
+  // server action refuses it too; this is the half that lets the user see and
+  // fix it rather than facing a dead settings panel.
+  const [enabled, setEnabled] = useState<T[]>(() => {
+    const on = all.filter((value) => !saved?.includes(value));
+    return on.length > 0 ? on : all;
+  });
 
-  const disabled = CATEGORIES.map((c) => c.value).filter((c) => !enabled.includes(c));
+  const disabled = all.filter((value) => !enabled.includes(value));
 
-  function toggle(category: Category) {
+  function toggle(value: T) {
     setEnabled((current) =>
-      current.includes(category)
-        ? current.filter((c) => c !== category)
-        : // Rebuilt in CATEGORIES order rather than appended, so the value
+      current.includes(value)
+        ? current.filter((entry) => entry !== value)
+        : // Rebuilt in list order rather than appended, so the value
           // submitted doesn't depend on the order the user clicked.
-          CATEGORIES.map((c) => c.value).filter((c) => current.includes(c) || c === category),
+          all.filter((entry) => current.includes(entry) || entry === value),
     );
   }
 
   return (
     <fieldset>
-      <legend className="text-xs font-medium text-muted">Categories to review</legend>
-      <input type="hidden" name="disabledCategories" value={disabled.join(",")} />
+      <legend className="text-xs font-medium text-muted">{legend}</legend>
+      <input type="hidden" name={name} value={disabled.join(",")} />
 
       <ul className="mt-1.5 divide-y divide-border rounded-[2px] border border-border">
-        {CATEGORIES.map(({ value, label, hint }) => {
+        {items.map(({ value, label, hint }) => {
           const on = enabled.includes(value);
           const locked = on && enabled.length === 1;
           return (
@@ -215,9 +238,7 @@ function CategoryToggles({ saved }: { saved?: Category[] }) {
               >
                 <span className="min-w-0">
                   <span className="block text-sm text-foreground">{label}</span>
-                  <span className="block text-xs text-subtle">
-                    {locked ? "The last category on — at least one must stay." : hint}
-                  </span>
+                  <span className="block text-xs text-subtle">{locked ? lastOnHint : hint}</span>
                 </span>
                 <span className="relative inline-flex shrink-0">
                   <input
@@ -242,11 +263,46 @@ function CategoryToggles({ saved }: { saved?: Category[] }) {
         })}
       </ul>
 
-      <p className="mt-1 text-xs text-subtle">
-        Off means dropped entirely — not posted to GitHub, not shown on the dashboard, and unable
-        to fail the check run. A repo&rsquo;s <code>.prsentry.yaml</code> can switch categories off
-        too; the two combine.
-      </p>
+      <p className="mt-1 text-xs text-subtle">{footnote}</p>
     </fieldset>
+  );
+}
+
+function SeverityToggles({ saved }: { saved?: Severity[] }) {
+  return (
+    <ToggleList
+      name="disabledSeverities"
+      legend="Severities to review"
+      items={SEVERITIES}
+      saved={saved}
+      lastOnHint="The last severity on — at least one must stay."
+      footnote={
+        <>
+          Off means dropped entirely — a switched-off severity is not posted to GitHub, not shown
+          on the dashboard, and cannot fail the check run. The reviewer is told to skip these
+          levels rather than re-label them, so nothing is smuggled through at a level that is
+          still on.
+        </>
+      }
+    />
+  );
+}
+
+function CategoryToggles({ saved }: { saved?: Category[] }) {
+  return (
+    <ToggleList
+      name="disabledCategories"
+      legend="Categories to review"
+      items={CATEGORIES}
+      saved={saved}
+      lastOnHint="The last category on — at least one must stay."
+      footnote={
+        <>
+          Off means dropped entirely — not posted to GitHub, not shown on the dashboard, and
+          unable to fail the check run. A repo&rsquo;s <code>.prsentry.yaml</code> can switch
+          categories off too; the two combine.
+        </>
+      }
+    />
   );
 }

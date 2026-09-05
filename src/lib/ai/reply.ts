@@ -4,6 +4,7 @@ import type { FindingDoc } from "@/lib/db/collections";
 import { usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { getFileContent } from "@/lib/github/file-content";
 import type { ThreadMessage } from "@/lib/github/review-comments";
+import { DEFAULT_MODEL, thinkingKwargs } from "@/lib/ai/review";
 
 /**
  * Answering a question about one finding is a different job from producing a
@@ -26,7 +27,13 @@ function getClient(): OpenAI {
     if (!apiKey || !baseURL) {
       throw new Error("Missing NVIDIA_API_KEY or NVIDIA_BASE_URL");
     }
-    client = new OpenAI({ apiKey, baseURL });
+    // Same bounds as the review client — see the note in ai/review.ts.
+    client = new OpenAI({
+      apiKey,
+      baseURL,
+      maxRetries: envNumber("NVIDIA_MAX_RETRIES", 2),
+      timeout: envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000),
+    });
   }
   return client;
 }
@@ -223,7 +230,10 @@ export async function generateReplyAnswer(
     .join("\n\n");
 
   const response = await getClient().chat.completions.create({
-    model: process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b",
+    model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
+    // A reply is one call with a developer waiting on it, so the reasoning
+    // trace is pure latency here too — see thinkingKwargs in ai/review.ts.
+    ...thinkingKwargs(),
     max_tokens: envNumber("REPLY_MAX_TOKENS", 1024),
     temperature: envNumber("NVIDIA_TEMPERATURE", 0.7),
     top_p: envNumber("NVIDIA_TOP_P", 0.95),

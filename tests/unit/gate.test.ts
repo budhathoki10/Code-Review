@@ -261,10 +261,30 @@ describe("estimateReviewCost", () => {
     expect(large.expectedTokens).toBeGreaterThan(small.expectedTokens * 5);
   });
 
-  it("reports a worst case above the expected case", () => {
+  it("reports a worst case equal to the expected case when no tool rounds are configured", () => {
+    // With REVIEW_FINDINGS_TOOL_ROUNDS at its default of 0 every findings
+    // call is a single forced submit_findings, so nothing re-sends the
+    // conversation and there is no multiplier left to charge for.
     const cost = estimateReviewCost(selectDiffForReview(Array.from({ length: 40 }, (_, i) => srcFile(`src/f${i}.ts`, 100))));
 
+    expect(cost.worstCaseTokens).toBe(cost.expectedTokens);
+  });
+
+  it("charges the worst case for every configured tool round", async () => {
+    process.env.REVIEW_FINDINGS_TOOL_ROUNDS = "3";
+    vi.resetModules();
+    const { estimateReviewCost: estimateWithRounds } = await import("@/lib/review/gate");
+    const { selectDiffForReview: select } = await import("@/lib/review/diff-selection");
+
+    const cost = estimateWithRounds(select(Array.from({ length: 40 }, (_, i) => srcFile(`src/f${i}.ts`, 100))));
+
+    // Each round re-sends the whole conversation, so enabling them has to
+    // show up as a projected cost — that projection is what the size gate
+    // refuses a review on.
     expect(cost.worstCaseTokens).toBeGreaterThan(cost.expectedTokens);
+
+    delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS;
+    vi.resetModules();
   });
 
   it("refuses a review projected past the cost ceiling, separately from the file/line ceilings", async () => {
