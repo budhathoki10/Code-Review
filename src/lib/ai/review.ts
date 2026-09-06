@@ -92,7 +92,7 @@ export type SharedParams = {
   chat_template_kwargs?: { thinking: boolean };
 };
 
-/** Reasoning defaults on for discovery; assessment explicitly disables it. */
+/** Reasoning defaults on; both discovery and assessment follow NVIDIA_THINKING. */
 export function thinkingKwargs(
   thinking = process.env.NVIDIA_THINKING !== "false",
 ): { chat_template_kwargs?: { thinking: boolean } } {
@@ -119,10 +119,14 @@ export const MAX_FINDINGS_TOOL_ROUNDS = (() => {
   // `Math.max(0, NaN)` is NaN, so a non-numeric env value used to make the
   // round budget NaN — every `round <= roundsAvailable` comparison is then
   // false and the loop body never runs, which is not a mode anyone asked for.
-  return Math.max(0, Math.floor(envNumber("REVIEW_FINDINGS_TOOL_ROUNDS", 0)));
+  // Defaults to 2, not 0. Measured against five known defects on the same
+  // diff: with no rounds the model named one of them, with rounds it named
+  // four. Investigation is not a cost optimisation to be switched off by
+  // default — it is most of the reviewer's accuracy.
+  return Math.max(0, Math.floor(envNumber("REVIEW_FINDINGS_TOOL_ROUNDS", 2)));
 })();
 /** Distinct file paths fetch_file may resolve (success or failure) per review. */
-const MAX_FETCH_FILE_CALLS = 5;
+const MAX_FETCH_FILE_CALLS = envNumber("REVIEW_MAX_FETCH_FILE_CALLS", 10);
 /** Per-file truncation — 5 × 20k ≈ one MAX_DIFF_CHARS-sized addition worst case. */
 const MAX_FETCHED_FILE_CHARS = 20_000;
 /** Ceiling for one investigation read when the review itself is unbounded. */
@@ -145,7 +149,21 @@ You have a bounded investigation budget for this review: at most ${MAX_FETCH_FIL
 
 const FINDINGS_SYSTEM_PROMPT = `You are a senior engineer conducting a real pull request review. ${INJECTION_DEFENSE}
 
-Prioritize concrete bugs, security defects and observable regressions introduced by this diff. For each finding, explain the triggering input or execution path, the changed code that causes the failure, and its observable impact. Check surrounding guards and callers for counterevidence before reporting. Do not treat a missing test, a risk signal or a stylistic preference as proof of a bug. Never speculate about code you cannot see. Include a confidence level, but confidence alone is not evidence.
+Report only defects introduced by this diff. For each finding, name the triggering input or execution path, the changed line that causes the failure, and the observable consequence. Check surrounding guards and callers for counterevidence before reporting.
+
+An empty findings array is a correct and common answer. A diff with nothing wrong in it must produce zero findings — do not fill the list to look thorough.
+
+Never report any of the following. They are not findings:
+- code that is correct, safe, harmless, equivalent, or an improvement
+- a description of what the diff does, or an observation that a change is neutral or refactoring-only
+- a naming, formatting or style preference
+- a missing test, a missing comment, or a risk signal on its own
+- anything you cannot tie to a specific changed line
+- anything whose explanation ends up concluding the code is fine
+
+Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe. Every finding is independently assessed afterwards and rejected unless it can be tied to an exact line, so a guess costs you the finding and costs the author their trust in the rest.
+
+Include a confidence level, but confidence alone is never evidence.
 
 If an "AUTOMATED LINT/STATIC-ANALYSIS FINDINGS" section is present below, treat those as already reported — do not include them again in your own findings list. Focus on what deterministic tools can't catch: logic errors, security issues requiring reasoning, missing tests, design concerns.
 
