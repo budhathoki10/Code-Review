@@ -15,11 +15,18 @@ const app = new App({
 
 const { data } = await app.octokit.request("GET /app");
 console.log("app:", data.slug);
-console.log("webhook url:", data.hook_attributes?.url ?? "(none configured)");
-console.log("webhook active:", data.hook_attributes?.active);
 console.log("subscribed events:", (data.events ?? []).join(", ") || "(none)");
 
-const url = data.hook_attributes?.url;
+// GET /app does NOT carry the configured webhook URL — hook_attributes is
+// undefined on it, so reading that reported "(none configured)" for an app
+// whose webhook was set and working, and sent a whole debugging session down
+// the manual-replay path. The delivery config lives on its own endpoint.
+const config = await app.octokit.request("GET /app/hook/config").then((r) => r.data).catch(() => ({}));
+console.log("webhook url:", config.url ?? "(none configured)");
+console.log("webhook secret set:", Boolean(config.secret));
+console.log("content type:", config.content_type ?? "(unset)");
+
+const url = config.url;
 if (url) {
   try {
     const res = await fetch(url, { method: "POST", body: "{}", signal: AbortSignal.timeout(8000) });
