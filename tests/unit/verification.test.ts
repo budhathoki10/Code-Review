@@ -166,6 +166,22 @@ describe("bounded blocking verification", () => {
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(result.findings[0].verification?.evidence).toEqual([{ file: finding.file, line: 2, quote: "  return 10 / x;" }]);
   });
+  it("assesses a finding whose line falls outside the diff hunks", async () => {
+    // Previously skipped outright, which meant the LEAST trustworthy findings
+    // we produce — the ones whose anchor drifted, or that describe code this
+    // PR never touched — reached the author with no assessment at all. The
+    // verifier can see them now and say so; its prompt already rejects
+    // pre-existing issues and anything it cannot tie to a supplied line.
+    const outside: FindingDoc = { ...finding, line: 99, title: "Unrelated concern" };
+    create.mockResolvedValue(response([
+      { id: findingId(outside), decision: "reject", reason: "Line 99 is not part of this change.", evidence: [] },
+    ]));
+    const result = await verifyBlockingFindings([outside], [file], context);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(result.findings).toEqual([]);
+    expect(result.rejected[0].verification?.status).toBe("rejected");
+  });
+
   it("does not pay for an unanchored finding", async () => {
     const result = await verifyBlockingFindings([{ ...finding, line: undefined }], [file], context);
     expect(result.usage.calls).toBe(0); expect(create).not.toHaveBeenCalled(); expect(fetchFile).not.toHaveBeenCalled();

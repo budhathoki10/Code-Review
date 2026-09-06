@@ -151,7 +151,15 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   for (const finding of ordered.slice(0, maxFindings)) {
     if (Date.now() >= deadlineAt) break;
     const file = byFile.get(finding.file);
-    if (!file?.patch || !finding.line || !lines.get(finding.file)?.has(finding.line)) continue;
+    // A line the diff does not contain is no longer a reason to skip assessment.
+    // Requiring it here meant a finding whose anchor drifted a line or two — or
+    // that describes code the PR did not touch — went to the author with NO
+    // assessment at all, which is the weakest possible handling of the least
+    // trustworthy findings we produce. The verifier can now see it and say so:
+    // its prompt already rejects pre-existing issues and anything that cannot
+    // be tied to a supplied line, and head context is fetched from the real
+    // file, so it has what it needs to make that call.
+    if (!file?.patch || !finding.line) continue;
     // Fetch only candidate files. No model-driven exploration loop.
     if (!contentCache.has(finding.file)) {
       const content = await getFileContent(repoContext.installationId, repoContext.owner, repoContext.repo, finding.file, repoContext.ref, { signal: contextTimeout() })
@@ -169,8 +177,11 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
       const match = h.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
       return match && finding.line! >= Number(match[1]) && finding.line! < Number(match[1]) + Number(match[2] ?? 1);
     });
-    if (!hunk) continue;
-    const item = { id: finding.id!, finding: { file: finding.file, line: finding.line, title: finding.title.slice(0, 300), explanation: finding.explanation.slice(0, 1500), severity: finding.severity }, patch: hunk.slice(0, 3500), headContext };
+    // Whole patch when the line falls outside every hunk. Passing one unrelated
+    // hunk would misrepresent it as the hunk containing the finding; passing
+    // nothing at all is what used to drop the candidate unassessed.
+    const patchForItem = hunk ?? file.patch;
+    const item = { id: finding.id!, finding: { file: finding.file, line: finding.line, title: finding.title.slice(0, 300), explanation: finding.explanation.slice(0, 1500), severity: finding.severity }, patch: patchForItem.slice(0, 3500), headContext };
     // Shrunk to fit a request of its OWN, not appended to whatever is already
     // packed. Measuring against the running payload made an item's admission
     // depend on its position in the queue, which is how a finding got dropped
