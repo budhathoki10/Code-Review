@@ -166,6 +166,29 @@ describe("bounded blocking verification", () => {
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(result.findings[0].verification?.evidence).toEqual([{ file: finding.file, line: 2, quote: "  return 10 / x;" }]);
   });
+  it("never submits more findings in one request than the schema accepts", async () => {
+    // Found by CodeRabbit on PR #84. decisionSchema caps decisions at 8 while
+    // the batch packer bounded a batch only by BYTES, so once
+    // REVIEW_VERIFICATION_MAX_FINDINGS went past 3 a batch could carry more
+    // than 8 findings. A compliant answer to that request then fails parsing on
+    // cardinality alone and the WHOLE batch goes unassessed — every finding in
+    // it keeps the "skipped" status, which canBlock() can never promote and
+    // which still posts to the author.
+    const many = Array.from({ length: 11 }, (_, index) => ({ ...finding, title: `Concern ${index}` }));
+    create.mockImplementation((params: { messages: { content: string }[] }) => {
+      const items = JSON.parse(params.messages[1].content) as { id: string }[];
+      expect(items.length).toBeLessThanOrEqual(8);
+      return Promise.resolve(response(items.map((item) => decision({ id: item.id, decision: "downgrade", reason: "Advisory." }))));
+    });
+
+    const result = await verifyBlockingFindings(many, [file], context, undefined, Date.now() + 120_000);
+
+    expect(create.mock.calls.length).toBeGreaterThan(1);
+    // Every finding assessed, none left on the up-front "skipped" status.
+    expect(result.findings).toHaveLength(11);
+    expect(result.findings.every((f) => f.verification?.status === "downgraded")).toBe(true);
+  });
+
   it("assesses a finding whose line falls outside the diff hunks", async () => {
     // Previously skipped outright, which meant the LEAST trustworthy findings
     // we produce — the ones whose anchor drifted, or that describe code this

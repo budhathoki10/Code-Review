@@ -25,9 +25,12 @@ const REPO = process.env.REPLAY_REPO ?? "Code-Review";
 const TARGET = process.env.REPLAY_TARGET ?? "http://localhost:3000/api/github/webhook";
 
 async function main() {
-  if (!PR) throw new Error("set REPLAY_PR to the pull request number");
+  // Truthiness alone accepts -1, 1.5 and Infinity, each of which reaches the
+  // GitHub client as an identifier and fails somewhere less obvious.
+  const positiveInt = (value: number) => Number.isInteger(value) && value > 0;
+  if (!positiveInt(PR)) throw new Error("set REPLAY_PR to a positive integer pull request number");
   const installationId = Number(process.env.REPLAY_INSTALLATION_ID ?? process.env.BENCH_INSTALLATION_ID);
-  if (!installationId) throw new Error("set REPLAY_INSTALLATION_ID");
+  if (!positiveInt(installationId)) throw new Error("set REPLAY_INSTALLATION_ID to a positive integer");
 
   const octokit = await getInstallationOctokit(installationId);
   const { data: pr } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
@@ -72,7 +75,12 @@ async function main() {
     },
     body,
   });
-  console.log(`PR #${PR} ${ACTION} @ ${pr.head.sha.slice(0, 7)} -> HTTP ${response.status} ${await response.text()}`);
+  // fetch resolves for 4xx and 5xx, so without this the script printed the
+  // failure and still exited 0 — which is how an HTTP 500 from the webhook
+  // route read as a successful replay until someone happened to look closely.
+  const text = await response.text();
+  console.log(`PR #${PR} ${ACTION} @ ${pr.head.sha.slice(0, 7)} -> HTTP ${response.status} ${text}`);
+  if (!response.ok) throw new Error(`webhook rejected the replay: HTTP ${response.status}`);
 }
 
 main().then(() => process.exit(0), (error) => { console.error(String(error)); process.exit(1); });
