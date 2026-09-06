@@ -54,14 +54,37 @@ describe("bounded blocking verification", () => {
   });
 
   it("shrinks source context to fit instead of dropping a verifiable candidate", async () => {
-    vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "8000");
+    // The budget is in TOKENS and the request is measured in BYTES, so the
+    // ceiling is the converted one. Comparing the two units directly is the
+    // defect this assertion used to pin: it passed only because the code under
+    // test made the same mistake, and holding it there spent about a quarter of
+    // the configured budget — enough that a candidate with a real hunk was
+    // shrunk to its floor and every candidate after the first was dropped
+    // before the call, permanently unable to block.
+    vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "3000");
     fetchFile.mockResolvedValue(source + ("x".repeat(400) + "\n").repeat(20));
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(create).toHaveBeenCalledTimes(1);
     const params = create.mock.calls[0][0];
-    expect(JSON.parse(params.messages[1].content)[0].headContext.length).toBeLessThan(4500);
-    expect(Buffer.byteLength(JSON.stringify(params), "utf8") + params.max_tokens + 512).toBeLessThanOrEqual(8000);
+    const byteBudget = (3000 - params.max_tokens - 512) * 3.5;
+    // Genuinely shrunk: the untrimmed window for this source is far larger.
+    expect(JSON.parse(params.messages[1].content)[0].headContext.length).toBeLessThan(3000);
+    expect(Buffer.byteLength(JSON.stringify(params), "utf8")).toBeLessThanOrEqual(byteBudget);
     expect(canBlock(result.findings[0])).toBe(true);
+  });
+
+  it("fits every candidate in one batch at the default budget", async () => {
+    // The regression the unit fix exists for: three high-severity findings on a
+    // realistic hunk used to overflow the request after the first, and the two
+    // that never reached the model kept the "skipped" status skippedVerification
+    // set — so they could not block whatever the verifier would have said.
+    const many = [finding, { ...finding, title: "Unchecked index" }, { ...finding, title: "Missing guard" }];
+    const wide = [{ ...file, patch: file.patch + "\n" + "+  const padding = compute(input);\n".repeat(60) }];
+    fetchFile.mockResolvedValue(source + "const value = compute(input);\n".repeat(60));
+    create.mockResolvedValue(response(many.map((item) => decision({ id: findingId(item) }))));
+    await verifyBlockingFindings(many, wide, context);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(create.mock.calls[0][0].messages[1].content)).toHaveLength(3);
   });
   it("spends no calls or file reads without high/critical findings", async () => {
     const result = await verifyBlockingFindings([{ ...finding, severity: "medium" }], [file], context);

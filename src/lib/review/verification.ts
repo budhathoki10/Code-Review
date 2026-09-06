@@ -70,6 +70,19 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   const budget = boundedEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", 12000, 32000);
   const outputTokens = Math.min(1800, Math.floor(budget / 3));
   if (maxFindings === 0 || outputTokens < 256) return result;
+  // The budget is in TOKENS; the cheap way to measure a built request is UTF-8
+  // BYTES. Comparing the two directly spent roughly a quarter of the configured
+  // budget: with the defaults it left 7553 bytes for findings, so a candidate
+  // carrying a real hunk (~9000 bytes) had its head window shrunk to the 500
+  // char floor and every candidate after the first was dropped before the call.
+  // Those dropped ones keep the "skipped" status set above, and canBlock()
+  // requires "accepted" — so findings 2 and 3 could never block, whatever the
+  // model said. 3.5 is the low end of the observed bytes-per-token ratio for
+  // code and JSON, so this still under-estimates capacity rather than
+  // over-committing it. The output reservation and framing allowance are
+  // subtracted in token space first, so the request still cannot exceed the
+  // configured token budget.
+  const inputByteBudget = Math.floor((budget - outputTokens - 512) * 3.5);
 
   const byFile = new Map(files.map((file) => [file.filename, file]));
   const lines = computeLineContents(files);
@@ -80,7 +93,16 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   const payload: { id: string; finding: Pick<FindingDoc, "file" | "line" | "title" | "explanation" | "severity">; patch: string; headContext: string }[] = [];
   const source = new Map<string, Map<number, string>>();
   const contentCache = new Map<string, string | undefined>();
-  const contextSignal = AbortSignal.timeout(Math.max(1, Math.min(6000, deadlineAt - Date.now())));
+  // Per fetch, not per loop. AbortSignal.timeout starts counting when it is
+  // constructed, so one signal shared across these sequential fetches gave the
+  // last candidate whatever the earlier ones — and the shrink loop between
+  // them — left over, often nothing. getFileContent rethrows on abort, the
+  // catch below turns that into undefined, and the head window silently
+  // degrades to diff-only lines: no counterevidence to find and no head line
+  // to quote, which makes "accepted" unreachable for that candidate. Each
+  // signal is still clamped to the shared deadline, and the loop head checks
+  // it too, so the outer bound is unchanged.
+  const contextTimeout = () => AbortSignal.timeout(Math.max(1, Math.min(6000, deadlineAt - Date.now())));
 
   const paramsFor = (items: typeof payload): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
     model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
@@ -95,7 +117,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
     if (!file?.patch || !finding.line || !lines.get(finding.file)?.has(finding.line)) continue;
     // Fetch only candidate files. No model-driven exploration loop.
     if (!contentCache.has(finding.file)) {
-      const content = await getFileContent(repoContext.installationId, repoContext.owner, repoContext.repo, finding.file, repoContext.ref, { signal: contextSignal })
+      const content = await getFileContent(repoContext.installationId, repoContext.owner, repoContext.repo, finding.file, repoContext.ref, { signal: contextTimeout() })
         .catch(() => undefined);
       contentCache.set(finding.file, content);
     }
@@ -114,12 +136,12 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
     const item = { id: finding.id!, finding: { file: finding.file, line: finding.line, title: finding.title.slice(0, 300), explanation: finding.explanation.slice(0, 1500), severity: finding.severity }, patch: hunk.slice(0, 3500), headContext };
     // UTF-8 bytes are a deliberately conservative token proxy, not a tokenizer claim.
     // Include schemas, metadata and a framing allowance; never send a batch exceeding it.
-    while (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") + outputTokens + 512 > budget && item.headContext.length > 500) {
+    while (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") > inputByteBudget && item.headContext.length > 500) {
       const radius = Math.max(1, Math.floor(item.headContext.split("\n").length / 4));
       item.headContext = item.headContext.split("\n").filter((line) => Math.abs(Number(line.match(/^(\d+):/)?.[1]) - finding.line!) <= radius).join("\n");
       if (radius === 1) break;
     }
-    if (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") + outputTokens + 512 > budget) continue;
+    if (Buffer.byteLength(JSON.stringify(paramsFor([...payload, item])), "utf8") > inputByteBudget) continue;
     payload.push(item);
     const evidenceLines = source.get(finding.file) ?? new Map<number, string>();
     for (const line of item.headContext.split("\n")) {
