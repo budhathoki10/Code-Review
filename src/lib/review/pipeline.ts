@@ -35,6 +35,7 @@ import {
 } from "@/lib/db/collections";
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
 import { normalizeDisabledSeverities } from "@/lib/review/severity";
+import { envNumber } from "@/lib/env";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
@@ -48,7 +49,11 @@ const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high
  * final posted list — it just didn't have them available for the AI's own
  * "don't repeat these" context that one time.
  */
-const STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS = Number(process.env.STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS ?? 8_000);
+// envNumber, not `?? 8_000`: that only fires when the variable is ABSENT, and
+// a present-but-unparseable value yields NaN. `setTimeout(fn, NaN)` fires
+// immediately, so the race below would always resolve `[]` and the model would
+// silently never see a static finding while the logs read entirely normally.
+const STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS = envNumber("STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS", 8_000);
 
 function meetsThreshold(severity: FindingDoc["severity"], threshold: FindingDoc["severity"]): boolean {
   return SEVERITY_ORDER.indexOf(severity) >= SEVERITY_ORDER.indexOf(threshold);
@@ -304,7 +309,16 @@ export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promi
     // comment this review already owns — the same edit-in-place rule the
     // normal path follows — and record the id so the eventual successful
     // review overwrites the paused notice instead of posting beneath it.
-    const existing = await reviewsCol.findOne({ pullRequestId, headSha });
+    // The comment this PR owns, not merely the one this head's row happens to
+    // hold. The success path below resolves against the last *completed*
+    // review, which is a different (earlier) head — this head's row carries
+    // `incomplete: rate-limited` and is excluded from that query. So posting a
+    // fresh notice here orphaned it: the successful retry edited the other
+    // comment and left "This review was paused" standing on the PR forever.
+    const existing = await reviewsCol.findOne(
+      { pullRequestId, githubCommentId: { $exists: true } },
+      { sort: { createdAt: -1 } },
+    );
     const body = [
       "##  AI Code Review",
       "",
@@ -630,10 +644,14 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       const content = await getFileContent(githubInstallationId, owner, repo, risk.file, headSha, { signal: riskContextSignal }).catch(() => undefined);
       return `${risk.file}: ${risk.reasons.join(", ")}\n${content === undefined ? "Surrounding code unavailable." : codeWindow(content, firstLine, 25, 3000)}`;
     })).then((windows) => windows.join("\n\n"));
+    // Timer handle kept so the loser can be cancelled: when static analysis
+    // wins the race the timer stayed armed for the rest of its window, keeping
+    // the event loop non-empty long after the work was done.
+    let contextTimer: NodeJS.Timeout | undefined;
     const staticFindingsForContext = await Promise.race([
       staticFindingsPromise,
-      new Promise<FindingDoc[]>((resolve) => setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS)),
-    ]);
+      new Promise<FindingDoc[]>((resolve) => { contextTimer = setTimeout(() => resolve([]), STATIC_ANALYSIS_CONTEXT_TIMEOUT_MS); }),
+    ]).finally(() => clearTimeout(contextTimer));
 
     const riskContext = await riskContextPromise;
     markStage("context");
@@ -892,13 +910,22 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         overflowFindings: overflow,
       }) + formatConfigErrors(configErrors);
 
+    // This head's own row first, then the last completed review's. A
+    // rate-limited earlier attempt on THIS head recorded its notice comment on
+    // this row, and that notice is what has to be overwritten with the real
+    // review rather than left standing beside it — which is what happens on a
+    // PR whose very first review was the rate-limited one, where there is no
+    // previousReview to fall back to. `existingReview` is re-read at the top of
+    // every BullMQ attempt, so on the retry it carries what the failed attempt
+    // wrote.
+    const reuseCommentId = existingReview?.githubCommentId ?? previousReview?.githubCommentId;
     let commentId: number;
-    if (previousReview?.githubCommentId) {
+    if (reuseCommentId) {
       // Edit the existing comment in place rather than posting a new one —
       // keeps a PR with many small pushes to one up-to-date comment instead
       // of a new comment spammed on every push.
-      await updateSummaryComment(githubInstallationId, owner, repo, previousReview.githubCommentId, commentBody);
-      commentId = previousReview.githubCommentId;
+      await updateSummaryComment(githubInstallationId, owner, repo, reuseCommentId, commentBody);
+      commentId = reuseCommentId;
       log.info({ reviewId, commentId }, "updated summary comment in place");
     } else {
       commentId = await postSummaryComment(githubInstallationId, owner, repo, prNumber, commentBody);

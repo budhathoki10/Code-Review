@@ -20,6 +20,7 @@ const {
   updateSummaryCommentMock,
   postInlineReviewMock,
   verifyBlockingFindingsMock,
+  getIncrementalDiffMock,
 } = vi.hoisted(() => ({
   generateChunkedReviewMock: vi.fn(),
   getPullRequestDiffMock: vi.fn(),
@@ -27,6 +28,10 @@ const {
   updateSummaryCommentMock: vi.fn(),
   postInlineReviewMock: vi.fn(),
   verifyBlockingFindingsMock: vi.fn(),
+  // Resolves null by default: bare vi.fn() returns undefined, and the pipeline
+  // calls .catch() on the result, so an incremental review threw a TypeError
+  // instead of taking the documented fall-back-to-full-diff path.
+  getIncrementalDiffMock: vi.fn().mockResolvedValue(null),
 }));
 
 /** Fails the write that sets `status`, i.e. the first thing after the checkpoint. */
@@ -89,7 +94,7 @@ vi.mock("@/lib/db/collections", () => ({
 vi.mock("@/lib/github/diff", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getPullRequestDiff: getPullRequestDiffMock,
-  getIncrementalDiff: vi.fn(),
+  getIncrementalDiff: getIncrementalDiffMock,
 }));
 
 vi.mock("@/lib/ai/review", async (importOriginal) => ({
@@ -125,6 +130,7 @@ import { runReviewPipeline } from "@/lib/review/pipeline";
 import { skippedVerification } from "@/lib/review/verification";
 import type { FindingDoc } from "@/lib/db/collections";
 import { canBlock } from "@/lib/review/finding-policy";
+import { GitHubRateLimitError } from "@/lib/github/file-content";
 
 beforeEach(() => {
   verifyBlockingFindingsMock.mockImplementation(async (findings: FindingDoc[]) => ({
@@ -175,6 +181,7 @@ function seed() {
 describe("retry reuses the AI checkpoint", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getIncrementalDiffMock.mockResolvedValue(null);
     failStatusWrite = false;
     seed();
 
@@ -321,6 +328,7 @@ describe("retry reuses the AI checkpoint", () => {
 describe("retry does not duplicate or orphan inline comments", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getIncrementalDiffMock.mockResolvedValue(null);
     failStatusWrite = false;
     seed();
 
@@ -447,5 +455,63 @@ describe("retry does not duplicate or orphan inline comments", () => {
     await runReviewPipeline(JOB, log);
 
     expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a rate-limited attempt does not orphan its notice comment", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getIncrementalDiffMock.mockResolvedValue(null);
+    failStatusWrite = false;
+    seed();
+    getPullRequestDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 4,
+      diffText: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;",
+      files: [{ filename: "src/a.ts", status: "modified", changes: 4, patch: "@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;", patchSource: "github" }],
+    });
+    generateChunkedReviewMock.mockResolvedValue({
+      verdict: "comment", summary: "Reviewed the change.", findings: [],
+      usage: { inputTokens: 1000, outputTokens: 200, totalTokens: 1200, calls: 3 }, chunkCount: 1, unreviewedFiles: [],
+    });
+    postSummaryCommentMock.mockResolvedValue(555);
+    postInlineReviewMock.mockResolvedValue([]);
+  });
+
+  it("overwrites the paused notice with the real review instead of posting beside it", async () => {
+    // Attempt 1 rate-limits and posts the "review paused" notice. The success
+    // path used to resolve its comment from `previousReview` only — which
+    // excludes this head's row, because the handler stamps `incomplete` on it —
+    // so the retry posted the real review as a SECOND comment and left the
+    // notice standing on the PR forever.
+    getPullRequestDiffMock.mockRejectedValueOnce(new GitHubRateLimitError("still limited", new Date()));
+    await expect(runReviewPipeline(JOB, log)).rejects.toThrow(GitHubRateLimitError);
+    expect(postSummaryCommentMock).toHaveBeenCalledTimes(1);
+    expect(postSummaryCommentMock.mock.calls[0][4]).toContain("paused");
+    expect(reviewDocs[0].githubCommentId).toBe(555);
+
+    await runReviewPipeline(JOB, log);
+
+    expect(postSummaryCommentMock).toHaveBeenCalledTimes(1);
+    expect(updateSummaryCommentMock).toHaveBeenCalledTimes(1);
+    expect(updateSummaryCommentMock.mock.calls[0][3]).toBe(555);
+    expect(updateSummaryCommentMock.mock.calls[0][4]).not.toContain("paused");
+  });
+
+  it("reuses the comment an earlier review already owns rather than posting a notice", async () => {
+    // The mirror image: a completed review at an earlier head already owns the
+    // PR's comment. The notice must edit that one, or the successful retry
+    // (which resolves against that same review) edits it instead and abandons
+    // the notice.
+    reviewDocs.push({
+      _id: "review-0", pullRequestId: JOB.pullRequestId, headSha: "older", status: "completed",
+      findings: [], githubCommentId: 111, coverageComplete: true, createdAt: Date.now() - 1000,
+    });
+    getPullRequestDiffMock.mockRejectedValueOnce(new GitHubRateLimitError("still limited", new Date()));
+
+    await expect(runReviewPipeline(JOB, log)).rejects.toThrow(GitHubRateLimitError);
+
+    expect(postSummaryCommentMock).not.toHaveBeenCalled();
+    expect(updateSummaryCommentMock).toHaveBeenCalledTimes(1);
+    expect(updateSummaryCommentMock.mock.calls[0][3]).toBe(111);
   });
 });
