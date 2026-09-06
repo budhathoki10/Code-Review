@@ -5,6 +5,7 @@ import type { FindingDoc } from "@/lib/db/collections";
 import { addUsage, usageFromResponse, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
 import { getFileContent, GitHubRateLimitError } from "@/lib/github/file-content";
 import { buildDiffText, type PullRequestFile } from "@/lib/github/diff";
+import { envNumber } from "@/lib/env";
 
 const findingSchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
@@ -118,8 +119,7 @@ export const MAX_FINDINGS_TOOL_ROUNDS = (() => {
   // `Math.max(0, NaN)` is NaN, so a non-numeric env value used to make the
   // round budget NaN — every `round <= roundsAvailable` comparison is then
   // false and the loop body never runs, which is not a mode anyone asked for.
-  const configured = Number(process.env.REVIEW_FINDINGS_TOOL_ROUNDS ?? 0);
-  return Number.isFinite(configured) ? Math.max(0, Math.floor(configured)) : 0;
+  return Math.max(0, Math.floor(envNumber("REVIEW_FINDINGS_TOOL_ROUNDS", 0)));
 })();
 /** Distinct file paths fetch_file may resolve (success or failure) per review. */
 const MAX_FETCH_FILE_CALLS = 5;
@@ -237,12 +237,6 @@ function appendVerdictLine(summary: string, verdict: ReviewResult["verdict"]): s
   return `${withoutExisting}\n\n${VERDICT_LINES[verdict]}`;
 }
 
-function envNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 /**
  * Resolves one fetch_file tool call. Never throws — a bad/nonexistent path
  * the model guesses becomes an error string tool result instead, so the
@@ -282,7 +276,12 @@ async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<st
   const content = await getFileContent(
     ctx.installationId, ctx.owner, ctx.repo, path, ctx.ref,
     { signal: AbortSignal.timeout(timeoutMs) },
-  ).catch(() => undefined);
+    // A rate limit is the one failure that is not about this path. Swallowing
+    // it turned "GitHub stopped answering" into "that file does not exist" for
+    // the model, and made runFindingsWithBisect's GitHubRateLimitError guard
+    // unreachable — so the review carried on and posted a partial result built
+    // on absent context instead of stopping and retrying later.
+  ).catch((error) => { if (error instanceof GitHubRateLimitError) throw error; return undefined; });
   if (content === undefined) {
     const result = `Error: could not read "${path}" (not found, not a regular file, or the fetch failed).`;
     cache.set(path, result);
@@ -585,7 +584,12 @@ function dedupeFindings(findings: ReviewResult["findings"]): ReviewResult["findi
  * rather than retried, which is the same honesty rule the size budget
  * already follows (see formatCoverageNote).
  */
-const MAX_BISECT_ATTEMPTS = Number(process.env.REVIEW_MAX_BISECT_ATTEMPTS ?? 12);
+// envNumber, not `Number(env ?? 12)`: the latter only falls back when the
+// variable is ABSENT, so a present-but-unparseable value produced NaN and
+// `budget.remaining <= 0` was then false forever — the budget this constant
+// exists to enforce silently stopped existing, and an outage would walk the
+// whole split tree. Same NaN trap already fixed at MAX_FINDINGS_TOOL_ROUNDS.
+const MAX_BISECT_ATTEMPTS = envNumber("REVIEW_MAX_BISECT_ATTEMPTS", 12);
 
 /**
  * How many chunks must fail against the provider before the rest of the
@@ -597,7 +601,9 @@ const MAX_BISECT_ATTEMPTS = Number(process.env.REVIEW_MAX_BISECT_ATTEMPTS ?? 12)
  * meant a single blip discarded chunks that had not been attempted, which is
  * how a 31-file review returned findings for none of them.
  */
-const PROVIDER_FAILURE_THRESHOLD = Number(process.env.REVIEW_PROVIDER_FAILURE_THRESHOLD ?? 2);
+// NaN here makes `providerFailures >= threshold` false forever, so a real
+// outage is never recognised and every chunk pays for its own failure.
+const PROVIDER_FAILURE_THRESHOLD = envNumber("REVIEW_PROVIDER_FAILURE_THRESHOLD", 2);
 
 interface BisectBudget {
   remaining: number;
@@ -761,9 +767,9 @@ export async function generateChunkedReview(
 
   // A caller that passes no deadline is asking for no deadline, and the
   // pipeline — the only caller that must be bounded — always passes one.
-  // Substituting a default here made "unbounded" inexpressible and silently
-  // capped callers that had deliberately opted out.
-  if (options?.deadlineAt !== undefined) options = { ...options, deadlineAt: options.deadlineAt };
+  // Substituting a default here would make "unbounded" inexpressible and
+  // silently cap callers that deliberately opted out, so `deadlineAt` stays
+  // optional all the way down and is never defaulted.
   const results = await mapWithConcurrency(chunks, Number.isFinite(CHUNK_CONCURRENCY) ? Math.min(4, CHUNK_CONCURRENCY) : 2, (files) =>
     runFindingsWithBisect(model, sharedParams, files, options, budget, fileCache),
   );

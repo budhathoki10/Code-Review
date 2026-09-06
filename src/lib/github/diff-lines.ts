@@ -1,5 +1,6 @@
 import type { FindingDoc } from "@/lib/db/collections";
 import type { PullRequestFile } from "@/lib/github/diff";
+import { envNumber } from "@/lib/env";
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
@@ -311,7 +312,11 @@ export function mapFindingsToInlineComments(
  * didn't. The cap is per REVIEW, not per file or per chunk, because the
  * reader's attention budget is per review.
  */
-export const MAX_INLINE_COMMENTS = Number(process.env.MAX_INLINE_COMMENTS ?? 25);
+// envNumber, not `Number(env ?? 25)`: the failure that shape produces here is
+// silent and total. NaN makes `comments.length <= limit` false and
+// `ranked.slice(0, limit)` empty, so a typo in this one variable posts ZERO
+// inline comments and reports nothing anywhere.
+export const MAX_INLINE_COMMENTS = envNumber("MAX_INLINE_COMMENTS", 25);
 
 const SEVERITY_RANK: Record<FindingDoc["severity"], number> = {
   critical: 0,

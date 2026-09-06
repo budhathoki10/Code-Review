@@ -302,12 +302,11 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
       continue;
     }
 
-    let candidate = file;
     const originalPatch = file.patch ?? "";
-    if (originalPatch.length > MAX_SINGLE_FILE_CHARS) {
-      candidate = { ...file, patch: `${originalPatch.slice(0, MAX_SINGLE_FILE_CHARS)}${TRUNCATION_MARKER}` };
-      truncatedFiles.push(file.filename);
-    }
+    const oversized = originalPatch.length > MAX_SINGLE_FILE_CHARS;
+    const candidate = oversized
+      ? { ...file, patch: `${originalPatch.slice(0, MAX_SINGLE_FILE_CHARS)}${TRUNCATION_MARKER}` }
+      : file;
 
     const size = patchSize(candidate);
     const wouldOverflow = currentChars + size > MAX_DIFF_CHARS || current.length >= MAX_DIFF_FILES;
@@ -322,6 +321,10 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
       }
     }
 
+    // Recorded only once the file is actually going into a chunk. Recording it
+    // at the point of truncation listed a file that then lost its chunk slot as
+    // BOTH truncated and skipped-for-budget in the same coverage note.
+    if (oversized) truncatedFiles.push(file.filename);
     current.push(candidate);
     currentChars += size;
   }
