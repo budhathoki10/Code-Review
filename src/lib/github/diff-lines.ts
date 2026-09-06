@@ -1,5 +1,6 @@
 import type { FindingDoc } from "@/lib/db/collections";
 import type { PullRequestFile } from "@/lib/github/diff";
+import { envNumber } from "@/lib/env";
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
@@ -263,6 +264,11 @@ function formatInlineComment(finding: FindingDoc): string {
   const lines = [
     ` **AI Reviewer** — ${capitalize(finding.category)} · ${capitalize(finding.severity)}`,
     finding.explanation,
+    finding.proof?.status === "reproduced" ? "Regression reproduced — proposed test passes on base and fails on head."
+      : finding.verification?.status === "accepted"
+      ? "Probable — evidence checked by AI; not test-proven."
+      : finding.verification ? `Advisory — ${finding.verification.reason}` : "",
+    ...(finding.verification?.status === "accepted" ? [`Assessment: ${finding.verification.reason}`, ...finding.verification.evidence.map((e) => `Evidence at \`${e.file}:${e.line}\`: \`${e.quote.replace(/`/g, "'")}\``)] : []),
   ];
   if (finding.suggestion) {
     const committable = looksLikeCleanCodeSuggestion(finding.suggestion);
@@ -306,7 +312,11 @@ export function mapFindingsToInlineComments(
  * didn't. The cap is per REVIEW, not per file or per chunk, because the
  * reader's attention budget is per review.
  */
-export const MAX_INLINE_COMMENTS = Number(process.env.MAX_INLINE_COMMENTS ?? 25);
+// envNumber, not `Number(env ?? 25)`: the failure that shape produces here is
+// silent and total. NaN makes `comments.length <= limit` false and
+// `ranked.slice(0, limit)` empty, so a typo in this one variable posts ZERO
+// inline comments and reports nothing anywhere.
+export const MAX_INLINE_COMMENTS = envNumber("MAX_INLINE_COMMENTS", 25);
 
 const SEVERITY_RANK: Record<FindingDoc["severity"], number> = {
   critical: 0,

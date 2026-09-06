@@ -41,6 +41,23 @@ describe("getFileContent", () => {
     expect(await getFileContent(1, "acme", "widgets", "src/a.ts", "sha1")).toBe("hello world");
   });
 
+  it("optional context respects cancellation before making any request", async () => {
+    const controller = new AbortController(); controller.abort();
+    await expect(getFileContent(1, "acme", "widgets", "a.ts", "sha", { signal: controller.signal })).rejects.toThrow();
+    expect(requestMock).not.toHaveBeenCalled();
+  });
+
+  it("optional context never waits through rate limits or caches the failure", async () => {
+    const controller = new AbortController();
+    requestMock.mockRejectedValueOnce(rateLimited(Math.floor(Date.now() / 1000) + 60));
+    await expect(getFileContent(1, "acme", "widgets", "a.ts", "sha", { signal: controller.signal })).rejects.toThrow();
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    expect(requestMock).toHaveBeenCalledWith(CONTENTS, expect.objectContaining({ request: { signal: controller.signal } }));
+    requestMock.mockResolvedValue({ data: { type: "file", content: b64("recovered"), sha: "blob" } });
+    expect(await getFileContent(1, "acme", "widgets", "a.ts", "sha")).toBe("recovered");
+    expect(requestMock).toHaveBeenCalledTimes(2);
+  });
+
   it("never fetches the same path:ref twice", async () => {
     requestMock.mockResolvedValue({ data: { type: "file", content: b64("cached"), sha: "abc" } });
 

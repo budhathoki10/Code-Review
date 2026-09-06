@@ -1,6 +1,7 @@
 import picomatch from "picomatch";
 import { MAX_DIFF_CHARS, MAX_DIFF_FILES, buildDiffText, type PullRequestFile } from "@/lib/github/diff";
 import { triageFile, describeSkipReason, type SkipReason } from "@/lib/review/triage";
+import { riskReasons } from "@/lib/review/risk";
 
 /**
  * Hard ceiling on how many AI passes one review may spend on an oversized
@@ -274,6 +275,8 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
   }
 
   const ranked = [...analyzableFiles].sort((a, b) => {
+    const riskDelta = riskReasons(b).length - riskReasons(a).length;
+    if (riskDelta !== 0) return riskDelta;
     const priorityDelta = filePriority(a.filename) - filePriority(b.filename);
     if (priorityDelta !== 0) return priorityDelta;
     return patchSize(a) - patchSize(b);
@@ -299,12 +302,11 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
       continue;
     }
 
-    let candidate = file;
     const originalPatch = file.patch ?? "";
-    if (originalPatch.length > MAX_SINGLE_FILE_CHARS) {
-      candidate = { ...file, patch: `${originalPatch.slice(0, MAX_SINGLE_FILE_CHARS)}${TRUNCATION_MARKER}` };
-      truncatedFiles.push(file.filename);
-    }
+    const oversized = originalPatch.length > MAX_SINGLE_FILE_CHARS;
+    const candidate = oversized
+      ? { ...file, patch: `${originalPatch.slice(0, MAX_SINGLE_FILE_CHARS)}${TRUNCATION_MARKER}` }
+      : file;
 
     const size = patchSize(candidate);
     const wouldOverflow = currentChars + size > MAX_DIFF_CHARS || current.length >= MAX_DIFF_FILES;
@@ -319,6 +321,10 @@ export function selectDiffForReview(files: PullRequestFile[], options: Selection
       }
     }
 
+    // Recorded only once the file is actually going into a chunk. Recording it
+    // at the point of truncation listed a file that then lost its chunk slot as
+    // BOTH truncated and skipped-for-budget in the same coverage note.
+    if (oversized) truncatedFiles.push(file.filename);
     current.push(candidate);
     currentChars += size;
   }

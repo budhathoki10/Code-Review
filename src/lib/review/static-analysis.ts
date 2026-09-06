@@ -852,6 +852,7 @@ export async function runStaticAnalysis(
   files: PullRequestFile[],
   commentableLines: Map<string, Set<number>>,
   log: Logger,
+  deadlineAt = Date.now() + 120_000,
 ): Promise<FindingDoc[]> {
   const candidates = files
     .filter((file) => file.status !== "removed")
@@ -861,13 +862,14 @@ export async function runStaticAnalysis(
   const findings: FindingDoc[] = [];
 
   for (const file of candidates) {
+    if (Date.now() >= deadlineAt) { log.warn("static analysis deadline reached; remaining files skipped"); break; }
     if (findings.length >= MAX_FINDINGS) break;
 
     const lines = commentableLines.get(file.filename);
     if (!lines || lines.size === 0) continue;
 
     try {
-      const content = await getFileContent(installationId, owner, repo, file.filename, headSha);
+      const content = await getFileContent(installationId, owner, repo, file.filename, headSha, { signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) });
       if (!content) continue;
 
       // Secrets first: a hardcoded credential outranks a lint nit, so it

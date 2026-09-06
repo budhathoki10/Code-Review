@@ -49,7 +49,7 @@ export const GLOBAL_USAGE_KEY = "global";
  * routine, since the worker runs 5 at a time — can't lose an update to a
  * lost-update race.
  */
-export async function recordUsage(reviewUsage: TokenUsage): Promise<void> {
+export async function recordUsage(reviewUsage: TokenUsage, countReview = true): Promise<void> {
   if (reviewUsage.calls === 0) return;
 
   const usageCol = await usage();
@@ -62,7 +62,7 @@ export async function recordUsage(reviewUsage: TokenUsage): Promise<void> {
         outputTokens: reviewUsage.outputTokens,
         totalTokens: reviewUsage.totalTokens,
         calls: reviewUsage.calls,
-        reviews: 1,
+        reviews: countReview ? 1 : 0,
       },
       $set: { updatedAt: now },
       $setOnInsert: { key: GLOBAL_USAGE_KEY, createdAt: now },

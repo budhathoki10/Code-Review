@@ -1,6 +1,7 @@
 import { getInstallationOctokit } from "@/lib/github/app";
 import type { FindingDoc } from "@/lib/db/collections";
 import { groupFindingsBySeverity } from "@/lib/review/review-display";
+import { evidenceLabel } from "@/lib/review/finding-policy";
 
 // this write the comment in the github
 const SEVERITY_EMOJI: Record<FindingDoc["severity"], string> = {
@@ -17,6 +18,8 @@ function formatFinding(finding: FindingDoc): string {
     `${SEVERITY_EMOJI[finding.severity]} **${capitalize(finding.severity)} — ${capitalize(finding.category)}**`,
     `${location} — ${finding.title}`,
     finding.explanation,
+    evidenceLabel(finding),
+    ...(finding.verification?.status === "accepted" ? [`Assessment: ${finding.verification.reason}`, ...finding.verification.evidence.map((e) => `Evidence at \`${e.file}:${e.line}\`: \`${e.quote.replace(/`/g, "'")}\``)] : []),
   ];
   if (finding.suggestion) {
     lines.push(`\n\`\`\`diff\n${finding.suggestion}\n\`\`\``);

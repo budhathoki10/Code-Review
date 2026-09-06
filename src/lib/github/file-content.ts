@@ -164,16 +164,19 @@ export async function getFileContent(
   repo: string,
   path: string,
   ref: string,
+  options?: { signal: AbortSignal },
 ): Promise<string | undefined> {
+  options?.signal.throwIfAborted();
   const key = cacheKey(installationId, owner, repo, path, ref);
   if (cache.has(key)) return cache.get(key);
 
   try {
     const octokit = await getInstallationOctokit(installationId);
 
-    const { data } = await withRateLimitRetry(() =>
-      octokit.request("GET /repos/{owner}/{repo}/contents/{path}", { owner, repo, path, ref }),
-    );
+    const request = () => octokit.request("GET /repos/{owner}/{repo}/contents/{path}", { owner, repo, path, ref, ...(options ? { request: options } : {}) });
+    // Optional review context must respect its short deadline rather than wait
+    // through the normal rate-limit backoff intended for essential diff reads.
+    const { data } = options ? await request() : await withRateLimitRetry(request);
 
     if (Array.isArray(data) || data.type !== "file") {
       return remember(key, undefined);
@@ -184,12 +187,13 @@ export async function getFileContent(
     if (data.content === "" || ("encoding" in data && data.encoding === TOO_LARGE)) {
       if (!data.sha) return remember(key, undefined);
       logger.info({ path, ref, size: data.size }, "file too large for the Contents API — falling back to the Blobs API");
-      return remember(key, await getBlobContent(installationId, owner, repo, data.sha));
+      return remember(key, await getBlobContent(installationId, owner, repo, data.sha, options));
     }
 
     if (!("content" in data)) return remember(key, undefined);
     return remember(key, Buffer.from(data.content, "base64").toString("utf-8"));
   } catch (error) {
+    if (options) throw error; // Never cache a timeout/rate limit as a missing file.
     if (error instanceof GitHubRateLimitError) throw error;
     logger.debug({ path, ref, err: error }, "could not fetch file content");
     return remember(key, undefined);
@@ -207,12 +211,13 @@ export async function getBlobContent(
   owner: string,
   repo: string,
   fileSha: string,
+  options?: { signal: AbortSignal },
 ): Promise<string | undefined> {
+  options?.signal.throwIfAborted();
   try {
     const octokit = await getInstallationOctokit(installationId);
-    const { data } = await withRateLimitRetry(() =>
-      octokit.request("GET /repos/{owner}/{repo}/git/blobs/{file_sha}", { owner, repo, file_sha: fileSha }),
-    );
+    const request = () => octokit.request("GET /repos/{owner}/{repo}/git/blobs/{file_sha}", { owner, repo, file_sha: fileSha, ...(options ? { request: options } : {}) });
+    const { data } = options ? await request() : await withRateLimitRetry(request);
 
     if (data.encoding !== "base64" || typeof data.content !== "string") return undefined;
 
@@ -221,6 +226,7 @@ export async function getBlobContent(
     if (decoded.slice(0, 8192).includes("\u0000")) return undefined;
     return decoded;
   } catch (error) {
+    if (options) throw error;
     if (error instanceof GitHubRateLimitError) throw error;
     logger.debug({ fileSha, err: error }, "could not fetch blob content");
     return undefined;

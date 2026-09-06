@@ -91,6 +91,20 @@ export interface PullRequestDoc {
 }
 
 export interface FindingDoc {
+  /** Stable within a PR, independent of wording in the explanation and line movement. */
+  id?: string;
+  verification?: {
+    status: "accepted" | "downgraded" | "rejected" | "skipped";
+    reason: string;
+    evidence: { file: string; line: number; quote: string }[];
+  };
+  proof?: {
+    status: "reproduced" | "not-reproduced" | "unavailable";
+    reason: string;
+    baseSha?: string;
+    headSha: string;
+    test: { exportName: string; args: unknown[]; expected: unknown };
+  };
   severity: "critical" | "high" | "medium" | "low" | "info";
   category: "security" | "bug" | "performance" | "quality" | "testing";
   file: string;
@@ -144,6 +158,9 @@ export interface FindingDoc {
 
 /** Per-review cost and coverage accounting. Every field is recorded even when zero, so a missing value means "review predates this", not "nothing happened". */
 export interface ReviewMetrics {
+  stages?: Record<string, number>;
+  /** Time since enqueue document creation; may include earlier attempts. */
+  queueWaitMs?: number;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -166,6 +183,28 @@ export interface ReviewMetrics {
 }
 
 export interface ReviewDoc {
+  /** Persist the reservation BEFORE calling the verifier so retries cannot spend again. */
+  /**
+   * One rating for the review as a whole, not per finding.
+   *
+   * Per-finding ratings asked the reader to judge each item separately, which
+   * put the control under every finding in every file and made the common
+   * case — "this review was useful" — cost N clicks instead of one. A single
+   * verdict is also the honest granularity: the thing a reader forms an
+   * opinion about is the review, and a false-positive rate over reviews is
+   * the measure that matches how the tool is actually experienced.
+   */
+  feedback?: { label: "correct" | "false-positive" | "duplicate"; userId: string; at: Date };
+  verificationCheckpoint?: {
+    state: "reserved" | "completed";
+    findings: FindingDoc[];
+    rejected: FindingDoc[];
+    usage: { inputTokens: number; outputTokens: number; totalTokens: number; calls: number };
+    candidates: number;
+    at: Date;
+  };
+  coverageComplete?: boolean;
+  riskFiles?: { file: string; reasons: string[] }[];
   _id?: string;
   pullRequestId: string;
   headSha: string;
