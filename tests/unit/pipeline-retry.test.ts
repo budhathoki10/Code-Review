@@ -515,3 +515,50 @@ describe("a rate-limited attempt does not orphan its notice comment", () => {
     expect(updateSummaryCommentMock.mock.calls[0][3]).toBe(111);
   });
 });
+
+describe("an incremental review says that is what it is", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getIncrementalDiffMock.mockResolvedValue(null);
+    failStatusWrite = false;
+    seed();
+    postSummaryCommentMock.mockResolvedValue(999);
+    postInlineReviewMock.mockResolvedValue([]);
+    generateChunkedReviewMock.mockResolvedValue({
+      verdict: "approve", summary: "Looks fine.", findings: [],
+      usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, calls: 1 }, chunkCount: 1, unreviewedFiles: [],
+    });
+    getPullRequestDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 4,
+      diffText: "d",
+      files: [{ filename: "src/a.ts", status: "modified", changes: 4, patch: "@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;", patchSource: "github" }],
+    });
+  });
+
+  it("names the baseline it diffed from instead of reading like a full review", async () => {
+    // "Reviewed 2 file(s) ... APPROVE" on a five-commit pull request is a
+    // statement about the latest push that a reader takes as a statement about
+    // the whole branch. Scope existed only in a log line; this file already
+    // makes exactly that argument for budget-skipped files.
+    pullRequestDocs[0].lastReviewedSha = "older99";
+    getIncrementalDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 2, diffText: "d",
+      files: [{ filename: "src/b.ts", status: "modified", changes: 2, patch: "@@ -1,1 +1,1 @@\n-const y = 1;\n+const y = 2;", patchSource: "github" }],
+    });
+
+    await runReviewPipeline(JOB, log);
+
+    const summary = String(reviewDocs[0].summary);
+    expect(summary).toContain("older9");
+    expect(summary).toContain("incremental review of the latest push");
+    expect(summary).not.toMatch(/^Reviewed 1 file\(s\)\./);
+  });
+
+  it("says nothing about a baseline when it reviewed the whole pull request", async () => {
+    await runReviewPipeline(JOB, log);
+
+    const summary = String(reviewDocs[0].summary);
+    expect(summary).toContain("Reviewed 1 file(s).");
+    expect(summary).not.toContain("incremental");
+  });
+});
