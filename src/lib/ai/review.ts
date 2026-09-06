@@ -92,7 +92,7 @@ export type SharedParams = {
   chat_template_kwargs?: { thinking: boolean };
 };
 
-/** Reasoning defaults on for discovery; assessment explicitly disables it. */
+/** Reasoning defaults on; both discovery and assessment follow NVIDIA_THINKING. */
 export function thinkingKwargs(
   thinking = process.env.NVIDIA_THINKING !== "false",
 ): { chat_template_kwargs?: { thinking: boolean } } {

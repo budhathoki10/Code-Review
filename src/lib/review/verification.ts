@@ -97,7 +97,15 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   // this a per-review total across several calls, not a request size.
   const maxFindings = boundedEnv("REVIEW_VERIFICATION_MAX_FINDINGS", 24, 48);
   const budget = boundedEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", 12000, 32000);
-  const outputTokens = Math.min(1800, Math.floor(budget / 3));
+  // Assessment follows NVIDIA_THINKING like discovery does, rather than being
+  // hardwired off. The cap has to move with it: reasoning traces are emitted
+  // into the SAME completion budget as the answer, so a ceiling sized for a
+  // bare tool call truncates the response before the tool call is reached —
+  // finish_reason "length", which this reads as an invalid verifier response
+  // and the entire batch then goes unassessed. Off, this is 1800 exactly as
+  // before.
+  const thinking = process.env.NVIDIA_THINKING !== "false";
+  const outputTokens = Math.min(boundedEnv("REVIEW_VERIFICATION_OUTPUT_TOKENS", thinking ? 6000 : 1800, 16000), Math.floor(budget / 2));
   if (maxFindings === 0 || outputTokens < 256) return result;
   // The budget is in TOKENS; the cheap way to measure a built request is UTF-8
   // BYTES. Comparing the two directly spent roughly a quarter of the configured
@@ -135,7 +143,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
 
   const paramsFor = (items: typeof payload): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
     model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
-    temperature: 0, max_tokens: outputTokens, ...thinkingKwargs(false),
+    temperature: 0, max_tokens: outputTokens, ...thinkingKwargs(thinking),
     messages: [{ role: "system", content: SYSTEM + (proofImage() && baseSha ? " You may propose one minimal regression test per accepted finding using test: {exportName,args,expected}, only for self-contained exported JS/TS functions with JSON inputs/outputs. Otherwise omit test. No arbitrary test scripts." : " Omit test; execution is unavailable.") }, { role: "user", content: JSON.stringify(items) }],
     tools: [TOOL], tool_choice: { type: "function", function: { name: "submit_verification" } },
   });
