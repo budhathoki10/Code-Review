@@ -86,8 +86,21 @@ describe("bounded blocking verification", () => {
     expect(create).toHaveBeenCalledTimes(1);
     expect(JSON.parse(create.mock.calls[0][0].messages[1].content)).toHaveLength(3);
   });
-  it("spends no calls or file reads without high/critical findings", async () => {
+  it("assesses findings below the blocking threshold too", async () => {
+    // Assessment used to consider only high/critical, so everything else
+    // reached the author unexamined — on a diff with no defects at all, three
+    // of five findings skipped the evidence gate entirely. Blocking was never
+    // the only thing worth being right about; being posted is the lower bar.
+    create.mockResolvedValue(response([decision({ id: findingId({ ...finding, severity: "medium" }), decision: "downgrade", reason: "Real but minor." })]));
     const result = await verifyBlockingFindings([{ ...finding, severity: "medium" }], [file], context);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(result.findings[0].verification?.status).toBe("downgraded");
+  });
+
+  it("spends nothing assessing deterministic linter output", async () => {
+    // Static analysis already points at an exact line. Letting a language
+    // model overrule ESLint on whether ESLint fired is not an improvement.
+    const result = await verifyBlockingFindings([{ ...finding, source: "static-analysis" }], [file], context);
     expect(result.usage.calls).toBe(0);
     expect(create).not.toHaveBeenCalled(); expect(fetchFile).not.toHaveBeenCalled();
   });
@@ -107,19 +120,51 @@ describe("bounded blocking verification", () => {
     expect(options).toMatchObject({ maxRetries: 0, timeout: 30000, signal: expect.any(AbortSignal) });
     expect(fetchFile).toHaveBeenCalledWith(1, "test", "repo", finding.file, "head-sha", { signal: expect.any(AbortSignal) });
   });
-  it("does not accept invented evidence or a quote on the wrong line", async () => {
+  it("will not let an accept block on evidence quoted at the wrong line", async () => {
+    // An accept is what fails someone's build, so it keeps the strict bar: the
+    // quote must be the real code at the reported line. Failing that bar makes
+    // the finding advisory, NOT deleted — dropping it here was tried and threw
+    // away true positives, because the verifier fails at transcribing a line
+    // long before it fails at judging one.
     create.mockResolvedValue(response([decision({ evidence: [{ ...evidence[0], line: 1 }] })]));
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(result.findings[0].verification?.status).toBe("downgraded");
     expect(canBlock(result.findings[0])).toBe(false);
+    expect(result.rejected).toEqual([]);
   });
   it("accepts an indentation-normalized quote while still checking its file and line", async () => {
     create.mockResolvedValue(response([decision({ evidence: [{ ...evidence[0], quote: evidence[0].quote.trim() }] })]));
     expect((await verifyBlockingFindings([finding], [file], context)).findings[0].verification?.status).toBe("accepted");
   });
-  it("does not treat a different code expression as matching evidence", async () => {
+  it("will not let an accept block on a quote that is not the code at that line", async () => {
     create.mockResolvedValue(response([decision({ evidence: [{ ...evidence[0], quote: "return 100 / x;" }] })]));
-    expect((await verifyBlockingFindings([finding], [file], context)).findings[0].verification?.status).toBe("downgraded");
+    const result = await verifyBlockingFindings([finding], [file], context);
+    expect(result.findings[0].verification?.status).toBe("downgraded");
+    expect(canBlock(result.findings[0])).toBe(false);
+  });
+
+  it("only the verifier's own rejection removes a finding", async () => {
+    // Rejection follows the verifier's decision, not our ability to make it
+    // transcribe a line. An earlier attempt dropped everything unquotable and
+    // measured worse: it deleted a genuine defect twice in one run while the
+    // verifier's own text agreed the defect was real.
+    create.mockResolvedValue(response([decision({ decision: "downgrade", reason: "Advisory.", evidence: [] })]));
+    const kept = await verifyBlockingFindings([finding], [file], context);
+    expect(kept.findings).toHaveLength(1);
+    expect(kept.findings[0].verification?.status).toBe("downgraded");
+    expect(kept.rejected).toEqual([]);
+
+    create.mockResolvedValue(response([decision({ decision: "reject", reason: "Caller excludes zero.", evidence: [] })]));
+    expect((await verifyBlockingFindings([finding], [file], context)).findings).toEqual([]);
+  });
+
+  it("supplies the evidence line itself when the verifier does not quote one", async () => {
+    // The finding already names file and line and we already hold the source,
+    // so the anchor is exact by construction. Asking the model to type it back
+    // added a failure mode and bought no safety.
+    create.mockResolvedValue(response([decision({ decision: "downgrade", reason: "Advisory.", evidence: [] })]));
+    const result = await verifyBlockingFindings([finding], [file], context);
+    expect(result.findings[0].verification?.evidence).toEqual([{ file: finding.file, line: 2, quote: "  return 10 / x;" }]);
   });
   it("does not pay for an unanchored finding", async () => {
     const result = await verifyBlockingFindings([{ ...finding, line: undefined }], [file], context);

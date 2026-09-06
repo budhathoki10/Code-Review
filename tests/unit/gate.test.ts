@@ -261,11 +261,15 @@ describe("estimateReviewCost", () => {
     expect(large.expectedTokens).toBeGreaterThan(small.expectedTokens * 5);
   });
 
-  it("reports a worst case equal to the expected case when no tool rounds are configured", () => {
-    // With REVIEW_FINDINGS_TOOL_ROUNDS at its default of 0 every findings
-    // call is a single forced submit_findings, so nothing re-sends the
-    // conversation and there is no multiplier left to charge for.
-    const cost = estimateReviewCost(selectDiffForReview(Array.from({ length: 40 }, (_, i) => srcFile(`src/f${i}.ts`, 100))));
+  it("reports a worst case equal to the expected case when no tool rounds are configured", async () => {
+    // Zero rounds makes every findings call a single forced submit_findings,
+    // so nothing re-sends the conversation and there is no multiplier left to
+    // charge for. Set explicitly rather than relied on as the default: the
+    // default is now 2, because investigation is most of the accuracy.
+    process.env.REVIEW_FINDINGS_TOOL_ROUNDS = "0";
+    vi.resetModules();
+    const { estimateReviewCost: estimate } = await import("@/lib/review/gate");
+    const cost = estimate(selectDiffForReview(Array.from({ length: 40 }, (_, i) => srcFile(`src/f${i}.ts`, 100))));
 
     expect(cost.worstCaseTokens).toBe(cost.expectedTokens);
   });
