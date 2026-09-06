@@ -2,6 +2,9 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { selectDiffForReview } from "@/lib/review/diff-selection";
 import { generateChunkedReview } from "@/lib/ai/review";
+import { verifyBlockingFindings } from "@/lib/review/verification";
+import { canBlock, dedupeFindings } from "@/lib/review/finding-policy";
+import type { FindingDoc } from "@/lib/db/collections";
 import type { PullRequestFile } from "@/lib/github/diff";
 
 /**
@@ -94,6 +97,25 @@ async function main() {
     if (finding.confidence) console.log(`    confidence: ${finding.confidence}`);
     console.log();
   }
+
+  // Discovery is only half the pipeline. The question that decides whether a
+  // false positive reaches the author is what the assessment pass does with
+  // it, so score that too rather than stopping at the findings list.
+  if (!process.env.BENCH_INSTALLATION_ID || result.findings.length === 0) return;
+  const repoContext = {
+    installationId: Number(process.env.BENCH_INSTALLATION_ID),
+    owner: process.env.BENCH_OWNER!, repo: process.env.BENCH_REPO!, ref: process.env.BENCH_REF!,
+  };
+  const docs = dedupeFindings(result.findings.map((f) => ({ ...f, source: "ai" })) as FindingDoc[]);
+  const checkpoint = await verifyBlockingFindings(docs, files, repoContext, undefined, Date.now() + 90_000);
+  const tally: Record<string, number> = {};
+  for (const f of [...checkpoint.findings, ...checkpoint.rejected]) {
+    tally[f.verification?.status ?? "none"] = (tally[f.verification?.status ?? "none"] ?? 0) + 1;
+  }
+  console.log(`--- assessment: ${checkpoint.candidates} candidate(s), ${JSON.stringify(tally)}`);
+  console.log(`--- WOULD BLOCK: ${checkpoint.findings.filter(canBlock).length}`);
+  for (const f of checkpoint.findings.filter(canBlock)) console.log(`    BLOCKING: ${f.file}:${f.line} ${f.title}`);
+  for (const f of checkpoint.rejected) console.log(`    rejected: ${f.title} — ${f.verification?.reason?.slice(0, 160)}`);
 }
 
 main().then(() => process.exit(0), (error) => { console.error(error); process.exit(1); });
