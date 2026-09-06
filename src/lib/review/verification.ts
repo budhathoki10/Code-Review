@@ -226,10 +226,10 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
           parsed.decisions.some((item) => !submitted.has(item.id))) throw new Error("Invalid verifier finding IDs");
       decided.push(...parsed.decisions);
     } catch {
-      // Only this batch goes unassessed. Its findings keep the "skipped"
-      // status they already carry, so nothing it might have concluded leaks
-      // out, and the batches that did answer are still worth what they cost.
-      continue;
+      // Swallowed on purpose, and nothing more is needed: only this batch goes
+      // unassessed, its findings keep the "skipped" status they already carry
+      // so nothing it might have concluded leaks out, and the batches that did
+      // answer are still worth what they cost.
     }
   }
   if (decided.length === 0) return result;
