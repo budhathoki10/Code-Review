@@ -372,6 +372,8 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const baselineSha = forced ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
 
   let diff: PullRequestDiff;
+  /** Set only when this review really did diff from a previous review's head. */
+  let reviewedFromSha: string | undefined;
   if (baselineSha && baselineSha !== headSha) {
     const incrementalDiff = await getIncrementalDiff(githubInstallationId, owner, repo, baselineSha, headSha).catch(
       (incrementalError) => {
@@ -381,6 +383,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     );
     if (incrementalDiff) {
       log.info({ reviewId, baselineSha, headSha, files: incrementalDiff.fileCount }, "reviewing incrementally");
+      // Recorded, not just logged. Whether this review looked at the whole
+      // pull request or only at the latest push is the single most important
+      // qualifier on the verdict, and it used to exist solely in a log line.
+      reviewedFromSha = baselineSha;
     }
     diff = incrementalDiff ?? (await getPullRequestDiff(githubInstallationId, owner, repo, prNumber));
   } else {
@@ -830,7 +836,20 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   if (selection.chunks.length > 0) {
     // The first-pass prose can contain a rejected accusation or obsolete merge
     // recommendation. Rebuild it from assessed findings, with no additional call.
-    aiResult.summary = `Reviewed ${Math.max(0, selection.coveredCount - unreviewedFiles.length)} file(s). ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
+    // An incremental review reads exactly like a full one unless it says
+    // otherwise — "Reviewed 2 file(s) ... APPROVE" on a five-commit pull
+    // request is a statement about the latest push that a reader takes as a
+    // statement about the whole branch. This file already argues that case for
+    // budget-skipped files (see the coverage note below); scope from an
+    // incremental baseline is the same claim and was only ever in a log line.
+    const reviewedCount = Math.max(0, selection.coveredCount - unreviewedFiles.length);
+    const scopeSentence = reviewedFromSha === undefined
+      ? `Reviewed ${reviewedCount} file(s).`
+      : `Reviewed the ${reviewedCount} file(s) changed since \`${reviewedFromSha.slice(0, 7)}\` — an incremental review of the latest push, not of the whole pull request.` +
+        (carriedForwardFindings.length > 0
+          ? ` ${carriedForwardFindings.length} finding(s) from earlier commits are carried forward below.`
+          : " Earlier commits were reviewed previously and raised nothing still outstanding.");
+    aiResult.summary = `${scopeSentence} ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
       `Retained ${allFindings.length} finding(s)${verification ? `; rejected ${verification.rejected.length} after assessment` : ""}. AI assessment is not test-backed proof. Unchecked findings are advisory.\n\n` +
       `*Current review: ${aiResult.verdict === "request_changes" ? "REQUEST CHANGES" : aiResult.verdict.toUpperCase()}.*` +
       formatCoverageNote(selection, unreviewedFiles);

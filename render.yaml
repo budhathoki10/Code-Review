@@ -38,9 +38,9 @@ services:
       - key: NVIDIA_THINKING
         value: "false"
       - key: REVIEW_FINDINGS_TOOL_ROUNDS
-        value: "1"
+        value: "2"
       - key: REVIEW_VERIFICATION_MAX_FINDINGS
-        value: "3"
+        value: "24"
       - key: REVIEW_DEADLINE_MS
         value: "180000"
       - key: REVIEW_RISKY_DEADLINE_MS
