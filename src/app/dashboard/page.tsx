@@ -133,6 +133,7 @@ function LatestReviewSpotlight({ latest }: { latest: LatestReview | null }) {
               pullRequest={latest.pullRequest}
               defaultOpen
               repositoryId={latest.repository.id}
+              repoFullName={latest.repository.fullName}
             />
           </ul>
         </div>

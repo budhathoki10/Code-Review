@@ -36,8 +36,23 @@ import {
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
 import { normalizeDisabledSeverities } from "@/lib/review/severity";
 import { envNumber } from "@/lib/env";
+import { runMultiStageReview } from "@/lib/review/multi-stage";
+import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
+
+/**
+ * Whether to run the Ultra -> Super -> debate -> arbitration pipeline instead
+ * of the single-model discovery-and-assessment path.
+ *
+ * Off by default, and both paths are kept, because the two make different
+ * bets. The multi-stage one spends far more calls to be right; the existing
+ * one completes in seconds and is what production has been measured on. A
+ * flag means the comparison can be made on the same pull request rather than
+ * argued about, and a bad night on the provider does not require a deploy to
+ * escape.
+ */
+const MULTI_STAGE = process.env.REVIEW_MULTI_STAGE === "true";
 
 /**
  * How long the AI call waits for static analysis to finish before giving up
@@ -247,6 +262,38 @@ export function formatResolvedNote(resolved: FindingDoc[]): string {
   return `\n\n---\n\n**${resolved.length} finding(s) from the previous review look resolved:**\n\n${shown.join("\n")}`;
 }
 
+/**
+ * The summary for a multi-stage review.
+ *
+ * Counted from the findings that are actually stored, and built after they
+ * are, because those are two different sets. It used to be written from the
+ * pipeline's own output before dedupe and the category and severity filters
+ * ran, so a card could read "2 high · 2 medium" above a list holding three
+ * mediums — the summary describing a set that no longer existed by the time
+ * anyone saw it. Counts follow findings; findings are never rebuilt from
+ * counts.
+ *
+ * The per-stage tallies that used to be here — candidates, disputed, debated,
+ * arbitrated — are pipeline telemetry, not review content. They belong in the
+ * logs and the stage record, and on a review card they crowded out the
+ * findings themselves. The rejected list is rendered in full below the
+ * summary, so restating its count in prose said nothing twice.
+ */
+function buildMultiStageSummary(
+  findings: FindingDoc[],
+  selection: { coveredCount: number },
+  unreviewed: string[],
+): string {
+  const counts = SEVERITY_ORDER.slice().reverse()
+    .map((severity) => ({ severity, count: findings.filter((f) => f.severity === severity).length }))
+    .filter((entry) => entry.count > 0);
+  const reviewed = Math.max(0, selection.coveredCount - unreviewed.length);
+  const headline = counts.length
+    ? `${counts.map((c) => `${c.count} ${c.severity}`).join(" · ")}.`
+    : "no findings.";
+  return `Reviewed ${reviewed} file(s) — ${headline}`;
+}
+
 function buildCheckSummary(findings: FindingDoc[]): string {
   if (findings.length === 0) return "No issues found.";
   const bySeverity = SEVERITY_ORDER.filter((severity) => findings.some((f) => f.severity === severity))
@@ -369,7 +416,24 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // PRs last reviewed before that field existed. Both are skipped entirely on
   // a forced review, which is a request to re-review the whole PR, not the
   // delta since a run the author just rejected.
-  const baselineSha = forced ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
+  // The multi-stage pipeline always reviews the whole pull request.
+  //
+  // Incremental review is a speed optimisation, and it buys that speed by
+  // never looking again at a file this push did not touch: those findings are
+  // carried forward from the previous review instead of being re-derived. That
+  // is a reasonable trade for a fast single-model pass and the wrong one here,
+  // because it makes every mistake permanent. A defect missed on the first
+  // review, or discarded by a bug in our own context budget, is invisible to
+  // every later push — the reviewer never looks at that file again. Measured
+  // on PR #90: the first pass read 22 files, the next read 3, and four
+  // findings dropped by a budget bug could not come back on their own.
+  //
+  // This pipeline's whole premise is accuracy over speed, so it re-reads
+  // everything each time. Set REVIEW_MULTI_STAGE_INCREMENTAL=true to opt back
+  // into deltas if the cost ever outweighs that.
+  const multiStageIncremental = process.env.REVIEW_MULTI_STAGE_INCREMENTAL === "true";
+  const skipBaseline = forced || (MULTI_STAGE && !multiStageIncremental);
+  const baselineSha = skipBaseline ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
 
   let diff: PullRequestDiff;
   /** Set only when this review really did diff from a previous review's head. */
@@ -562,11 +626,33 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // as a missing field.
   let reviewUsage: TokenUsage = EMPTY_USAGE;
   let unreviewedFiles: string[] = [];
+  /** Set only on the multi-stage path, so the summary and the stored row can report what each stage concluded. */
+  let multiStageOutcome: Awaited<ReturnType<typeof runMultiStageReview>> | undefined;
   const riskFiles = selection.analyzableFiles.map((file) => ({ file: file.filename, reasons: riskReasons(file) }))
     .filter((file) => file.reasons.length > 0);
 
   const configuredDeadline = Number(process.env[riskFiles.length ? "REVIEW_RISKY_DEADLINE_MS" : "REVIEW_DEADLINE_MS"] ?? (riskFiles.length ? 240_000 : 180_000));
-  const deadlineAt = startedAt + (Number.isFinite(configuredDeadline) ? Math.max(60_000, Math.min(240_000, configuredDeadline)) : 180_000);
+  // The single-model path is two calls and 240s is generous for it. The
+  // multi-stage path is six or more — primary, verifier, focused confirmation,
+  // two debate rounds a side, arbitration — each of which may reason before it
+  // answers, so the old ceiling would guarantee it ran out of budget partway
+  // and reported everything after that point as unresolved. Accuracy over
+  // speed is the whole trade this pipeline makes; the ceiling has to reflect
+  // it. BullMQ renews the job lock while the worker is alive, so a longer job
+  // does not stall.
+  // Written out rather than nested, because the nested form was wrong-looking
+  // enough that a reviewer read it as able to exceed its own ceiling. It
+  // could not — Math.min capped it — but an expression that takes arithmetic
+  // to disprove is a defect in its own right, whatever it evaluates to.
+  //
+  // The multi-stage path always takes its full budget: six or more model calls
+  // that each may reason before answering, and a deadline shorter than that
+  // just means the later stages report their findings as unresolved. The
+  // single-model path keeps whatever is configured, capped at four minutes.
+  const deadlineMs = MULTI_STAGE
+    ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000)
+    : Math.min(240_000, Number.isFinite(configuredDeadline) ? configuredDeadline : 180_000);
+  const deadlineAt = startedAt + Math.max(60_000, deadlineMs);
   const discoveryDeadlineAt = deadlineAt - 40_000;
   markStage("prepare");
 
@@ -661,6 +747,103 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
     const riskContext = await riskContextPromise;
     markStage("context");
+
+    if (MULTI_STAGE) {
+      // The stage record is written as it happens, so a review that takes
+      // minutes says which minute it is on rather than sitting on "pending".
+      const setStage = async (stage: ReviewStage) => {
+        await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { stage } }).catch(() => undefined);
+      };
+      try {
+        // Phase 1 is the most expensive call here, and a retry re-runs the
+        // pipeline from the top. Reusing an earlier attempt's output for the
+        // same commit is the difference between one primary review per push
+        // and up to three.
+        const resumePrimary = existingReview?.multiStageCheckpoint?.primaryFindings as
+          | Parameters<typeof runMultiStageReview>[0]["resumePrimary"]
+          | undefined;
+        if (resumePrimary?.length) {
+          log.info({ reviewId, findings: resumePrimary.length }, "resuming multi-stage review from a checkpointed primary pass");
+        }
+
+        const multi = await runMultiStageReview({
+          files: selection.analyzableFiles,
+          repo: { installationId: githubInstallationId, owner, repo, ref: headSha },
+          meta: { owner, repo, prNumber, title: prTitle, body: prBody ?? undefined, headSha },
+          deadlineAt,
+          log,
+          onStage: setStage,
+          resumePrimary,
+          onPrimaryFindings: async (findings) => {
+            await reviewsCol.updateOne(
+              { pullRequestId, headSha },
+              { $set: { multiStageCheckpoint: { primaryFindings: findings, at: new Date() } } },
+            ).catch((err) => log.warn({ reviewId, err }, "failed to checkpoint the primary review — a retry would re-run it"));
+          },
+        });
+
+        log.info({ reviewId, ...multi.stats, usage: multi.usage }, "multi-stage review complete");
+        await recordUsage(multi.usage).catch((usageError) => log.warn({ reviewId, err: usageError }, "failed to record token usage"));
+
+        staticFindings = await staticFindingsPromise;
+        markStage("discovery");
+
+        // Counts are derived from the findings here and nowhere else. Nothing
+        // upstream ever collapsed a finding into a number, so nothing has to
+        // be reconstructed from one. The category and severity switches are
+        // rebuilt locally because the shared predicate is declared further
+        // down, after both review paths have converged.
+        const keepsHere = (finding: FindingDoc) =>
+          categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories)(finding)
+          && severityFilter(effectiveDisabledSeverities)(finding);
+        const confirmed = multi.findings.filter(keepsHere);
+        const verdict = confirmed.some((f) => f.severity === "critical" || f.severity === "high")
+          ? "request_changes" as const
+          : confirmed.length > 0 ? "comment" as const : "approve" as const;
+
+        // The rejected list is stored, not discarded. The summary says how many
+        // candidates each reviewer produced, so a review that reports "1 found
+        // independently by the verifier" and then shows nothing leaves the
+        // reader looking for a finding that no longer exists anywhere. Written
+        // into verificationCheckpoint because the card already renders that
+        // field, with the assessment's own reason for dropping each one.
+        await reviewsCol.updateOne(
+          { pullRequestId, headSha },
+          {
+            $set: {
+              unresolvedFindings: multi.unresolved,
+              stage: "completed" as const,
+              verificationCheckpoint: {
+                state: "completed" as const,
+                findings: confirmed,
+                rejected: multi.rejected,
+                usage: multi.usage,
+                candidates: multi.stats.primary + multi.stats.secondaryNew,
+                at: new Date(),
+              },
+            },
+          },
+        ).catch(() => undefined);
+
+        // Summary deliberately left empty here and written below, once
+        // allFindings exists. Counting at this point counts a set that dedupe
+        // and the disabled-category/severity filters have not yet touched.
+        aiResult = { verdict, summary: "", findings: confirmed };
+        reviewUsage = multi.usage;
+        multiStageOutcome = multi;
+      } catch (error) {
+        // A stage that could not run is a failed review, never a clean one.
+        // Rethrown so BullMQ retries it and the row records `failed`, which is
+        // what stops "the provider timed out" reaching an author as "no
+        // issues found".
+        await setStage("failed");
+        log.error({ reviewId, err: error }, "multi-stage review failed");
+        throw error instanceof ReviewStageError
+          ? new Error(`Multi-stage review failed at ${error.stage}: ${error.message}`)
+          : error;
+      }
+    } else {
+
     const generated = await generateChunkedReview(
       selection.chunks.map((chunk) => chunk.files),
       {
@@ -745,6 +928,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         // behaviour we had before this existed.
         log.warn({ reviewId, err: checkpointError }, "failed to checkpoint model output — a retry would re-run generation");
       });
+    }
   }
 
   const withOriginalLine = (finding: FindingDoc): FindingDoc => {
@@ -833,7 +1017,9 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
   const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
   aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
-  if (selection.chunks.length > 0) {
+  if (multiStageOutcome) {
+    aiResult.summary = buildMultiStageSummary(allFindings, selection, unreviewedFiles) + formatCoverageNote(selection, unreviewedFiles);
+  } else if (selection.chunks.length > 0) {
     // The first-pass prose can contain a rejected accusation or obsolete merge
     // recommendation. Rebuild it from assessed findings, with no additional call.
     // An incremental review reads exactly like a full one unless it says

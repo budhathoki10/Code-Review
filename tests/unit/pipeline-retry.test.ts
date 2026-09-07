@@ -562,3 +562,51 @@ describe("an incremental review says that is what it is", () => {
     expect(summary).not.toContain("incremental");
   });
 });
+
+describe("the multi-stage pipeline reviews the whole pull request", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getIncrementalDiffMock.mockResolvedValue(null);
+    failStatusWrite = false;
+    seed();
+    postSummaryCommentMock.mockResolvedValue(777);
+    postInlineReviewMock.mockResolvedValue([]);
+    getPullRequestDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 4, diffText: "d",
+      files: [{ filename: "src/a.ts", status: "modified", changes: 4, patch: "@@ -1,2 +1,2 @@\n-const x = 1;\n+const x = 2;", patchSource: "github" }],
+    });
+    generateChunkedReviewMock.mockResolvedValue({
+      verdict: "comment", summary: "s", findings: [],
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, calls: 1 }, chunkCount: 1, unreviewedFiles: [],
+    });
+  });
+
+  it("still diffs incrementally on the single-model path", async () => {
+    pullRequestDocs[0].lastReviewedSha = "older99";
+    getIncrementalDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 2, diffText: "d",
+      files: [{ filename: "src/b.ts", status: "modified", changes: 2, patch: "@@ -1,1 +1,1 @@\n-const y = 1;\n+const y = 2;", patchSource: "github" }],
+    });
+
+    await runReviewPipeline(JOB, log);
+
+    expect(getIncrementalDiffMock).toHaveBeenCalled();
+  });
+
+  it("ignores the baseline entirely when multi-stage is on", async () => {
+    // Incremental review never re-reads a file this push did not touch, so a
+    // defect missed once — or dropped by a bug in our own context budget — is
+    // invisible to every later push. Accuracy over speed is this pipeline's
+    // whole premise, so it re-reads everything.
+    vi.stubEnv("REVIEW_MULTI_STAGE", "true");
+    vi.resetModules();
+    const { runReviewPipeline: run } = await import("@/lib/review/pipeline");
+    pullRequestDocs[0].lastReviewedSha = "older99";
+
+    await run(JOB, log).catch(() => undefined);
+
+    expect(getIncrementalDiffMock).not.toHaveBeenCalled();
+    expect(getPullRequestDiffMock).toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
+});

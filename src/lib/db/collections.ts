@@ -116,6 +116,31 @@ export interface FindingDoc {
   /** Absent means "ai" — only set for findings produced by the deterministic static-analysis stage. */
   source?: "ai" | "static-analysis";
   /**
+   * Multi-stage review fields. All optional, all additive: a review written
+   * before the Ultra/Super pipeline existed has none of them and renders
+   * exactly as it always did. `line` remains the anchor every existing
+   * consumer reads — inline comment mapping, the reply pipeline, the
+   * dashboard — and is always equal to `startLine` when a range is present.
+   */
+  startLine?: number;
+  endLine?: number;
+  /** The revision every line number and snippet in this finding was resolved against. */
+  commitSha?: string;
+  /** Which reviewer proposed it. Distinct from `source`, which the UI uses to badge linter output. */
+  findingSource?: "ultra" | "super" | "both" | "static-analysis";
+  /** What each stage concluded. Never contains raw model reasoning. */
+  stage?: {
+    status: "candidate" | "agreed" | "disputed" | "confirmed" | "rejected" | "modified" | "uncertain";
+    ultra?: { decision: string; confidence: number };
+    super?: { decision: string; confidence: number };
+    debate?: { used: boolean; rounds: number; consensusReached: boolean };
+    arbitration?: { used: boolean; decision: string; confidence: number; reason: string };
+    validation?: {
+      fileValid: boolean; lineValid: boolean; snippetValid: boolean;
+      commitValid: boolean; relevantToPR: boolean; correctedFrom?: number;
+    };
+  };
+  /**
    * The GitHub review-comment this finding was posted as, when it was posted
    * inline. This is the anchor the reply feature resolves against: a
    * `pull_request_review_comment` webhook only tells us `in_reply_to_id`, so
@@ -209,6 +234,29 @@ export interface ReviewDoc {
   pullRequestId: string;
   headSha: string;
   status: "pending" | "completed" | "failed";
+  /**
+   * How far the multi-stage pipeline has got, for progress the reader can
+   * actually interpret. Kept separate from `status` because that field is
+   * what the queue and the unique index depend on, and widening it would
+   * change the meaning of every historical row.
+   */
+  stage?:
+    | "pending" | "context_building" | "phase1_running" | "phase1_completed"
+    | "phase2_running" | "phase2_completed" | "reconciling" | "debate_running"
+    | "arbitration_running" | "validating" | "completed" | "failed";
+  /** Findings that could not be established either way. Shown apart from confirmed defects, never merged into them. */
+  unresolvedFindings?: FindingDoc[];
+  /**
+   * The multi-stage primary review's raw output for this exact head commit,
+   * written the moment it returns and before anything that can fail.
+   *
+   * Phase 1 is the most expensive call in the pipeline and a BullMQ retry
+   * re-runs everything from the top, so without this a Mongo blip after it
+   * costs the whole budget again for a byte-identical diff. Stored as opaque
+   * JSON because its shape belongs to review/stage-types, not to the database
+   * layer.
+   */
+  multiStageCheckpoint?: { primaryFindings: unknown[]; at: Date };
   verdict?: "approve" | "request_changes" | "comment";
   summary?: string;
   score?: number;

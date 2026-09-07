@@ -295,6 +295,7 @@ export default async function RepositoryReviewsPage({
                 defaultOpen={i === 0}
                 accordionName="repository-review-history"
                 repositoryId={repositoryId}
+                repoFullName={repositoryDoc.fullName}
               />
             ))}
           </ul>
