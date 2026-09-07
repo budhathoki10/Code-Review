@@ -1,0 +1,237 @@
+import type { Logger } from "pino";
+import type { PullRequestFile } from "@/lib/github/diff";
+import type { RepoContext } from "@/lib/ai/review";
+import { addUsage, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
+import { buildReviewContext, type PrMetadata } from "@/lib/review/context-builder";
+import { runPrimaryReview } from "@/lib/ai/primary-review";
+import { runSecondaryReview } from "@/lib/ai/secondary-review";
+import { reconcile } from "@/lib/review/reconciliation";
+import { runDebate } from "@/lib/review/debate";
+import { runArbitration } from "@/lib/review/arbitration";
+import { isPresentable, validateLocation } from "@/lib/review/location-validation";
+import { needsFocusedConfirmation, runFocusedConfirmation } from "@/lib/review/focused-confirmation";
+import { ReviewStageError, toFindingDoc, type CandidateFinding, type ReviewStage } from "@/lib/review/stage-types";
+import type { FindingDoc } from "@/lib/db/collections";
+
+/**
+ * Runs the whole pipeline: context, primary review, independent verification,
+ * reconciliation, debate, arbitration, deterministic validation.
+ *
+ * Two properties hold at every step and are the reason it is shaped this way.
+ * Findings travel as whole objects — nothing is ever reduced to a count and
+ * rebuilt — and a stage that fails throws rather than returning an empty
+ * list, so "the provider timed out" can never be rendered as "your code is
+ * clean". The only stages allowed to fail softly are the ones that can only
+ * narrow the result: if debate or arbitration cannot run, their findings stay
+ * disputed and are reported as unresolved rather than promoted.
+ */
+
+export interface MultiStageOptions {
+  files: PullRequestFile[];
+  repo: RepoContext;
+  meta: PrMetadata;
+  deadlineAt: number;
+  log: Logger;
+  onStage?: (stage: ReviewStage) => void | Promise<void>;
+  /** Reserve for arbitration and validation so the last stages are not starved by the first. */
+  reserveMs?: number;
+  /**
+   * Phase 1 output from an earlier attempt at this same commit.
+   *
+   * The primary review is by far the most expensive call in the pipeline, and
+   * a BullMQ retry re-runs everything from the top. Without this, a Mongo blip
+   * after Phase 1 costs its entire budget a second and third time for a
+   * byte-identical diff.
+   */
+  resumePrimary?: CandidateFinding[];
+  /** Called the moment Phase 1 returns, before anything that can fail. */
+  onPrimaryFindings?: (findings: CandidateFinding[]) => void | Promise<void>;
+}
+
+export interface MultiStageResult {
+  /** Defects to report. Every one is confirmed and passed deterministic validation. */
+  findings: FindingDoc[];
+  /** Could not be established either way. Shown apart, never as defects. */
+  unresolved: FindingDoc[];
+  /** Dismissed, with the reason. Kept for the audit trail. */
+  rejected: FindingDoc[];
+  usage: TokenUsage;
+  stage: ReviewStage;
+  stats: {
+    primary: number;
+    secondaryNew: number;
+    agreed: number;
+    disputed: number;
+    debated: number;
+    arbitrated: number;
+    focusedConfirmations: number;
+    invalidLocation: number;
+    resumedPrimary: boolean;
+  };
+}
+
+export async function runMultiStageReview(options: MultiStageOptions): Promise<MultiStageResult> {
+  const { files, repo, meta, deadlineAt, log } = options;
+  const reserveMs = options.reserveMs ?? 60_000;
+  let usage = EMPTY_USAGE;
+
+  const mark = async (stage: ReviewStage) => {
+    log.info({ stage }, "review stage");
+    await options.onStage?.(stage);
+  };
+
+  await mark("context_building");
+  const context = await buildReviewContext(files, repo, meta, Math.min(deadlineAt, Date.now() + 90_000));
+  if (context.filesIncluded.length === 0) {
+    // No source at the reviewed commit means nothing downstream can be
+    // grounded. That is a failure, not a clean review.
+    throw new ReviewStageError("context_building", "No file content could be read at the reviewed commit");
+  }
+  log.info({ files: context.filesIncluded.length, related: context.relatedIncluded.length, chars: context.chars }, "context built");
+
+  let primaryFindings: CandidateFinding[];
+  const resumed = Boolean(options.resumePrimary);
+  if (options.resumePrimary) {
+    // Same commit, same diff, already paid for. Re-running it would buy an
+    // identical answer at full price.
+    primaryFindings = options.resumePrimary;
+    await mark("phase1_completed");
+    log.info({ findings: primaryFindings.length }, "reusing primary review from an earlier attempt");
+  } else {
+    await mark("phase1_running");
+    const primary = await runPrimaryReview(context.text, deadlineAt - reserveMs);
+    usage = addUsage(usage, primary.usage);
+    primaryFindings = primary.findings;
+    // Persisted before anything downstream can fail, so a retry resumes here.
+    await options.onPrimaryFindings?.(primaryFindings);
+    await mark("phase1_completed");
+    log.info({ findings: primaryFindings.length, attempts: primary.attempts }, "primary review completed");
+  }
+
+  await mark("phase2_running");
+  const secondary = await runSecondaryReview(context.text, primaryFindings, deadlineAt - reserveMs);
+  usage = addUsage(usage, secondary.usage);
+  await mark("phase2_completed");
+  log.info(
+    { verifications: secondary.verifications.length, newFindings: secondary.newFindings.length },
+    "independent verification completed",
+  );
+
+  await mark("reconciling");
+  const reconciled = reconcile(primaryFindings, secondary.verifications, secondary.newFindings);
+  log.info(
+    { tracked: reconciled.tracked.length, rejected: reconciled.rejected.length, disputed: reconciled.disputedCount },
+    "reconciliation completed",
+  );
+
+  // Severe findings only the verifier saw earn a dedicated confirmation before
+  // anything else looks at them. Discarding them because the primary reviewer
+  // missed them would throw away the recall this stage exists to add;
+  // promoting them unexamined would put an unreviewed CRITICAL in front of an
+  // author.
+  let tracked = reconciled.tracked;
+  let focusedCount = 0;
+  const needsFocus = needsFocusedConfirmation(tracked);
+  if (needsFocus.length > 0 && Date.now() < deadlineAt - reserveMs) {
+    try {
+      const focused = await runFocusedConfirmation(context.text, needsFocus, deadlineAt - reserveMs);
+      usage = addUsage(usage, focused.usage);
+      focusedCount = needsFocus.length;
+      const byId = new Map(focused.resolved.map((r) => [r.candidate.id, r]));
+      tracked = tracked.map((t) => byId.get(t.candidate.id) ?? t);
+    } catch (error) {
+      // Only narrows, so losing it leaves them unconfirmed rather than failing
+      // the review — and unconfirmed is the safe direction for a claim only
+      // one reviewer made.
+      log.warn({ err: error, count: needsFocus.length }, "focused confirmation unavailable; severe verifier findings remain unresolved");
+      const ids = new Set(needsFocus.map((t) => t.candidate.id));
+      tracked = tracked.map((t) => (ids.has(t.candidate.id) ? { ...t, status: "uncertain" as const } : t));
+    }
+  }
+
+  let settled = tracked.filter((t) => t.status !== "disputed");
+  const disputed = tracked.filter((t) => t.status === "disputed");
+  let debatedCount = 0;
+  let arbitratedCount = 0;
+
+  if (disputed.length > 0 && Date.now() < deadlineAt - reserveMs) {
+    await mark("debate_running");
+    try {
+      const debate = await runDebate(context.text, disputed, deadlineAt - reserveMs / 2);
+      usage = addUsage(usage, debate.usage);
+      debatedCount = disputed.length;
+      settled = [...settled, ...debate.resolved];
+
+      if (debate.unresolved.length > 0) {
+        await mark("arbitration_running");
+        try {
+          const arbitration = await runArbitration(context.text, debate.unresolved, deadlineAt);
+          usage = addUsage(usage, arbitration.usage);
+          arbitratedCount = debate.unresolved.length;
+          settled = [...settled, ...arbitration.resolved];
+        } catch (error) {
+          // Arbitration can only narrow. Losing it leaves these unresolved,
+          // which is the honest state, so the review continues degraded
+          // rather than failing outright.
+          log.warn({ err: error, count: debate.unresolved.length }, "arbitration unavailable; findings remain unresolved");
+          settled = [...settled, ...debate.unresolved.map((t) => ({ ...t, status: "uncertain" as const }))];
+        }
+      }
+    } catch (error) {
+      log.warn({ err: error, count: disputed.length }, "debate unavailable; disputed findings remain unresolved");
+      settled = [...settled, ...disputed.map((t) => ({ ...t, status: "uncertain" as const }))];
+    }
+  } else if (disputed.length > 0) {
+    log.warn({ count: disputed.length }, "no time budget for debate; disputed findings remain unresolved");
+    settled = [...settled, ...disputed.map((t) => ({ ...t, status: "uncertain" as const }))];
+  }
+
+  await mark("validating");
+  const validationInput = { sources: context.sources, files, commitSha: meta.headSha };
+  const validated = settled.map((t) => validateLocation(t, validationInput));
+  const invalid = validated.filter((t) => !isPresentable(t));
+  if (invalid.length > 0) {
+    log.warn(
+      { count: invalid.length, findings: invalid.map((t) => `${t.candidate.file}:${t.candidate.startLine}`) },
+      "findings failed deterministic location validation",
+    );
+  }
+
+  // A finding is a defect only if a reviewer concluded it is one AND the
+  // repository agrees the location is real. Everything else that survived is
+  // unresolved, which is reported separately rather than silently dropped.
+  const presentable = validated.filter(isPresentable);
+  const confirmed = presentable.filter((t) => t.status === "confirmed" || t.status === "agreed" || t.status === "modified");
+  const unresolved = [
+    ...presentable.filter((t) => t.status === "uncertain" || t.status === "candidate"),
+    ...invalid,
+  ];
+
+  await mark("completed");
+  return {
+    findings: confirmed.map((t) => toFindingDoc(t, meta.headSha)),
+    unresolved: unresolved.map((t) => toFindingDoc(t, meta.headSha)),
+    rejected: [...reconciled.rejected, ...validated.filter((t) => t.status === "rejected")].map((t) => toFindingDoc(t, meta.headSha)),
+    usage,
+    stage: "completed",
+    stats: {
+      primary: primaryFindings.length,
+      secondaryNew: secondary.newFindings.length,
+      agreed: reconciled.tracked.length - reconciled.disputedCount,
+      disputed: reconciled.disputedCount,
+      debated: debatedCount,
+      arbitrated: arbitratedCount,
+      focusedConfirmations: focusedCount,
+      invalidLocation: invalid.length,
+      resumedPrimary: resumed,
+    },
+  };
+}
+
+/** Findings sorted for display: worst first, then by file and line. */
+export function orderForDisplay(findings: FindingDoc[]): FindingDoc[] {
+  const rank: Record<FindingDoc["severity"], number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  return [...findings].sort(
+    (a, b) => rank[a.severity] - rank[b.severity] || a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0),
+  );
+}

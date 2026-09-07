@@ -36,8 +36,23 @@ import {
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
 import { normalizeDisabledSeverities } from "@/lib/review/severity";
 import { envNumber } from "@/lib/env";
+import { runMultiStageReview } from "@/lib/review/multi-stage";
+import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
+
+/**
+ * Whether to run the Ultra -> Super -> debate -> arbitration pipeline instead
+ * of the single-model discovery-and-assessment path.
+ *
+ * Off by default, and both paths are kept, because the two make different
+ * bets. The multi-stage one spends far more calls to be right; the existing
+ * one completes in seconds and is what production has been measured on. A
+ * flag means the comparison can be made on the same pull request rather than
+ * argued about, and a bad night on the provider does not require a deploy to
+ * escape.
+ */
+const MULTI_STAGE = process.env.REVIEW_MULTI_STAGE === "true";
 
 /**
  * How long the AI call waits for static analysis to finish before giving up
@@ -245,6 +260,39 @@ export function formatResolvedNote(resolved: FindingDoc[]): string {
   if (remainder > 0) shown.push(`- ...and ${remainder} more`);
 
   return `\n\n---\n\n**${resolved.length} finding(s) from the previous review look resolved:**\n\n${shown.join("\n")}`;
+}
+
+/**
+ * The summary for a multi-stage review, counted from the findings that
+ * survived every stage — never from a model's own account of what it found.
+ */
+function buildMultiStageSummary(
+  confirmed: FindingDoc[],
+  multi: Awaited<ReturnType<typeof runMultiStageReview>>,
+  selection: { coveredCount: number },
+  unreviewed: string[],
+): string {
+  const counts = SEVERITY_ORDER.slice().reverse()
+    .map((severity) => ({ severity, count: confirmed.filter((f) => f.severity === severity).length }))
+    .filter((entry) => entry.count > 0);
+  const headline = counts.length
+    ? counts.map((c) => `${c.count} ${c.severity}`).join(" · ")
+    : "no confirmed findings";
+  const reviewed = Math.max(0, selection.coveredCount - unreviewed.length);
+  const lines = [
+    `Reviewed ${reviewed} file(s) with a two-reviewer pass — ${headline}.`,
+    "",
+    `${multi.stats.primary} candidate(s) from the primary review, ${multi.stats.secondaryNew} found independently by the verifier. ` +
+      `${multi.stats.disputed} disputed, ${multi.stats.debated} debated, ${multi.stats.arbitrated} sent to arbitration.`,
+  ];
+  if (multi.unresolved.length > 0) {
+    lines.push("", `${multi.unresolved.length} finding(s) could not be established either way and are listed as unresolved rather than reported as defects.`);
+  }
+  if (multi.stats.invalidLocation > 0) {
+    lines.push("", `${multi.stats.invalidLocation} finding(s) were dropped because their cited file or line could not be verified against the reviewed commit.`);
+  }
+  lines.push("", "AI assessment is not test-backed proof.");
+  return lines.join("\n");
 }
 
 function buildCheckSummary(findings: FindingDoc[]): string {
@@ -562,11 +610,22 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // as a missing field.
   let reviewUsage: TokenUsage = EMPTY_USAGE;
   let unreviewedFiles: string[] = [];
+  /** Set only on the multi-stage path, so the summary and the stored row can report what each stage concluded. */
+  let multiStageOutcome: Awaited<ReturnType<typeof runMultiStageReview>> | undefined;
   const riskFiles = selection.analyzableFiles.map((file) => ({ file: file.filename, reasons: riskReasons(file) }))
     .filter((file) => file.reasons.length > 0);
 
   const configuredDeadline = Number(process.env[riskFiles.length ? "REVIEW_RISKY_DEADLINE_MS" : "REVIEW_DEADLINE_MS"] ?? (riskFiles.length ? 240_000 : 180_000));
-  const deadlineAt = startedAt + (Number.isFinite(configuredDeadline) ? Math.max(60_000, Math.min(240_000, configuredDeadline)) : 180_000);
+  // The single-model path is two calls and 240s is generous for it. The
+  // multi-stage path is six or more — primary, verifier, focused confirmation,
+  // two debate rounds a side, arbitration — each of which may reason before it
+  // answers, so the old ceiling would guarantee it ran out of budget partway
+  // and reported everything after that point as unresolved. Accuracy over
+  // speed is the whole trade this pipeline makes; the ceiling has to reflect
+  // it. BullMQ renews the job lock while the worker is alive, so a longer job
+  // does not stall.
+  const deadlineCeiling = MULTI_STAGE ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000) : 240_000;
+  const deadlineAt = startedAt + (Number.isFinite(configuredDeadline) ? Math.max(60_000, Math.min(deadlineCeiling, MULTI_STAGE ? Math.max(configuredDeadline, deadlineCeiling) : configuredDeadline)) : 180_000);
   const discoveryDeadlineAt = deadlineAt - 40_000;
   markStage("prepare");
 
@@ -661,6 +720,85 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
     const riskContext = await riskContextPromise;
     markStage("context");
+
+    if (MULTI_STAGE) {
+      // The stage record is written as it happens, so a review that takes
+      // minutes says which minute it is on rather than sitting on "pending".
+      const setStage = async (stage: ReviewStage) => {
+        await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { stage } }).catch(() => undefined);
+      };
+      try {
+        // Phase 1 is the most expensive call here, and a retry re-runs the
+        // pipeline from the top. Reusing an earlier attempt's output for the
+        // same commit is the difference between one primary review per push
+        // and up to three.
+        const resumePrimary = existingReview?.multiStageCheckpoint?.primaryFindings as
+          | Parameters<typeof runMultiStageReview>[0]["resumePrimary"]
+          | undefined;
+        if (resumePrimary?.length) {
+          log.info({ reviewId, findings: resumePrimary.length }, "resuming multi-stage review from a checkpointed primary pass");
+        }
+
+        const multi = await runMultiStageReview({
+          files: selection.analyzableFiles,
+          repo: { installationId: githubInstallationId, owner, repo, ref: headSha },
+          meta: { owner, repo, prNumber, title: prTitle, body: prBody ?? undefined, headSha },
+          deadlineAt,
+          log,
+          onStage: setStage,
+          resumePrimary,
+          onPrimaryFindings: async (findings) => {
+            await reviewsCol.updateOne(
+              { pullRequestId, headSha },
+              { $set: { multiStageCheckpoint: { primaryFindings: findings, at: new Date() } } },
+            ).catch((err) => log.warn({ reviewId, err }, "failed to checkpoint the primary review — a retry would re-run it"));
+          },
+        });
+
+        log.info({ reviewId, ...multi.stats, usage: multi.usage }, "multi-stage review complete");
+        await recordUsage(multi.usage).catch((usageError) => log.warn({ reviewId, err: usageError }, "failed to record token usage"));
+
+        staticFindings = await staticFindingsPromise;
+        markStage("discovery");
+
+        // Counts are derived from the findings here and nowhere else. Nothing
+        // upstream ever collapsed a finding into a number, so nothing has to
+        // be reconstructed from one. The category and severity switches are
+        // rebuilt locally because the shared predicate is declared further
+        // down, after both review paths have converged.
+        const keepsHere = (finding: FindingDoc) =>
+          categoryFilter(repoConfig?.disabledCategories, reviewConfig.disabledCategories)(finding)
+          && severityFilter(effectiveDisabledSeverities)(finding);
+        const confirmed = multi.findings.filter(keepsHere);
+        const verdict = confirmed.some((f) => f.severity === "critical" || f.severity === "high")
+          ? "request_changes" as const
+          : confirmed.length > 0 ? "comment" as const : "approve" as const;
+
+        await reviewsCol.updateOne(
+          { pullRequestId, headSha },
+          { $set: { unresolvedFindings: multi.unresolved, stage: "completed" as const } },
+        ).catch(() => undefined);
+
+        aiResult = {
+          verdict,
+          summary: buildMultiStageSummary(confirmed, multi, selection, unreviewedFiles),
+          findings: confirmed,
+        };
+        reviewUsage = multi.usage;
+        multiStageOutcome = multi;
+      } catch (error) {
+        // A stage that could not run is a failed review, never a clean one.
+        // Rethrown so BullMQ retries it and the row records `failed`, which is
+        // what stops "the provider timed out" reaching an author as "no
+        // issues found".
+        await setStage("failed");
+        log.error({ reviewId, err: error }, "multi-stage review failed");
+        throw error instanceof ReviewStageError
+          ? new Error(`Multi-stage review failed at ${error.stage}: ${error.message}`)
+          : error;
+      }
+    } else {
+
     const generated = await generateChunkedReview(
       selection.chunks.map((chunk) => chunk.files),
       {
@@ -745,6 +883,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         // behaviour we had before this existed.
         log.warn({ reviewId, err: checkpointError }, "failed to checkpoint model output — a retry would re-run generation");
       });
+    }
   }
 
   const withOriginalLine = (finding: FindingDoc): FindingDoc => {
@@ -833,7 +972,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
   const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
   aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
-  if (selection.chunks.length > 0) {
+  if (selection.chunks.length > 0 && !multiStageOutcome) {
     // The first-pass prose can contain a rejected accusation or obsolete merge
     // recommendation. Rebuild it from assessed findings, with no additional call.
     // An incremental review reads exactly like a full one unless it says

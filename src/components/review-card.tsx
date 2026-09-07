@@ -1,6 +1,8 @@
-import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
+import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, HelpCircle, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
+import { STAGE_LABEL, type ReviewStage } from "@/lib/review/stage-types";
+import { canSayNoFindings, findingSourceUrl, showsProgress, stageProgress, STAGE_SEQUENCE, verificationTrail } from "@/lib/review/finding-presentation";
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
@@ -41,6 +43,36 @@ const STATUS_LABEL: Record<ReviewDoc["status"], string> = {
   failed: "Failed",
 };
 
+/**
+ * Where a running review has got to.
+ *
+ * The multi-stage pipeline can take minutes, and "Pending" for all of them
+ * tells a waiting reader nothing and looks indistinguishable from stuck. The
+ * stage is already written to the row at every transition; this is the half
+ * that reads it. Only rendered while the review is actually running — a
+ * finished review is described by its findings, not by its progress.
+ */
+function StageProgress({ stage }: { stage: ReviewStage }) {
+  const { step, total } = stageProgress(stage);
+  const reached = step - 1;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1.5">
+      <span className="text-xs font-medium text-foreground">{STAGE_LABEL[stage]}</span>
+      <span className="flex items-center gap-1" aria-hidden="true">
+        {STAGE_SEQUENCE.map((step, index) => (
+          <span
+            key={step}
+            className={`h-1 w-5 rounded-full transition-colors ${index <= reached ? "bg-accent" : "bg-border"}`}
+          />
+        ))}
+      </span>
+      <span className="text-xs text-subtle">
+        step {Math.max(1, step)} of {total}
+      </span>
+    </div>
+  );
+}
+
 function StatusBadge({ status }: { status: ReviewDoc["status"] }) {
   const tone = STATUS_TONE[status];
   return (
@@ -62,6 +94,54 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
 }
 
 /**
+ * The code location, linked to the exact lines on GitHub when we know enough
+ * to build a real URL.
+ *
+ * Only ever built from values we hold — owner, repo, the commit the review ran
+ * against, the validated path and line. If any of them is missing the text is
+ * rendered plainly rather than pointed somewhere that may not exist: a link to
+ * the wrong line is worse than no link, because it looks authoritative.
+ */
+function CodeLocation({ finding, repoFullName }: { finding: FindingDoc; repoFullName?: string }) {
+  const label = `${finding.file}${finding.line ? `:${finding.line}` : ""}`;
+  const href = findingSourceUrl(finding, repoFullName);
+
+  if (!href) {
+    return (
+      <span className="truncate font-mono text-xs font-medium text-foreground" title={finding.file}>
+        {label}
+      </span>
+    );
+  }
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer noopener"
+      onClick={(event) => event.stopPropagation()}
+      className="truncate font-mono text-xs font-medium text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      title={`${finding.file} at ${finding.commitSha?.slice(0, 7)}`}
+    >
+      {label}
+    </a>
+  );
+}
+
+/**
+ * How a finding was settled, in one line.
+ *
+ * Deliberately terse and free of any model reasoning. What a reader needs is
+ * whether two reviewers looked at this and whether they had to be reconciled;
+ * the argument itself is internal and showing it would invite the reader to
+ * relitigate a decision the pipeline already made on evidence.
+ */
+function VerificationTrail({ stage }: { stage: NonNullable<FindingDoc["stage"]> }) {
+  const parts = verificationTrail(stage);
+  if (parts.length === 0) return null;
+  return <p className="mt-2 text-xs text-subtle">{parts.join(" · ")}</p>;
+}
+
+/**
  * One finding, numbered within its severity group, and collapsible in its own
  * right.
  *
@@ -75,7 +155,7 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
  * the subtle tone: on a code review the first question is always "where", and
  * it was previously the faintest text in the row.
  */
-function FindingItem({ finding, number }: { finding: FindingDoc; number: number }) {
+function FindingItem({ finding, number, repoFullName }: { finding: FindingDoc; number: number; repoFullName?: string }) {
   const CategoryIcon = CATEGORY_ICON[finding.category];
   return (
     <li className="first:pt-0 last:pb-0">
@@ -92,10 +172,7 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
                 <CategoryIcon className="h-3 w-3" aria-hidden="true" />
                 {finding.category}
               </span>
-              <span className="truncate font-mono text-xs font-medium text-foreground" title={finding.file}>
-                {finding.file}
-                {finding.line ? `:${finding.line}` : ""}
-              </span>
+              <CodeLocation finding={finding} repoFullName={repoFullName} />
             </span>
             <span className="mt-1.5 block text-sm font-medium text-foreground">
               {finding.title}
@@ -109,6 +186,7 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
         </summary>
         <div className="pb-4 pl-5">
       <p className="text-sm leading-relaxed text-muted">{finding.explanation}</p>
+      {finding.stage && <VerificationTrail stage={finding.stage} />}
       <p className="mt-2 text-xs text-subtle">{evidenceLabel(finding)}</p>
       {finding.verification?.status === "accepted" && <p className="mt-1 text-xs text-muted">Assessment: {finding.verification.reason}</p>}
       {finding.verification?.evidence.map((evidence, index) => <p key={index} className="mt-1 break-words font-mono text-xs text-muted">{evidence.file}:{evidence.line} — {evidence.quote}</p>)}
@@ -153,7 +231,7 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
  * worst thing this page can be. Each finding collapses individually, so the
  * two-dozen-finding case is still skimmable without hiding the whole list.
  */
-function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"]; findings: FindingDoc[] }) {
+function SeverityGroup({ severity, findings, repoFullName }: { severity: FindingDoc["severity"]; findings: FindingDoc[]; repoFullName?: string }) {
   const tone = SEVERITY_TONE[severity];
   return (
     <li>
@@ -169,7 +247,7 @@ function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"
         </summary>
         <ul className="divide-y divide-border border-t border-border pl-5">
           {findings.map((finding, i) => (
-            <FindingItem key={i} finding={finding} number={i + 1} />
+            <FindingItem key={i} finding={finding} number={i + 1} repoFullName={repoFullName} />
           ))}
         </ul>
       </details>
@@ -321,12 +399,58 @@ function RejectedFindings({ rejected }: { rejected: FindingDoc[] }) {
   );
 }
 
+/**
+ * Findings the pipeline could not establish either way.
+ *
+ * Kept visible but firmly apart from the confirmed list. Hiding them would
+ * throw away the reviewer's own uncertainty, which is real information;
+ * merging them into the findings would inflate the count with things nobody
+ * could prove, which is exactly the behaviour the multi-stage pipeline exists
+ * to stop. Closed by default, and never included in any severity count.
+ */
+function UnresolvedFindings({ findings }: { findings: FindingDoc[] }) {
+  return (
+    <details className="group/unresolved mt-3">
+      <summary className="flex cursor-pointer list-none items-center gap-2 py-2 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+        <ChevronRight
+          className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/unresolved:rotate-90"
+          aria-hidden="true"
+        />
+        <HelpCircle className="h-3.5 w-3.5 shrink-0 text-subtle" aria-hidden="true" />
+        <span className="text-xs font-semibold tracking-wide text-subtle uppercase">Unresolved</span>
+        <span className="shrink-0 text-xs tabular-nums text-subtle">{findings.length}</span>
+      </summary>
+      <ul className="divide-y divide-border border-t border-border pl-5">
+        {findings.map((finding, index) => (
+          <li key={index} className="py-3 first:pt-3 last:pb-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(SEVERITY_TONE[finding.severity])}`}>
+                <span className={toneDotClasses(SEVERITY_TONE[finding.severity])} />
+                {finding.severity}
+              </span>
+              <span className="truncate font-mono text-xs text-subtle" title={finding.file}>
+                {finding.file}
+                {finding.line ? `:${finding.line}` : ""}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-muted">{finding.title}</p>
+            <p className="mt-1.5 text-xs leading-relaxed text-subtle">
+              The reviewers could not establish this either way from the code available, so it is not reported as a defect.
+            </p>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 export function ReviewCard({
   review,
   pullRequest,
   defaultOpen,
   accordionName,
   repositoryId,
+  repoFullName,
 }: {
   review: ReviewDoc;
   pullRequest: PullRequestDoc | undefined;
@@ -335,6 +459,8 @@ export function ReviewCard({
   accordionName?: string;
   /** Omit to hide the delete action (e.g. contexts without ownership scoping already established). */
   repositoryId?: string;
+  /** "owner/repo", used to link a finding to its exact lines on GitHub. Omitted renders the location as plain text. */
+  repoFullName?: string;
 }) {
   const findings = visibleFindings(review);
   const severityGroups = groupFindingsBySeverity(findings);
@@ -378,6 +504,8 @@ export function ReviewCard({
         <div className="border-t border-border px-5 pb-5">
           <SeverityStrip findings={findings} />
 
+          {showsProgress(review) && review.stage && <StageProgress stage={review.stage} />}
+
           {/* Pending only. A completed review with nothing to report is handled
               by NoFindings below, which says the same thing with the file count
               and the assessment tally behind it — leaving both in place rendered
@@ -419,11 +547,11 @@ export function ReviewCard({
           {severityGroups.length > 0 ? (
             <ul className="mt-4 divide-y divide-border border-t border-border">
               {severityGroups.map((group) => (
-                <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} />
+                <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} repoFullName={repoFullName} />
               ))}
             </ul>
           ) : (
-            review.status === "completed" && (
+            canSayNoFindings(review) && (
               <NoFindings review={review} rejected={review.verificationCheckpoint?.rejected.length ?? 0} />
             )
           )}
@@ -435,6 +563,7 @@ export function ReviewCard({
           {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
             Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
           </p>}
+          {!!review.unresolvedFindings?.length && <UnresolvedFindings findings={review.unresolvedFindings} />}
           {!!review.verificationCheckpoint?.rejected.length && (
             <RejectedFindings rejected={review.verificationCheckpoint.rejected} />
           )}
