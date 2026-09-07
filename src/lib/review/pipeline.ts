@@ -285,6 +285,9 @@ function buildMultiStageSummary(
     `${multi.stats.primary} candidate(s) from the primary review, ${multi.stats.secondaryNew} found independently by the verifier. ` +
       `${multi.stats.disputed} disputed, ${multi.stats.debated} debated, ${multi.stats.arbitrated} sent to arbitration.`,
   ];
+  if (multi.rejected.length > 0) {
+    lines.push("", `${multi.rejected.length} candidate(s) were rejected during assessment and are listed below with the reason.`);
+  }
   if (multi.unresolved.length > 0) {
     lines.push("", `${multi.unresolved.length} finding(s) could not be established either way and are listed as unresolved rather than reported as defects.`);
   }
@@ -774,9 +777,28 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
           ? "request_changes" as const
           : confirmed.length > 0 ? "comment" as const : "approve" as const;
 
+        // The rejected list is stored, not discarded. The summary says how many
+        // candidates each reviewer produced, so a review that reports "1 found
+        // independently by the verifier" and then shows nothing leaves the
+        // reader looking for a finding that no longer exists anywhere. Written
+        // into verificationCheckpoint because the card already renders that
+        // field, with the assessment's own reason for dropping each one.
         await reviewsCol.updateOne(
           { pullRequestId, headSha },
-          { $set: { unresolvedFindings: multi.unresolved, stage: "completed" as const } },
+          {
+            $set: {
+              unresolvedFindings: multi.unresolved,
+              stage: "completed" as const,
+              verificationCheckpoint: {
+                state: "completed" as const,
+                findings: confirmed,
+                rejected: multi.rejected,
+                usage: multi.usage,
+                candidates: multi.stats.primary + multi.stats.secondaryNew,
+                at: new Date(),
+              },
+            },
+          },
         ).catch(() => undefined);
 
         aiResult = {

@@ -118,6 +118,13 @@ describe("when the card may claim there is nothing to report", () => {
     expect(canSayNoFindings(review({ findings: [finding()] }))).toBe(false);
   });
 
+  it("still says so when candidates were considered and rejected", () => {
+    // Rejected is not unresolved: the pipeline reached a conclusion about it.
+    // "No findings" is accurate, and the rejected list sits alongside it so
+    // the summary's candidate counts still reconcile with what is on screen.
+    expect(canSayNoFindings(review())).toBe(true);
+  });
+
   it("never says so when something could not be established either way", () => {
     // Unresolved is not clean. Saying "no findings" here would report the
     // reviewer's own uncertainty as an all-clear.
