@@ -32,14 +32,14 @@ const findingSchema = z.object({
   id: z.string().min(1).max(40),
   severity: severityEnum,
   category: categoryEnum,
-  title: z.string().min(1).max(200),
+  title: z.string().min(1).max(140),
   file: z.string().min(1),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
   codeSnippet: z.string().max(2000).optional(),
-  problem: z.string().min(1).max(2000),
-  whyItIsABug: z.string().min(1).max(2000),
-  triggerScenario: z.string().max(1200).optional(),
+  problem: z.string().min(1).max(900),
+  whyItIsABug: z.string().min(1).max(900),
+  triggerScenario: z.string().max(500).optional(),
   evidence: z.array(evidenceSchema).max(6).default([]),
   relatedFiles: z.array(z.string()).max(10).default([]),
   suggestedFix: z.string().max(2000).optional(),
@@ -59,6 +59,21 @@ Before reporting anything, actively try to disprove it. Check the surrounding fu
 Do not report: style, naming, formatting, subjective refactors, "this could be cleaner", generic best practice, missing tests on their own, theoretical issues with no concrete trigger, or duplicates of another finding you are already reporting.
 
 startLine and endLine must bracket the code that actually misbehaves, at the head revision, using the line numbers shown in the supplied source. evidence must quote lines verbatim from what you were given. codeSnippet must be copied from the supplied source, never written from memory. An empty findings array is a correct and common answer.
+
+HOW TO WRITE A FINDING
+
+Write it the way a senior engineer writes a review comment: short, plain, and specific. The person reading is mid-task and deciding whether to care.
+
+- title: one line, under 100 characters. Name the defect, not the file.
+- problem: at most two sentences. What the code does that is wrong.
+- whyItIsABug: at most two sentences. What actually goes wrong as a result — the failure, the wrong value, the request that gets through.
+- triggerScenario: one sentence. The input or state that reaches it.
+
+Plain English. Say "the loop runs one past the end of the array", not "the iteration boundary condition exhibits an off-by-one characteristic". Name real identifiers from the code. Do not narrate the control flow you just read, and do not restate the code in prose — the reader can see the code, and quoting it back is not an explanation.
+
+Do not explain the tool's own internals or vocabulary. Do not enumerate every case you considered. If it takes more than a few sentences, it is usually two findings or not a finding.
+
+Length is not thoroughness. A finding nobody finishes reading has failed.
 
 Return every finding through submit_primary_findings.`;
 

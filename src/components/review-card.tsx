@@ -3,6 +3,7 @@ import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections
 import { toneDotClasses, toneTextClasses, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { STAGE_LABEL, type ReviewStage } from "@/lib/review/stage-types";
 import { canSayNoFindings, findingSourceUrl, showsProgress, stageProgress, STAGE_SEQUENCE, verificationTrail } from "@/lib/review/finding-presentation";
+import { explanationLines } from "@/lib/review/finding-prose";
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
@@ -175,7 +176,13 @@ function FindingItem({ finding, number, repoFullName }: { finding: FindingDoc; n
           </span>
         </summary>
         <div className="pb-4 pl-5">
-      <p className="text-sm leading-relaxed text-muted">{finding.explanation}</p>
+      {/* One paragraph per part. Rendering the whole explanation in a single
+          <p> collapsed its blank lines into spaces, so "what is wrong", "what
+          breaks" and "how it is reached" arrived as one unbroken block — the
+          text was fine, the markup ate it. */}
+      {explanationLines(finding.explanation).map((part, index) => (
+        <p key={index} className={`text-sm leading-relaxed text-muted${index > 0 ? " mt-2" : ""}`}>{part}</p>
+      ))}
       {finding.stage && <VerificationTrail stage={finding.stage} />}
       <p className="mt-2 text-xs text-subtle">{evidenceLabel(finding)}</p>
       {finding.verification?.status === "accepted" && <p className="mt-1 text-xs text-muted">Assessment: {finding.verification.reason}</p>}

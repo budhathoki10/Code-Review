@@ -1,4 +1,5 @@
 import type { FindingDoc } from "@/lib/db/collections";
+import { explanationParagraphs } from "@/lib/review/finding-prose";
 
 /**
  * The contract every stage of the multi-stage review passes along.
@@ -196,9 +197,11 @@ export class ReviewStageError extends Error {
  */
 export function toFindingDoc(tracked: TrackedFinding, commitSha: string): FindingDoc {
   const { candidate } = tracked;
-  const explanation = [candidate.problem, candidate.whyItIsABug, candidate.triggerScenario]
-    .filter((part) => part && part.trim().length > 0)
-    .join("\n\n");
+  // Trimmed to a sentence budget, not merely capped by the schema: the cap
+  // stops an essay, this is what decides whether a person reads it. Joined
+  // with blank lines and rendered as separate paragraphs — joining without
+  // that is how three tidy paragraphs became one unbroken wall.
+  const explanation = explanationParagraphs(candidate).join("\n\n");
   return {
     id: candidate.id,
     severity: candidate.severity,

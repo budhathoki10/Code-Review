@@ -31,7 +31,7 @@ const verificationSchema = z.object({
   confidence: z.number().min(0).max(1),
   fileValid: z.boolean(),
   lineValid: z.boolean(),
-  reason: z.string().min(1).max(1500),
+  reason: z.string().min(1).max(700),
   evidence: z.array(evidenceSchema).max(6).default([]),
   suggestedChange: z.string().max(2000).optional(),
 });
@@ -40,14 +40,14 @@ const newFindingSchema = z.object({
   id: z.string().min(1).max(40),
   severity: severityEnum,
   category: z.enum(["security", "bug", "performance", "quality", "testing"]),
-  title: z.string().min(1).max(200),
+  title: z.string().min(1).max(140),
   file: z.string().min(1),
   startLine: z.number().int().positive(),
   endLine: z.number().int().positive(),
   codeSnippet: z.string().max(2000).optional(),
-  problem: z.string().min(1).max(2000),
-  whyItIsABug: z.string().min(1).max(2000),
-  triggerScenario: z.string().max(1200).optional(),
+  problem: z.string().min(1).max(900),
+  whyItIsABug: z.string().min(1).max(900),
+  triggerScenario: z.string().max(500).optional(),
   evidence: z.array(evidenceSchema).max(6).default([]),
   relatedFiles: z.array(z.string()).max(10).default([]),
   suggestedFix: z.string().max(2000).optional(),
@@ -76,6 +76,21 @@ Set fileValid and lineValid from what you can actually see: is that the right fi
 JOB B — review the pull request yourself, from scratch. Do not limit yourself to what the first reviewer looked at. Search for defects they missed, with the same standard of proof: exact code, a reachable path, a realistic trigger. Report those in newFindings. This is not optional — a defect only you can see is the most valuable thing you can return.
 
 For both jobs, evidence must quote lines verbatim from the supplied source, and codeSnippet must be copied from it, never written from memory. Do not report style, naming, formatting, subjective refactors or generic best practice as defects. Empty arrays are correct answers when they are true.
+
+HOW TO WRITE A FINDING
+
+Write it the way a senior engineer writes a review comment: short, plain, and specific. The person reading is mid-task and deciding whether to care.
+
+- title: one line, under 100 characters. Name the defect, not the file.
+- problem: at most two sentences. What the code does that is wrong.
+- whyItIsABug: at most two sentences. What actually goes wrong as a result — the failure, the wrong value, the request that gets through.
+- triggerScenario: one sentence. The input or state that reaches it.
+
+Plain English. Say "the loop runs one past the end of the array", not "the iteration boundary condition exhibits an off-by-one characteristic". Name real identifiers from the code. Do not narrate the control flow you just read, and do not restate the code in prose — the reader can see the code, and quoting it back is not an explanation.
+
+Do not explain the tool's own internals or vocabulary. Do not enumerate every case you considered. If it takes more than a few sentences, it is usually two findings or not a finding.
+
+Length is not thoroughness. A finding nobody finishes reading has failed.
 
 Return everything through submit_verification_and_findings.`;
 
