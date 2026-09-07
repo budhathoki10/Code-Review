@@ -115,7 +115,14 @@ export async function runFocusedConfirmation(
     .join("\n\n");
 
   const result = await callStage({
-    stage: "phase2_completed",
+    // Named for what this call is, not for what ran before it. It used to say
+    // "phase2_completed", which is the stage that has already finished by the
+    // time this runs — so a failure here reported itself to the user as
+    // "Multi-stage review failed at phase2_completed" and pointed whoever read
+    // the logs at the wrong call. This stage adjudicates severe findings only
+    // one reviewer saw and records an `arbitration` verdict on each, so it is
+    // arbitration.
+    stage: "arbitration_running",
     model: arbiterStage(),
     system: SYSTEM,
     user: `${context}\n\nSEVERE FINDINGS AWAITING CONFIRMATION\n${rendered}`,

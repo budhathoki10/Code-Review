@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, GitPullRequest } from "lucide-react";
 import { auth } from "@/auth";
 import { getGithubAccountIds } from "@/lib/github/account";
 import {
+  findingFeedback,
   installations,
   pullRequests,
   repositories,
@@ -121,10 +122,27 @@ async function loadRepoAndReviews(
     .filter((pullRequest) => reviewedPullRequestIdSet.has(String(pullRequest._id)))
     .sort((a, b) => b.githubPrNumber - a.githubPrNumber);
 
+  // Which findings on this page a maintainer already marked as not a bug, so
+  // the control renders in the state it was left in. Scoped to the reviews
+  // actually shown rather than the whole repository — the list is only ever
+  // read per card, and a repository with a long history should not pay for
+  // all of it on every page load.
+  const notABugByReview = new Map<string, string[]>();
+  if (repoReviews.length > 0) {
+    const marks = await (await findingFeedback())
+      .find({ reviewId: { $in: repoReviews.map((review) => String(review._id)) } })
+      .toArray()
+      .catch(() => []);
+    for (const mark of marks) {
+      notABugByReview.set(mark.reviewId, [...(notABugByReview.get(mark.reviewId) ?? []), mark.findingId]);
+    }
+  }
+
   return {
     repositoryDoc,
     pullRequestById,
     filterPullRequests,
+    notABugByReview,
     repoReviews,
     totalReviews,
     filteredReviewCount,
@@ -215,6 +233,7 @@ export default async function RepositoryReviewsPage({
     repositoryDoc,
     pullRequestById,
     filterPullRequests,
+    notABugByReview,
     repoReviews,
     totalReviews,
     filteredReviewCount,
@@ -296,6 +315,7 @@ export default async function RepositoryReviewsPage({
                 accordionName="repository-review-history"
                 repositoryId={repositoryId}
                 repoFullName={repositoryDoc.fullName}
+                notABugIds={notABugByReview.get(String(review._id))}
               />
             ))}
           </ul>

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findResolvedFindings, formatResolvedNote, filterCarriedForwardFindings } from "@/lib/review/pipeline";
+import { findResolvedFindings, filterCarriedForwardFindings } from "@/lib/review/pipeline";
 import { estimateCost } from "@/lib/db/usage";
 import type { FindingDoc } from "@/lib/db/collections";
 
@@ -51,28 +51,6 @@ describe("findResolvedFindings", () => {
 
   it("returns nothing when there was no previous review", () => {
     expect(findResolvedFindings([], new Set(["src/a.ts"]), [])).toEqual([]);
-  });
-});
-
-describe("formatResolvedNote", () => {
-  it("says how many were resolved and names them", () => {
-    const note = formatResolvedNote([finding({ file: "src/a.ts", title: "null deref" })]);
-
-    expect(note).toContain("1 finding(s)");
-    expect(note).toContain("null deref");
-    expect(note).toContain("src/a.ts");
-  });
-
-  it("caps the list rather than printing fifty lines", () => {
-    const many = Array.from({ length: 12 }, (_, i) => finding({ title: `issue ${i}` }));
-    const note = formatResolvedNote(many);
-
-    expect(note).toContain("12 finding(s)");
-    expect(note).toContain("and 7 more");
-  });
-
-  it("is empty when nothing was resolved, so callers can append unconditionally", () => {
-    expect(formatResolvedNote([])).toBe("");
   });
 });
 

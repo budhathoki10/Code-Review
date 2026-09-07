@@ -73,6 +73,8 @@ JOB A — check every finding you were given. For each one: read the cited code,
 - uncertain: the supplied context genuinely cannot settle it. Use this rather than guessing; it is an honest answer and it will not be reported as a confirmed defect.
 Set fileValid and lineValid from what you can actually see: is that the right file, and does the cited range contain the code being described?
 
+When a SYMBOL TRACES section is present, read it before deciding. It was produced mechanically from the repository, not by a model, so it is fact and it outranks anything the first reviewer asserted — and anything you are inclined to assume. Most of the wrong findings this system has produced were wrong in exactly one way: a confident claim about what happens to a value, contradicted by the value's own consumers. If a finding says a value ends up somewhere, the traces show where it actually ends up. A claim the traces contradict is a reject, not an uncertain.
+
 JOB B — review the pull request yourself, from scratch. Do not limit yourself to what the first reviewer looked at. Search for defects they missed, with the same standard of proof: exact code, a reachable path, a realistic trigger. Report those in newFindings. This is not optional — a defect only you can see is the most valuable thing you can return.
 
 For both jobs, evidence must quote lines verbatim from the supplied source, and codeSnippet must be copied from it, never written from memory. Do not report style, naming, formatting, subjective refactors or generic best practice as defects. Empty arrays are correct answers when they are true.

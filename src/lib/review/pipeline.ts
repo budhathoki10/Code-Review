@@ -30,7 +30,9 @@ import {
   reviews,
   pullRequests,
   repositories,
+  findingFeedback,
   type FindingDoc,
+  type FindingFeedbackDoc,
   type RepositoryDoc,
 } from "@/lib/db/collections";
 import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queue";
@@ -249,17 +251,6 @@ export function findResolvedFindings(
 ): FindingDoc[] {
   const stillReported = new Set(currentFindings.map(findingKey));
   return previousFindings.filter((f) => touchedFiles.has(f.file) && !stillReported.has(findingKey(f)));
-}
-
-/** The sentence appended to a summary when a push fixed things the last review flagged. */
-export function formatResolvedNote(resolved: FindingDoc[]): string {
-  if (resolved.length === 0) return "";
-
-  const shown = resolved.slice(0, 5).map((f) => `- \`${f.file}\` — ${f.title}`);
-  const remainder = resolved.length - shown.length;
-  if (remainder > 0) shown.push(`- ...and ${remainder} more`);
-
-  return `\n\n---\n\n**${resolved.length} finding(s) from the previous review look resolved:**\n\n${shown.join("\n")}`;
 }
 
 /**
@@ -759,6 +750,26 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         // pipeline from the top. Reusing an earlier attempt's output for the
         // same commit is the difference between one primary review per push
         // and up to three.
+        // What this repository's maintainers have already ruled on. Loaded
+        // here rather than at the top of the review because it is only the
+        // multi-stage path that uses it, and a failed lookup must not stop a
+        // review — an unavailable opinion is the same as not having one.
+        let learnedRejections: FindingFeedbackDoc[] = [];
+        if (pullRequestDoc?.repositoryId) {
+          learnedRejections = await (await findingFeedback())
+            .find({ repositoryId: pullRequestDoc.repositoryId })
+            .sort({ at: -1 })
+            .limit(200)
+            .toArray()
+            .catch((err) => {
+              log.warn({ reviewId, err }, "could not load maintainer feedback; reviewing without it");
+              return [] as FindingFeedbackDoc[];
+            });
+          if (learnedRejections.length > 0) {
+            log.info({ reviewId, count: learnedRejections.length }, "applying findings maintainers marked as not a bug");
+          }
+        }
+
         const resumePrimary = existingReview?.multiStageCheckpoint?.primaryFindings as
           | Parameters<typeof runMultiStageReview>[0]["resumePrimary"]
           | undefined;
@@ -774,6 +785,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
           log,
           onStage: setStage,
           resumePrimary,
+          learnedRejections,
           onPrimaryFindings: async (findings) => {
             await reviewsCol.updateOne(
               { pullRequestId, headSha },
@@ -1041,10 +1053,11 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       formatCoverageNote(selection, unreviewedFiles);
   }
 
-  // Anything the last review flagged on a file this push edited, that this
-  // review no longer reports, is called out as fixed — otherwise a review
-  // that says nothing about a resolved issue is indistinguishable from one
-  // that forgot about it.
+  // Kept as a log line only. It used to be appended to the summary, but a
+  // reader opening a review wants to know what is wrong with the code in
+  // front of them, not a list of things that are no longer true — and the
+  // inference is a heuristic ("the model did not raise it again"), which is
+  // thin evidence to spend the top of a summary on.
   const resolvedFindings = findResolvedFindings(
     previousReview?.findings ?? [],
     new Set(selection.chunks.flatMap((chunk) => chunk.files.map((file) => file.filename)).filter((file) => !unreviewedFiles.includes(file))),
@@ -1053,7 +1066,6 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");
   }
-  const summaryWithResolved = `${aiResult.summary}${formatResolvedNote(resolvedFindings)}`;
 
   // Preserve feedback written during this attempt. A concurrent array rewrite
   // makes this write retry instead of silently discarding someone's rating.
@@ -1065,7 +1077,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       $set: {
         status: "completed",
         verdict: aiResult.verdict,
-        summary: summaryWithResolved,
+        summary: aiResult.summary,
         findings: withPersistedCommentIds(allFindings, storedBeforePublish.findings),
         touchedFiles: Array.from(touchedFiles),
         filteredFiles,
@@ -1110,7 +1122,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   try {
     const commentBody =
       formatSummaryComment({
-        summary: summaryWithResolved,
+        summary: aiResult.summary,
         findings: newPostableFindings.filter((f) => !overflowKeys.has(`${f.file}::${f.line}::${f.title}`)),
         overflowFindings: overflow,
       }) + formatConfigErrors(configErrors);

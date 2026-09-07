@@ -11,8 +11,10 @@ import { runDebate } from "@/lib/review/debate";
 import { runArbitration } from "@/lib/review/arbitration";
 import { isPresentable, validateLocation } from "@/lib/review/location-validation";
 import { needsFocusedConfirmation, runFocusedConfirmation } from "@/lib/review/focused-confirmation";
+import { buildTraceBlock, importCandidates } from "@/lib/review/symbol-trace";
+import { renderRejectionExamples, suppressLearnedRejections } from "@/lib/review/learned-rejections";
 import { ReviewStageError, toFindingDoc, type CandidateFinding, type ReviewStage } from "@/lib/review/stage-types";
-import type { FindingDoc } from "@/lib/db/collections";
+import type { FindingDoc, FindingFeedbackDoc } from "@/lib/db/collections";
 
 /**
  * Runs the whole pipeline: context, primary review, independent verification,
@@ -47,6 +49,15 @@ export interface MultiStageOptions {
   resumePrimary?: CandidateFinding[];
   /** Called the moment Phase 1 returns, before anything that can fail. */
   onPrimaryFindings?: (findings: CandidateFinding[]) => void | Promise<void>;
+  /**
+   * Findings a maintainer of this repository already said were not bugs.
+   *
+   * Applied twice: matching findings are dropped before they cost a
+   * verification round, and the rest are shown to the verifier as this
+   * repository's own judgement. Absent for a repository nobody has rated,
+   * which is every repository until someone clicks.
+   */
+  learnedRejections?: FindingFeedbackDoc[];
 }
 
 export interface MultiStageResult {
@@ -68,8 +79,16 @@ export interface MultiStageResult {
     focusedConfirmations: number;
     invalidLocation: number;
     resumedPrimary: boolean;
+    suppressedByFeedback: number;
   };
 }
+
+/**
+ * First-party modules pulled in purely so a trace can follow a symbol across
+ * an import. Bounded because this is depth for the findings already in hand,
+ * not a second attempt at reading the repository.
+ */
+const MAX_TRACE_HOPS = 10;
 
 export async function runMultiStageReview(options: MultiStageOptions): Promise<MultiStageResult> {
   const { files, repo, meta, deadlineAt, log } = options;
@@ -80,6 +99,33 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
     log.info({ stage }, "review stage");
     await options.onStage?.(stage);
   };
+
+  /** Adds paths to the shared source map, ignoring the ones that do not exist. */
+  const fetchInto = async (paths: string[]) => {
+    const wanted = [...new Set(paths)].filter((path) => !context.sources.has(path));
+    if (wanted.length === 0) return 0;
+    let added = 0;
+    await Promise.all(wanted.map(async (path) => {
+      const content = await getFileContent(repo.installationId, repo.owner, repo.repo, path, repo.ref, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(15_000, deadlineAt - Date.now()))),
+      }).catch(() => undefined);
+      if (content !== undefined) {
+        context.sources.set(path, content);
+        added += 1;
+      }
+    }));
+    return added;
+  };
+
+  /**
+   * A stage prompt with the symbol traces for the findings it is judging.
+   *
+   * Appended to the context rather than replacing anything: the traces are
+   * evidence about the findings, and the reviewer still needs the code they
+   * came from to read them against.
+   */
+  const withTraces = (findings: CandidateFinding[]) =>
+    `${context.text}${buildTraceBlock(findings, context.sources)}${renderRejectionExamples(options.learnedRejections ?? [])}`;
 
   await mark("context_building");
   const context = await buildReviewContext(files, repo, meta, Math.min(deadlineAt, Date.now() + 90_000));
@@ -109,8 +155,40 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
     log.info({ findings: primaryFindings.length, attempts: primary.attempts }, "primary review completed");
   }
 
+  // A maintainer already ruled on some of these. Dropping them here rather
+  // than after verification means a finding this repository has explicitly
+  // rejected never costs a verification round, a debate or an arbitration
+  // call — and, more to the point, never gets reported again after someone
+  // took the trouble to say it was wrong.
+  const learned = options.learnedRejections ?? [];
+  const { kept: keptFindings, suppressed } = suppressLearnedRejections(primaryFindings, learned);
+  if (suppressed.length > 0) {
+    log.info(
+      { count: suppressed.length, findings: suppressed.map((s) => `${s.finding.file}:${s.finding.startLine} (${s.because.title})`) },
+      "dropped findings a maintainer already marked as not a bug",
+    );
+    primaryFindings = keptFindings;
+  }
+
+  // Traces are only as good as the files they can see, and the context builder
+  // stops at a file budget that a real pull request exceeds. Before anything
+  // judges these findings, pull in the files they name and the first-party
+  // modules those files import — one hop, which is where the reviewers' worst
+  // misses live: a claim about what a value does, contradicted by the consumer
+  // sitting one import away.
+  const traceTargets = [...new Set(primaryFindings.map((f) => f.file))];
+  const fetchedForTrace = await fetchInto(traceTargets);
+  const hopTargets = traceTargets.flatMap((path) => {
+    const source = context.sources.get(path);
+    return source ? importCandidates(source, path) : [];
+  });
+  const fetchedHops = await fetchInto(hopTargets.slice(0, MAX_TRACE_HOPS));
+  if (fetchedForTrace + fetchedHops > 0) {
+    log.info({ findingFiles: fetchedForTrace, imported: fetchedHops }, "fetched extra source so symbol traces can follow it");
+  }
+
   await mark("phase2_running");
-  const secondary = await runSecondaryReview(context.text, primaryFindings, deadlineAt - reserveMs);
+  const secondary = await runSecondaryReview(withTraces(primaryFindings), primaryFindings, deadlineAt - reserveMs);
   usage = addUsage(usage, secondary.usage);
   await mark("phase2_completed");
   log.info(
@@ -135,7 +213,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   const needsFocus = needsFocusedConfirmation(tracked);
   if (needsFocus.length > 0 && Date.now() < deadlineAt - reserveMs) {
     try {
-      const focused = await runFocusedConfirmation(context.text, needsFocus, deadlineAt - reserveMs);
+      const focused = await runFocusedConfirmation(withTraces(needsFocus.map((t) => t.candidate)), needsFocus, deadlineAt - reserveMs);
       usage = addUsage(usage, focused.usage);
       focusedCount = needsFocus.length;
       const byId = new Map(focused.resolved.map((r) => [r.candidate.id, r]));
@@ -158,7 +236,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   if (disputed.length > 0 && Date.now() < deadlineAt - reserveMs) {
     await mark("debate_running");
     try {
-      const debate = await runDebate(context.text, disputed, deadlineAt - reserveMs / 2);
+      const debate = await runDebate(withTraces(disputed.map((t) => t.candidate)), disputed, deadlineAt - reserveMs / 2);
       usage = addUsage(usage, debate.usage);
       debatedCount = disputed.length;
       settled = [...settled, ...debate.resolved];
@@ -166,7 +244,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
       if (debate.unresolved.length > 0) {
         await mark("arbitration_running");
         try {
-          const arbitration = await runArbitration(context.text, debate.unresolved, deadlineAt);
+          const arbitration = await runArbitration(withTraces(debate.unresolved.map((t) => t.candidate)), debate.unresolved, deadlineAt);
           usage = addUsage(usage, arbitration.usage);
           arbitratedCount = debate.unresolved.length;
           settled = [...settled, ...arbitration.resolved];
@@ -242,6 +320,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
       focusedConfirmations: focusedCount,
       invalidLocation: invalid.length,
       resumedPrimary: resumed,
+      suppressedByFeedback: suppressed.length,
     },
   };
 }
