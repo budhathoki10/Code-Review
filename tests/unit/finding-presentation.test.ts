@@ -155,6 +155,16 @@ describe("severity grouping and counts", () => {
 });
 
 describe("review progress", () => {
+  it("does not regress between a phase finishing and the next starting", () => {
+    // Found by this repo's own reviewer on PR #90 and confirmed by both
+    // reviewers: phase1_completed and phase2_completed are persisted stages
+    // that fell outside the sequence, so the step collapsed to zero and the
+    // bar visibly emptied itself mid-review before refilling.
+    expect(stageProgress("phase1_completed").step).toBe(stageProgress("phase1_running").step);
+    expect(stageProgress("phase2_completed").step).toBe(stageProgress("phase2_running").step);
+    expect(stageProgress("phase1_completed").step).toBeGreaterThan(0);
+  });
+
   it("places a running review in the sequence", () => {
     expect(stageProgress("phase2_running")).toEqual({ step: 3, total: 7 });
     expect(stageProgress("context_building").step).toBe(1);

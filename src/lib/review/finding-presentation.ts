@@ -98,11 +98,27 @@ export const STAGE_SEQUENCE: ReviewStage[] = [
   "validating",
 ];
 
+/**
+ * Stages the pipeline writes that are not steps of their own.
+ *
+ * phase1_completed and phase2_completed are real, persisted stages — the
+ * pipeline marks them the moment a phase returns — but they are not progress
+ * a reader needs a separate bar segment for. Left unmapped they fell outside
+ * STAGE_SEQUENCE, so indexOf returned -1, the step collapsed to zero and the
+ * progress bar visibly emptied itself between two phases before refilling.
+ * Each maps to the phase it just finished, so progress only ever moves
+ * forward.
+ */
+const STAGE_ALIASES: Partial<Record<ReviewStage, ReviewStage>> = {
+  phase1_completed: "phase1_running",
+  phase2_completed: "phase2_running",
+};
+
 /** Position of a running review in that sequence, 1-based; 0 when it is not a running stage. */
 export function stageProgress(stage: ReviewStage | undefined): { step: number; total: number } {
   const total = STAGE_SEQUENCE.length;
   if (!stage) return { step: 0, total };
-  const index = STAGE_SEQUENCE.indexOf(stage);
+  const index = STAGE_SEQUENCE.indexOf(STAGE_ALIASES[stage] ?? stage);
   return { step: index < 0 ? 0 : index + 1, total };
 }
 

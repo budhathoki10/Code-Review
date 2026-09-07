@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { PullRequestFile } from "@/lib/github/diff";
 import type { RepoContext } from "@/lib/ai/review";
+import { getFileContent } from "@/lib/github/file-content";
 import { addUsage, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
 import { buildReviewContext, type PrMetadata } from "@/lib/review/context-builder";
 import { runPrimaryReview } from "@/lib/ai/primary-review";
@@ -187,6 +188,23 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   }
 
   await mark("validating");
+  // The context builder stops at a file budget, and a pull request can change
+  // more files than that. Without this, a finding in file thirteen of
+  // twenty-two failed validation because we never fetched it — discarded for
+  // our own budget rather than for being wrong, which was four of five
+  // findings on the first real run. Only files a surviving finding actually
+  // names are fetched, so the cost is proportional to the findings and not to
+  // the diff.
+  const missing = [...new Set(settled.map((t) => t.candidate.file))].filter((path) => !context.sources.has(path));
+  if (missing.length > 0) {
+    log.info({ files: missing.length }, "fetching source for findings outside the context budget");
+    await Promise.all(missing.map(async (path) => {
+      const content = await getFileContent(repo.installationId, repo.owner, repo.repo, path, repo.ref, {
+        signal: AbortSignal.timeout(Math.max(1, Math.min(15_000, deadlineAt - Date.now()))),
+      }).catch(() => undefined);
+      if (content !== undefined) context.sources.set(path, content);
+    }));
+  }
   const validationInput = { sources: context.sources, files, commitSha: meta.headSha };
   const validated = settled.map((t) => validateLocation(t, validationInput));
   const invalid = validated.filter((t) => !isPresentable(t));

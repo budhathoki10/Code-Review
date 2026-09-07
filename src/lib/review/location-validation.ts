@@ -17,6 +17,13 @@ import type { LocationValidation, TrackedFinding } from "@/lib/review/stage-type
  * is left invalid. Guessing a plausible nearby line is how a reader is sent
  * to code that has nothing to do with the finding, and losing a real defect
  * to a strict check is much cheaper than that.
+ *
+ * "We did not fetch that file" is NOT the same as "that file does not exist",
+ * and conflating them was measured discarding four of five findings on a real
+ * pull request: the context builder fetches a bounded number of files, this
+ * ran over the rest, and every finding beyond the budget was marked invalid
+ * for a reason that had nothing to do with whether it was right. Callers now
+ * supply the missing sources before validating (see resolveMissingSources).
  */
 
 const SEARCH_RADIUS = 15;
