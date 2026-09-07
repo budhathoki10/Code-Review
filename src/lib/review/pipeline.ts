@@ -420,7 +420,24 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // PRs last reviewed before that field existed. Both are skipped entirely on
   // a forced review, which is a request to re-review the whole PR, not the
   // delta since a run the author just rejected.
-  const baselineSha = forced ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
+  // The multi-stage pipeline always reviews the whole pull request.
+  //
+  // Incremental review is a speed optimisation, and it buys that speed by
+  // never looking again at a file this push did not touch: those findings are
+  // carried forward from the previous review instead of being re-derived. That
+  // is a reasonable trade for a fast single-model pass and the wrong one here,
+  // because it makes every mistake permanent. A defect missed on the first
+  // review, or discarded by a bug in our own context budget, is invisible to
+  // every later push — the reviewer never looks at that file again. Measured
+  // on PR #90: the first pass read 22 files, the next read 3, and four
+  // findings dropped by a budget bug could not come back on their own.
+  //
+  // This pipeline's whole premise is accuracy over speed, so it re-reads
+  // everything each time. Set REVIEW_MULTI_STAGE_INCREMENTAL=true to opt back
+  // into deltas if the cost ever outweighs that.
+  const multiStageIncremental = process.env.REVIEW_MULTI_STAGE_INCREMENTAL === "true";
+  const skipBaseline = forced || (MULTI_STAGE && !multiStageIncremental);
+  const baselineSha = skipBaseline ? undefined : (pullRequestDoc?.lastReviewedSha ?? previousReview?.headSha);
 
   let diff: PullRequestDiff;
   /** Set only when this review really did diff from a previous review's head. */
