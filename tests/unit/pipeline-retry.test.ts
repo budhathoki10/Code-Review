@@ -563,7 +563,7 @@ describe("an incremental review says that is what it is", () => {
   });
 });
 
-describe("the multi-stage pipeline reviews the whole pull request", () => {
+describe("a push is reviewed as the files it changed", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getIncrementalDiffMock.mockResolvedValue(null);
@@ -593,12 +593,29 @@ describe("the multi-stage pipeline reviews the whole pull request", () => {
     expect(getIncrementalDiffMock).toHaveBeenCalled();
   });
 
-  it("ignores the baseline entirely when multi-stage is on", async () => {
-    // Incremental review never re-reads a file this push did not touch, so a
-    // defect missed once — or dropped by a bug in our own context budget — is
-    // invisible to every later push. Accuracy over speed is this pipeline's
-    // whole premise, so it re-reads everything.
+  it("diffs incrementally on the multi-stage path too", async () => {
+    // A second push touching two files is reviewed as those two files, whichever
+    // pipeline is running. This used to be true only of the single-model path.
     vi.stubEnv("REVIEW_MULTI_STAGE", "true");
+    vi.resetModules();
+    const { runReviewPipeline: run } = await import("@/lib/review/pipeline");
+    pullRequestDocs[0].lastReviewedSha = "older99";
+    getIncrementalDiffMock.mockResolvedValue({
+      fileCount: 1, totalChangedLines: 2, diffText: "d",
+      files: [{ filename: "src/b.ts", status: "modified", changes: 2, patch: "@@ -1,1 +1,1 @@\n-const y = 1;\n+const y = 2;", patchSource: "github" }],
+    });
+
+    await run(JOB, log).catch(() => undefined);
+
+    expect(getIncrementalDiffMock).toHaveBeenCalledWith(1, "acme", "widgets", "older99", "abc123");
+    vi.unstubAllEnvs();
+  });
+
+  it("re-reads the whole pull request when the multi-stage opt-out is set", async () => {
+    // The escape hatch for the cost of incremental review: it never re-reads a
+    // file this push did not touch, so a defect missed once stays missed.
+    vi.stubEnv("REVIEW_MULTI_STAGE", "true");
+    vi.stubEnv("REVIEW_MULTI_STAGE_INCREMENTAL", "false");
     vi.resetModules();
     const { runReviewPipeline: run } = await import("@/lib/review/pipeline");
     pullRequestDocs[0].lastReviewedSha = "older99";
