@@ -356,6 +356,37 @@ export interface ReviewDoc {
   };
 }
 
+/**
+ * A finding a maintainer said was not a bug.
+ *
+ * Stored per repository rather than inside the review it came from, because
+ * the point of it is to be read on the *next* review of a different pull
+ * request. Keeping it here makes that a single indexed query instead of a
+ * scan of every review the repository has ever had.
+ *
+ * The finding's text is copied rather than referenced. The review it came
+ * from can be deleted, and the judgement "this is not a bug here" should
+ * outlive it — that judgement is the asset, and it is the only thing in this
+ * system that came from a human who knows the codebase.
+ */
+export interface FindingFeedbackDoc {
+  _id?: string;
+  repositoryId: string;
+  reviewId: string;
+  findingId: string;
+  file: string;
+  startLine: number;
+  endLine: number;
+  category: FindingDoc["category"];
+  severity: FindingDoc["severity"];
+  title: string;
+  explanation: string;
+  /** Only "false-positive" today. Typed as a union so agreeing findings can be recorded later. */
+  label: "false-positive";
+  userId: string;
+  at: Date;
+}
+
 async function db() {
   const client = await getMongoClient();
   return client.db(process.env.MONGODB_DB);
@@ -381,19 +412,24 @@ export async function usage(): Promise<Collection<UsageDoc>> {
   return (await db()).collection<UsageDoc>("usage");
 }
 
+export async function findingFeedback(): Promise<Collection<FindingFeedbackDoc>> {
+  return (await db()).collection<FindingFeedbackDoc>("finding_feedback");
+}
+
 let indexesEnsured: Promise<void> | undefined;
 
 /** Idempotent — safe to call on every cold start. */
 export function ensureIndexes(): Promise<void> {
   if (!indexesEnsured) {
     indexesEnsured = (async () => {
-      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol] =
+      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol, findingFeedbackCol] =
         await Promise.all([
           installations(),
           repositories(),
           pullRequests(),
           reviews(),
           usage(),
+          findingFeedback(),
         ]);
 
       await Promise.all([
@@ -404,6 +440,13 @@ export function ensureIndexes(): Promise<void> {
         // Unique so the recordUsage upsert always accumulates into the single
         // global document instead of racing concurrent reviews into duplicates.
         usageCol.createIndex({ key: 1 }, { unique: true }),
+        // Read on every review of the repository, so it is indexed for that
+        // and nothing else.
+        findingFeedbackCol.createIndex({ repositoryId: 1, at: -1 }),
+        // One judgement per finding. Re-marking the same finding updates it
+        // rather than stacking duplicates that would each match separately
+        // and make one opinion look like several.
+        findingFeedbackCol.createIndex({ reviewId: 1, findingId: 1 }, { unique: true }),
       ]);
     })();
   }

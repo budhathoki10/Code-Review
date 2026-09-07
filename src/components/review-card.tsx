@@ -1,4 +1,4 @@
-import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, HelpCircle, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
+import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { STAGE_LABEL, type ReviewStage } from "@/lib/review/stage-types";
@@ -372,51 +372,6 @@ function RejectedFindings({ rejected }: { rejected: FindingDoc[] }) {
   );
 }
 
-/**
- * Findings the pipeline could not establish either way.
- *
- * Kept visible but firmly apart from the confirmed list. Hiding them would
- * throw away the reviewer's own uncertainty, which is real information;
- * merging them into the findings would inflate the count with things nobody
- * could prove, which is exactly the behaviour the multi-stage pipeline exists
- * to stop. Closed by default, and never included in any severity count.
- */
-function UnresolvedFindings({ findings }: { findings: FindingDoc[] }) {
-  return (
-    <details className="group/unresolved mt-3">
-      <summary className="flex cursor-pointer list-none items-center gap-2 py-2 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
-        <ChevronRight
-          className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/unresolved:rotate-90"
-          aria-hidden="true"
-        />
-        <HelpCircle className="h-3.5 w-3.5 shrink-0 text-subtle" aria-hidden="true" />
-        <span className="text-xs font-semibold tracking-wide text-subtle uppercase">Unresolved</span>
-        <span className="shrink-0 text-xs tabular-nums text-subtle">{findings.length}</span>
-      </summary>
-      <ul className="divide-y divide-border border-t border-border pl-5">
-        {findings.map((finding, index) => (
-          <li key={index} className="py-3 first:pt-3 last:pb-0">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(SEVERITY_TONE[finding.severity])}`}>
-                <span className={toneDotClasses(SEVERITY_TONE[finding.severity])} />
-                {finding.severity}
-              </span>
-              <span className="truncate font-mono text-xs text-subtle" title={finding.file}>
-                {finding.file}
-                {finding.line ? `:${finding.line}` : ""}
-              </span>
-            </div>
-            <p className="mt-1 text-sm text-muted">{finding.title}</p>
-            <p className="mt-1.5 text-xs leading-relaxed text-subtle">
-              The reviewers could not establish this either way from the code available, so it is not reported as a defect.
-            </p>
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
-
 export function ReviewCard({
   review,
   pullRequest,
@@ -424,6 +379,7 @@ export function ReviewCard({
   accordionName,
   repositoryId,
   repoFullName,
+  notABugIds,
 }: {
   review: ReviewDoc;
   pullRequest: PullRequestDoc | undefined;
@@ -434,6 +390,8 @@ export function ReviewCard({
   repositoryId?: string;
   /** "owner/repo", used to link a finding to its exact lines on GitHub. Omitted renders the location as plain text. */
   repoFullName?: string;
+  /** Findings of this review a maintainer has already marked as not a bug. */
+  notABugIds?: string[];
 }) {
   const findings = visibleFindings(review);
   const severityGroups = groupFindingsBySeverity(findings);
@@ -530,20 +488,29 @@ export function ReviewCard({
                 <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} repoFullName={repoFullName} />
               ))}
             </ul>
+          ) : canSayNoFindings(review) ? (
+            <NoFindings review={review} rejected={review.verificationCheckpoint?.rejected.length ?? 0} />
           ) : (
-            canSayNoFindings(review) && (
-              <NoFindings review={review} rejected={review.verificationCheckpoint?.rejected.length ?? 0} />
+            /* Nothing confirmed, but the pipeline is holding something it could
+               not settle — so "no findings" would be a claim it has not earned.
+               The items themselves are deliberately not listed: an unproven
+               claim reads as a defect to anyone skimming, and the two that
+               reached this state on real reviews were both wrong. One honest
+               line, and the detail stays in the stored review for diagnostics. */
+            !!review.unresolvedFindings?.length && review.status === "completed" && (
+              <p className="mt-4 border-t border-border pt-4 text-sm text-muted">
+                Nothing confirmed. {review.unresolvedFindings.length === 1 ? "One point" : `${review.unresolvedFindings.length} points`} could not be settled from the code available, so {review.unresolvedFindings.length === 1 ? "it is" : "they are"} not reported as defects.
+              </p>
             )
           )}
 
           {review.metrics && <MetricsStrip metrics={review.metrics} />}
           {repositoryId && review.status === "completed" && (
-            <ReviewFeedback reviewId={String(review._id)} repositoryId={repositoryId} value={review.feedback?.label} />
+            <ReviewFeedback reviewId={String(review._id)} repositoryId={repositoryId} value={review.feedback?.label} findings={findings} notABugIds={notABugIds ?? []} />
           )}
           {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
             Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
           </p>}
-          {!!review.unresolvedFindings?.length && <UnresolvedFindings findings={review.unresolvedFindings} />}
           {!!review.verificationCheckpoint?.rejected.length && (
             <RejectedFindings rejected={review.verificationCheckpoint.rejected} />
           )}
