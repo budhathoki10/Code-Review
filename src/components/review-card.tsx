@@ -61,31 +61,54 @@ function VerdictBadge({ verdict }: { verdict: NonNullable<ReviewDoc["verdict"]> 
   );
 }
 
-/** One finding, numbered within its severity group. `file`/`line` are shown here now — no longer implied by a per-file group header, since the grouping key is severity. */
+/**
+ * One finding, numbered within its severity group, and collapsible in its own
+ * right.
+ *
+ * Two levels, not one: the severity folder groups, and each finding opens and
+ * closes on top of that — so a review with a dozen findings can be skimmed as
+ * a list of titles and code locations, then read one at a time. Both start
+ * open, because a finding nobody can see is the same as a finding nobody
+ * found.
+ *
+ * The code location leads the header and is set in the foreground rather than
+ * the subtle tone: on a code review the first question is always "where", and
+ * it was previously the faintest text in the row.
+ */
 function FindingItem({ finding, number }: { finding: FindingDoc; number: number }) {
   const CategoryIcon = CATEGORY_ICON[finding.category];
   return (
-    <li className="py-4 first:pt-0 last:pb-0">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span className="shrink-0 text-xs font-semibold tabular-nums text-subtle">{number})</span>
-        <span className="inline-flex items-center gap-1 text-xs text-subtle">
-          <CategoryIcon className="h-3 w-3" aria-hidden="true" />
-          {finding.category}
-        </span>
-        <span className="truncate font-mono text-xs text-subtle" title={finding.file}>
-          {finding.file}
-          {finding.line ? `:${finding.line}` : ""}
-        </span>
-      </div>
-      <p className="mt-1.5 text-sm font-medium text-foreground">
-        {finding.title}
-        {finding.source === "static-analysis" && (
-          <span className="ml-2 border border-border px-1.5 py-0.5 align-middle text-[10px] font-medium tracking-wide text-subtle uppercase">
-            Static analysis
+    <li className="first:pt-0 last:pb-0">
+      <details open className="group/finding">
+        <summary className="flex cursor-pointer list-none items-start gap-2 py-4 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
+          <ChevronRight
+            className="mt-0.5 h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/finding:rotate-90"
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="shrink-0 text-xs font-semibold tabular-nums text-subtle">{number})</span>
+              <span className="inline-flex items-center gap-1 text-xs text-subtle">
+                <CategoryIcon className="h-3 w-3" aria-hidden="true" />
+                {finding.category}
+              </span>
+              <span className="truncate font-mono text-xs font-medium text-foreground" title={finding.file}>
+                {finding.file}
+                {finding.line ? `:${finding.line}` : ""}
+              </span>
+            </span>
+            <span className="mt-1.5 block text-sm font-medium text-foreground">
+              {finding.title}
+              {finding.source === "static-analysis" && (
+                <span className="ml-2 border border-border px-1.5 py-0.5 align-middle text-[10px] font-medium tracking-wide text-subtle uppercase">
+                  Static analysis
+                </span>
+              )}
+            </span>
           </span>
-        )}
-      </p>
-      <p className="mt-2 text-sm leading-relaxed text-muted">{finding.explanation}</p>
+        </summary>
+        <div className="pb-4 pl-5">
+      <p className="text-sm leading-relaxed text-muted">{finding.explanation}</p>
       <p className="mt-2 text-xs text-subtle">{evidenceLabel(finding)}</p>
       {finding.verification?.status === "accepted" && <p className="mt-1 text-xs text-muted">Assessment: {finding.verification.reason}</p>}
       {finding.verification?.evidence.map((evidence, index) => <p key={index} className="mt-1 break-words font-mono text-xs text-muted">{evidence.file}:{evidence.line} — {evidence.quote}</p>)}
@@ -112,21 +135,29 @@ function FindingItem({ finding, number }: { finding: FindingDoc; number: number 
         ) : (
           <DiffBlock diff={finding.suggestion} file={finding.file} className="mt-3" />
         ))}
+        </div>
+      </details>
     </li>
   );
 }
 
 /**
  * One severity's findings behind a native disclosure — a "folder" for High,
- * Medium, and so on. Closed by default, no exceptions: a review with two
- * dozen findings across five severities should land as five compact rows,
- * not everything already unfurled.
+ * Medium, and so on.
+ *
+ * Open by default. It was closed, which meant the card showed "MEDIUM 1 /
+ * LOW 2 / INFO 1" and nothing else — the findings were all present, correct
+ * and one click away, and every reader concluded the review had produced
+ * severity counts and no content. A code review whose findings are hidden by
+ * default is indistinguishable from one that found nothing, and that is the
+ * worst thing this page can be. Each finding collapses individually, so the
+ * two-dozen-finding case is still skimmable without hiding the whole list.
  */
 function SeverityGroup({ severity, findings }: { severity: FindingDoc["severity"]; findings: FindingDoc[] }) {
   const tone = SEVERITY_TONE[severity];
   return (
     <li>
-      <details className="group/severity">
+      <details open className="group/severity">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-2.5 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
           <ChevronRight
             className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/severity:rotate-90"
