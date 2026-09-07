@@ -487,7 +487,10 @@ export function ReviewCard({
               by NoFindings below, which says the same thing with the file count
               and the assessment tally behind it — leaving both in place rendered
               the message twice on exactly the review that has least to show. */}
-          {!hasReviewDetails && review.status !== "completed" && (
+          {/* Not shown alongside the progress bar: the bar already names the
+              stage and its position, so this repeats it in vaguer words and
+              pushes the bar further from the heading. */}
+          {!hasReviewDetails && review.status !== "completed" && !showsProgress(review) && (
             <p className="py-5 text-sm leading-6 text-muted">
               {review.status === "pending"
                 ? "This review is still being processed. Results will appear here when it completes."

@@ -163,18 +163,28 @@ export type ReviewStage =
   | "completed"
   | "failed";
 
+/**
+ * What each stage is called on screen.
+ *
+ * Plainly and accurately, in that order. "Analyzing repository" was neither:
+ * the stage reads the pull request's changed files plus one hop of their
+ * imports and callers, and calling that "the repository" tells a waiting
+ * reader the tool is doing something far larger and slower than it is. Every
+ * label now names the thing actually happening, in words someone who has not
+ * read this code would use.
+ */
 export const STAGE_LABEL: Record<ReviewStage, string> = {
   pending: "Queued",
-  context_building: "Analyzing repository",
-  phase1_running: "Deep primary review",
-  phase1_completed: "Primary review complete",
-  phase2_running: "Independent verification",
-  phase2_completed: "Verification complete",
-  reconciling: "Reconciling findings",
-  debate_running: "Resolving disagreements",
-  arbitration_running: "Final adjudication",
-  validating: "Validating findings",
-  completed: "Complete",
+  context_building: "Reading the changed files",
+  phase1_running: "First reviewer reading the code",
+  phase1_completed: "First review done",
+  phase2_running: "Second reviewer checking independently",
+  phase2_completed: "Second review done",
+  reconciling: "Matching up what they found",
+  debate_running: "Working through disagreements",
+  arbitration_running: "Settling the last disagreements",
+  validating: "Checking each finding against the code",
+  completed: "Done",
   failed: "Failed",
 };
 
