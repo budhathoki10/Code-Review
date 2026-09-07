@@ -1,4 +1,4 @@
-import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
+import { Bug, ChevronRight, FlaskConical, Folder, ShieldAlert, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
 import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
@@ -215,81 +215,6 @@ function MetricsStrip({ metrics }: { metrics: NonNullable<ReviewDoc["metrics"]> 
   );
 }
 
-/**
- * What a review with nothing to report looks like.
- *
- * Without this the findings area is simply absent, so a clean review and a
- * broken one render identically — an empty card that reads as "the dashboard
- * failed" rather than "there was nothing to raise". For a reviewer whose
- * entire pitch is that it stays quiet, silence has to look deliberate.
- */
-function NoFindings({ review, rejected }: { review: ReviewDoc; rejected: number }) {
-  const files = review.metrics?.filesReviewed;
-  return (
-    <div className="mt-4 flex items-start gap-3 border-t border-border pt-4">
-      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
-      <div>
-        <p className="text-sm font-medium text-foreground">No findings</p>
-        <p className="mt-0.5 text-sm text-muted">
-          {files === undefined
-            ? "This review raised nothing."
-            : `Nothing was raised across ${files} reviewed file${files === 1 ? "" : "s"}.`}
-          {rejected > 0 && ` ${rejected} candidate${rejected === 1 ? " was" : "s were"} dropped during assessment — see below.`}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/**
- * The findings the assessment pass threw out, and why.
- *
- * Rendered properly rather than as a line of debug text, because on a quiet
- * review this is the only substance on the card — and it is the evidence for
- * the claim the product actually makes. "Three things were considered and
- * rejected, here is the reasoning" is a stronger statement than an empty page,
- * and it is what lets someone judge whether the filter is working or just
- * swallowing everything. Kept closed and visually recessive: this is
- * corroboration, not a to-do list.
- */
-function RejectedFindings({ rejected }: { rejected: FindingDoc[] }) {
-  return (
-    <details className="group/rejected mt-3">
-      <summary className="flex cursor-pointer list-none items-center gap-2 py-2 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
-        <ChevronRight
-          className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/rejected:rotate-90"
-          aria-hidden="true"
-        />
-        <ShieldOff className="h-3.5 w-3.5 shrink-0 text-subtle" aria-hidden="true" />
-        <span className="text-xs font-semibold tracking-wide text-subtle uppercase">Rejected in assessment</span>
-        <span className="shrink-0 text-xs tabular-nums text-subtle">{rejected.length}</span>
-      </summary>
-      <ul className="divide-y divide-border border-t border-border pl-5">
-        {rejected.map((finding, index) => (
-          <li key={index} className="py-3 first:pt-3 last:pb-0">
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-              <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(SEVERITY_TONE[finding.severity])}`}>
-                <span className={toneDotClasses(SEVERITY_TONE[finding.severity])} />
-                {finding.severity}
-              </span>
-              <span className="truncate font-mono text-xs text-subtle" title={finding.file}>
-                {finding.file}
-                {finding.line ? `:${finding.line}` : ""}
-              </span>
-            </div>
-            <p className="mt-1 text-sm text-muted line-through decoration-subtle/60">{finding.title}</p>
-            {finding.verification?.reason && (
-              <p className="mt-1.5 text-xs leading-relaxed text-subtle">
-                <span className="font-medium">Why it was dropped:</span> {finding.verification.reason}
-              </p>
-            )}
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
-
 export function ReviewCard({
   review,
   pullRequest,
@@ -347,15 +272,11 @@ export function ReviewCard({
         <div className="border-t border-border px-5 pb-5">
           <SeverityStrip findings={findings} />
 
-          {/* Pending only. A completed review with nothing to report is handled
-              by NoFindings below, which says the same thing with the file count
-              and the assessment tally behind it — leaving both in place rendered
-              the message twice on exactly the review that has least to show. */}
-          {!hasReviewDetails && review.status !== "completed" && (
+          {!hasReviewDetails && (
             <p className="py-5 text-sm leading-6 text-muted">
               {review.status === "pending"
                 ? "This review is still being processed. Results will appear here when it completes."
-                : "This review finished without findings or summary details."}
+                : "This review completed without additional findings or summary details."}
             </p>
           )}
 
@@ -385,16 +306,12 @@ export function ReviewCard({
             </div>
           )}
 
-          {severityGroups.length > 0 ? (
+          {severityGroups.length > 0 && (
             <ul className="mt-4 divide-y divide-border border-t border-border">
               {severityGroups.map((group) => (
                 <SeverityGroup key={group.severity} severity={group.severity} findings={group.findings} />
               ))}
             </ul>
-          ) : (
-            review.status === "completed" && (
-              <NoFindings review={review} rejected={review.verificationCheckpoint?.rejected.length ?? 0} />
-            )
           )}
 
           {review.metrics && <MetricsStrip metrics={review.metrics} />}
@@ -404,9 +321,9 @@ export function ReviewCard({
           {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
             Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
           </p>}
-          {!!review.verificationCheckpoint?.rejected.length && (
-            <RejectedFindings rejected={review.verificationCheckpoint.rejected} />
-          )}
+          {!!review.verificationCheckpoint?.rejected.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Rejected findings ({review.verificationCheckpoint.rejected.length})</summary>
+            <ul className="mt-2 space-y-2">{review.verificationCheckpoint.rejected.map((finding, index) => <li key={index}>{finding.file}: {finding.title} — {finding.verification?.reason}</li>)}</ul>
+          </details>}
           {!!review.riskFiles?.length && <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer">Sensitive changes prioritized ({review.riskFiles.length})</summary>
             <ul className="mt-2 space-y-1">{review.riskFiles.map((risk) => <li key={risk.file}>{risk.file}: {risk.reasons.join(", ")}</li>)}</ul>
           </details>}
