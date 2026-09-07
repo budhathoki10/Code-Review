@@ -263,39 +263,35 @@ export function formatResolvedNote(resolved: FindingDoc[]): string {
 }
 
 /**
- * The summary for a multi-stage review, counted from the findings that
- * survived every stage — never from a model's own account of what it found.
+ * The summary for a multi-stage review.
+ *
+ * Counted from the findings that are actually stored, and built after they
+ * are, because those are two different sets. It used to be written from the
+ * pipeline's own output before dedupe and the category and severity filters
+ * ran, so a card could read "2 high · 2 medium" above a list holding three
+ * mediums — the summary describing a set that no longer existed by the time
+ * anyone saw it. Counts follow findings; findings are never rebuilt from
+ * counts.
+ *
+ * The per-stage tallies that used to be here — candidates, disputed, debated,
+ * arbitrated — are pipeline telemetry, not review content. They belong in the
+ * logs and the stage record, and on a review card they crowded out the
+ * findings themselves. The rejected list is rendered in full below the
+ * summary, so restating its count in prose said nothing twice.
  */
 function buildMultiStageSummary(
-  confirmed: FindingDoc[],
-  multi: Awaited<ReturnType<typeof runMultiStageReview>>,
+  findings: FindingDoc[],
   selection: { coveredCount: number },
   unreviewed: string[],
 ): string {
   const counts = SEVERITY_ORDER.slice().reverse()
-    .map((severity) => ({ severity, count: confirmed.filter((f) => f.severity === severity).length }))
+    .map((severity) => ({ severity, count: findings.filter((f) => f.severity === severity).length }))
     .filter((entry) => entry.count > 0);
-  const headline = counts.length
-    ? counts.map((c) => `${c.count} ${c.severity}`).join(" · ")
-    : "no confirmed findings";
   const reviewed = Math.max(0, selection.coveredCount - unreviewed.length);
-  const lines = [
-    `Reviewed ${reviewed} file(s) with a two-reviewer pass — ${headline}.`,
-    "",
-    `${multi.stats.primary} candidate(s) from the primary review, ${multi.stats.secondaryNew} found independently by the verifier. ` +
-      `${multi.stats.disputed} disputed, ${multi.stats.debated} debated, ${multi.stats.arbitrated} sent to arbitration.`,
-  ];
-  if (multi.rejected.length > 0) {
-    lines.push("", `${multi.rejected.length} candidate(s) were rejected during assessment and are listed below with the reason.`);
-  }
-  if (multi.unresolved.length > 0) {
-    lines.push("", `${multi.unresolved.length} finding(s) could not be established either way and are listed as unresolved rather than reported as defects.`);
-  }
-  if (multi.stats.invalidLocation > 0) {
-    lines.push("", `${multi.stats.invalidLocation} finding(s) were dropped because their cited file or line could not be verified against the reviewed commit.`);
-  }
-  lines.push("", "AI assessment is not test-backed proof.");
-  return lines.join("\n");
+  const headline = counts.length
+    ? `${counts.map((c) => `${c.count} ${c.severity}`).join(" · ")}.`
+    : "no findings.";
+  return `Reviewed ${reviewed} file(s) — ${headline}`;
 }
 
 function buildCheckSummary(findings: FindingDoc[]): string {
@@ -818,11 +814,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
           },
         ).catch(() => undefined);
 
-        aiResult = {
-          verdict,
-          summary: buildMultiStageSummary(confirmed, multi, selection, unreviewedFiles),
-          findings: confirmed,
-        };
+        // Summary deliberately left empty here and written below, once
+        // allFindings exists. Counting at this point counts a set that dedupe
+        // and the disabled-category/severity filters have not yet touched.
+        aiResult = { verdict, summary: "", findings: confirmed };
         reviewUsage = multi.usage;
         multiStageOutcome = multi;
       } catch (error) {
@@ -1011,7 +1006,9 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
   const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
   aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
-  if (selection.chunks.length > 0 && !multiStageOutcome) {
+  if (multiStageOutcome) {
+    aiResult.summary = buildMultiStageSummary(allFindings, selection, unreviewedFiles) + formatCoverageNote(selection, unreviewedFiles);
+  } else if (selection.chunks.length > 0) {
     // The first-pass prose can contain a rejected accusation or obsolete merge
     // recommendation. Rebuild it from assessed findings, with no additional call.
     // An incremental review reads exactly like a full one unless it says

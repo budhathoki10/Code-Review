@@ -1,6 +1,6 @@
 import { Bug, CheckCircle2, ChevronRight, FlaskConical, Folder, HelpCircle, ShieldAlert, ShieldOff, Sparkles, Zap } from "lucide-react";
 import type { FindingDoc, PullRequestDoc, ReviewDoc } from "@/lib/db/collections";
-import { toneDotClasses, toneTextClasses, SEVERITY_ORDER, SEVERITY_TONE, type Tone } from "@/lib/ui";
+import { toneDotClasses, toneTextClasses, SEVERITY_TONE, type Tone } from "@/lib/ui";
 import { STAGE_LABEL, type ReviewStage } from "@/lib/review/stage-types";
 import { canSayNoFindings, findingSourceUrl, showsProgress, stageProgress, STAGE_SEQUENCE, verificationTrail } from "@/lib/review/finding-presentation";
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
@@ -245,30 +245,6 @@ function SeverityGroup({ severity, findings, repoFullName }: { severity: Finding
   );
 }
 
-/** Per-severity counts as compact text, e.g. "2 critical · 1 high · 3 medium" — lets a developer triage a review without reading every finding. */
-function SeverityStrip({ findings }: { findings: FindingDoc[] }) {
-  if (findings.length === 0) return null;
-
-  const counts = SEVERITY_ORDER.map((severity) => ({
-    severity,
-    count: findings.filter((f) => f.severity === severity).length,
-  })).filter((entry) => entry.count > 0);
-
-  return (
-    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-      {counts.map(({ severity, count }) => (
-        <span
-          key={severity}
-          className={`inline-flex items-center gap-1.5 text-xs font-medium ${toneTextClasses(SEVERITY_TONE[severity])}`}
-        >
-          <span className={toneDotClasses(SEVERITY_TONE[severity])} />
-          {count} {severity}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 function formatDuration(ms: number): string {
   if (ms < 1_000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1_000).toFixed(1)}s`;
@@ -492,7 +468,11 @@ export function ReviewCard({
         </summary>
 
         <div className="border-t border-border px-5 pb-5">
-          <SeverityStrip findings={findings} />
+          {/* No severity strip here: every folder header below already carries
+              its own severity and count, so a strip above them states the same
+              numbers a second time and pushes the findings further down the
+              card. The findings are the content; the counts are a label on
+              them. */}
 
           {showsProgress(review) && review.stage && <StageProgress stage={review.stage} />}
 
