@@ -6,6 +6,7 @@ import { canSayNoFindings, findingSourceUrl, showsProgress, stageProgress, STAGE
 import { visibleFindings, groupFindingsBySeverity } from "@/lib/review/review-display";
 import { Markdown } from "@/components/markdown";
 import { DiffBlock } from "@/components/diff-block";
+import { CodeLocationLink } from "@/components/code-location-link";
 import { SuggestionBlock } from "@/components/suggestion-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
 import { ReviewFeedback } from "@/components/review-feedback";
@@ -113,18 +114,7 @@ function CodeLocation({ finding, repoFullName }: { finding: FindingDoc; repoFull
       </span>
     );
   }
-  return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer noopener"
-      onClick={(event) => event.stopPropagation()}
-      className="truncate font-mono text-xs font-medium text-foreground underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
-      title={`${finding.file} at ${finding.commitSha?.slice(0, 7)}`}
-    >
-      {label}
-    </a>
-  );
+  return <CodeLocationLink href={href} label={label} title={`${finding.file} at ${finding.commitSha?.slice(0, 7)}`} />;
 }
 
 /**
