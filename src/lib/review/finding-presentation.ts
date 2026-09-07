@@ -26,7 +26,15 @@ import type { ReviewStage } from "@/lib/review/stage-types";
  */
 export function findingSourceUrl(finding: FindingDoc, repoFullName?: string): string | undefined {
   if (!repoFullName || !finding.commitSha || !finding.file) return undefined;
+  // Every segment is checked, not just the repository name. All three are
+  // interpolated into a URL, and only one of them was validated — a commitSha
+  // or path carrying "../" or a host would send the reader somewhere other
+  // than github.com under a link that looks authoritative. In practice these
+  // come from a GitHub webhook payload rather than a user, so this is depth
+  // rather than a live hole, but the cost of checking is a regex.
   if (!/^[\w.-]+\/[\w.-]+$/.test(repoFullName)) return undefined;
+  if (!/^[0-9a-f]{7,40}$/i.test(finding.commitSha)) return undefined;
+  if (finding.file.includes("..") || /^[a-z]+:/i.test(finding.file) || finding.file.startsWith("/")) return undefined;
   const range = finding.startLine && finding.endLine && finding.endLine > finding.startLine
     ? `#L${finding.startLine}-L${finding.endLine}`
     : finding.line

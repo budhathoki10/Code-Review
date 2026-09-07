@@ -640,8 +640,19 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // speed is the whole trade this pipeline makes; the ceiling has to reflect
   // it. BullMQ renews the job lock while the worker is alive, so a longer job
   // does not stall.
-  const deadlineCeiling = MULTI_STAGE ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000) : 240_000;
-  const deadlineAt = startedAt + (Number.isFinite(configuredDeadline) ? Math.max(60_000, Math.min(deadlineCeiling, MULTI_STAGE ? Math.max(configuredDeadline, deadlineCeiling) : configuredDeadline)) : 180_000);
+  // Written out rather than nested, because the nested form was wrong-looking
+  // enough that a reviewer read it as able to exceed its own ceiling. It
+  // could not — Math.min capped it — but an expression that takes arithmetic
+  // to disprove is a defect in its own right, whatever it evaluates to.
+  //
+  // The multi-stage path always takes its full budget: six or more model calls
+  // that each may reason before answering, and a deadline shorter than that
+  // just means the later stages report their findings as unresolved. The
+  // single-model path keeps whatever is configured, capped at four minutes.
+  const deadlineMs = MULTI_STAGE
+    ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000)
+    : Math.min(240_000, Number.isFinite(configuredDeadline) ? configuredDeadline : 180_000);
+  const deadlineAt = startedAt + Math.max(60_000, deadlineMs);
   const discoveryDeadlineAt = deadlineAt - 40_000;
   markStage("prepare");
 

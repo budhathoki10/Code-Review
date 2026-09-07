@@ -63,6 +63,21 @@ describe("linking a finding to its source", () => {
     expect(findingSourceUrl(finding({ commitSha: "deadbeef" }), undefined)).toBeUndefined();
   });
 
+  it("refuses a commit that is not a hex sha", () => {
+    // Found by this repo's own reviewer: every segment is interpolated into a
+    // URL and only the repository name was checked, so a crafted commit or
+    // path could point the reader off github.com under an authoritative link.
+    expect(findingSourceUrl(finding({ commitSha: "legit@evil.com" }), "acme/widgets")).toBeUndefined();
+    expect(findingSourceUrl(finding({ commitSha: "../../etc" }), "acme/widgets")).toBeUndefined();
+    expect(findingSourceUrl(finding({ commitSha: "deadbeef" }), "acme/widgets")).toBeDefined();
+  });
+
+  it("refuses a path that escapes the repository", () => {
+    expect(findingSourceUrl(finding({ commitSha: "deadbeef", file: "../../../etc/passwd" }), "acme/widgets")).toBeUndefined();
+    expect(findingSourceUrl(finding({ commitSha: "deadbeef", file: "https://evil.com/x" }), "acme/widgets")).toBeUndefined();
+    expect(findingSourceUrl(finding({ commitSha: "deadbeef", file: "/etc/passwd" }), "acme/widgets")).toBeUndefined();
+  });
+
   it("refuses a repository name that is not owner/repo", () => {
     // Anything else would be interpolated straight into a URL.
     expect(findingSourceUrl(finding({ commitSha: "deadbeef" }), "not a repo/../../etc")).toBeUndefined();

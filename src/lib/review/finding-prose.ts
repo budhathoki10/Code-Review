@@ -21,7 +21,7 @@ function sentences(text: string): string[] {
   return text
     .replace(/\s+/g, " ")
     .trim()
-    .split(/(?<=[.!?])\s+(?=[A-Z`'"(\[])/)
+    .split(/(?<=[.!?])\s+(?=[A-Z`'"([])/)
     .filter((part) => part.trim().length > 0);
 }
 
