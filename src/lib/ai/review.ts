@@ -218,7 +218,7 @@ export interface RepoContext {
   ref: string; // PR head SHA
 }
 
-const FETCH_FILE_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+export const FETCH_FILE_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
   type: "function",
   function: {
     name: "fetch_file",
@@ -265,7 +265,7 @@ function appendVerdictLine(summary: string, verdict: ReviewResult["verdict"]): s
  * guess. fetch_file is deliberately NOT restricted to files already in the
  * diff — that would defeat the point of investigating beyond the diff.
  */
-async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<string, string>, deadlineAt?: number): Promise<string> {
+export async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<string, string>, deadlineAt?: number): Promise<string> {
   let path: string;
   try {
     const parsed = JSON.parse(rawArgs) as { path?: unknown };
