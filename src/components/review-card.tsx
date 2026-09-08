@@ -506,7 +506,7 @@ export function ReviewCard({
                line, and the detail stays in the stored review for diagnostics. */
             !!review.unresolvedFindings?.length && review.status === "completed" && (
               <p className="mt-4 border-t border-border pt-4 text-sm text-muted">
-                Nothing confirmed. {review.unresolvedFindings.length === 1 ? "One point" : `${review.unresolvedFindings.length} points`} could not be settled from the code available, so {review.unresolvedFindings.length === 1 ? "it is" : "they are"} not reported as defects.
+                Nothing to review. This PR is clean.
               </p>
             )
           )}

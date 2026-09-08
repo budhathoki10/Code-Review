@@ -4,6 +4,7 @@ import type {
   PullRequestEvent,
   IssueCommentEvent,
   PullRequestReviewCommentEvent,
+  InstallationRepositoriesEvent,
 } from "@octokit/webhooks-types";
 import type { Logger } from "pino";
 import type { WithId } from "mongodb";
@@ -303,6 +304,64 @@ async function registerRepositoryFromEvent(
   return registered;
 }
 
+/**
+ * Keeps the tracked repository list in step with what the installation can
+ * actually see, the moment access changes — rather than the previous state,
+ * where a newly granted repo (a fresh repo under an "all repositories"
+ * installation, a fork, a repo added to a "selected repositories"
+ * installation) was invisible on the dashboard until either someone
+ * re-ran /api/github/setup or a pull_request happened to land on it and
+ * registerRepositoryFromEvent picked it up as a side effect.
+ *
+ * Same upsert-by-githubRepoId shape as registerRepositoryFromEvent, plus the
+ * delete this event uniquely tells us is safe: GitHub only reports a repo as
+ * removed here when the installation has actually lost access to it, so
+ * dropping our row is not a guess.
+ *
+ * Requires the installation to already exist locally, same reasoning as
+ * registerRepositoryFromEvent — there is no session to attribute a new
+ * installation to from inside a webhook delivery.
+ */
+async function handleInstallationRepositoriesChange(
+  payload: InstallationRepositoriesEvent,
+  log: Logger,
+): Promise<NextResponse> {
+  const githubInstallationId = payload.installation.id;
+  const installationsCol = await installations();
+  const installationDoc = await installationsCol.findOne({ githubInstallationId });
+  if (!installationDoc?._id) {
+    log.info({ githubInstallationId }, "installation_repositories ignored — installation is unknown locally");
+    return ok();
+  }
+
+  const repositoriesCol = await repositories();
+  const added = payload.repositories_added ?? [];
+  const removed = payload.repositories_removed ?? [];
+
+  await Promise.all([
+    ...added.map((repo) =>
+      repositoriesCol.updateOne(
+        { githubRepoId: repo.id },
+        {
+          $set: {
+            installationId: String(installationDoc._id),
+            githubInstallationId,
+            fullName: repo.full_name,
+          },
+        },
+        { upsert: true },
+      ),
+    ),
+    ...removed.map((repo) => repositoriesCol.deleteOne({ githubRepoId: repo.id })),
+  ]);
+
+  log.info(
+    { githubInstallationId, added: added.length, removed: removed.length },
+    "installation repository access changed",
+  );
+  return ok();
+}
+
 export async function POST(request: NextRequest) {
   // verifying the signature 
   const deliveryId = request.headers.get("x-github-delivery") ?? "unknown";
@@ -351,6 +410,15 @@ export async function POST(request: NextRequest) {
   // event from issue_comment, which only covers top-level PR comments.
   if (eventType === "pull_request_review_comment") {
     return handleFindingReply(rawPayload as unknown as PullRequestReviewCommentEvent, deliveryId, log);
+  }
+
+  // The installation gained or lost access to a repo — a fork, a fresh repo
+  // under an "all repositories" install, or a repo added/removed under a
+  // "selected repositories" one. Handled before the pull_request-only filter
+  // below, since this event carries no `repository` field for that filter to
+  // even see.
+  if (eventType === "installation_repositories") {
+    return handleInstallationRepositoriesChange(rawPayload as unknown as InstallationRepositoriesEvent, log);
   }
 
   //only cares about the pull request
