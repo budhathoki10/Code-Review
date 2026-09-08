@@ -3,12 +3,21 @@ import type { FindingDoc } from "@/lib/db/collections";
 import { findingId, canBlock, dedupeFindings } from "@/lib/review/finding-policy";
 import { feedbackStats } from "@/lib/review/feedback";
 
-const { create, fetchFile, proofImage, reproduce } = vi.hoisted(() => ({ create: vi.fn(), fetchFile: vi.fn(), proofImage: vi.fn(), reproduce: vi.fn() }));
-vi.mock("@/lib/ai/review", () => ({ DEFAULT_MODEL: "test-model", getClient: () => ({ chat: { completions: { create } } }), thinkingKwargs: () => ({}) }));
+const { create, fetchFile, resolveFetchFile, proofImage, reproduce } = vi.hoisted(() => ({
+  create: vi.fn(), fetchFile: vi.fn(), resolveFetchFile: vi.fn(), proofImage: vi.fn(), reproduce: vi.fn(),
+}));
+vi.mock("@/lib/ai/review", () => ({
+  DEFAULT_MODEL: "test-model",
+  getClient: () => ({ chat: { completions: { create } } }),
+  thinkingKwargs: () => ({}),
+  FETCH_FILE_TOOL: { type: "function", function: { name: "fetch_file", description: "", parameters: {} } },
+  resolveFetchFile,
+}));
 vi.mock("@/lib/github/file-content", () => ({ getFileContent: fetchFile }));
 // Mocked so the proof step is controllable and never reaches a real container.
 vi.mock("@/lib/review/test-proof", () => ({ proofImage, reproduceFinding: reproduce }));
 import { verifyBlockingFindings } from "@/lib/review/verification";
+import { FETCH_FILE_TOOL } from "@/lib/ai/review";
 
 const context = { installationId: 1, owner: "test", repo: "repo", ref: "head-sha" };
 const finding: FindingDoc = { file: "src/math.ts", line: 2, title: "Division by zero", explanation: "Zero is not handled.", category: "bug", severity: "high" };
@@ -61,15 +70,23 @@ describe("bounded blocking verification", () => {
     // the configured budget — enough that a candidate with a real hunk was
     // shrunk to its floor and every candidate after the first was dropped
     // before the call, permanently unable to block.
-    vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "3000");
+    //
+    // 4500, not 3000: packing and shrinking are sized against the
+    // forced-submit request shape (tools: [TOOL] only) so fetch_file's fixed
+    // schema cost can never squeeze out a candidate's own content -- see the
+    // comment at the shrink loop. But the actual first request DOES carry
+    // both tools, so it can legitimately run over the packed size by that
+    // fixed, known amount. 3000 left no room for that; a real budget does.
+    vi.stubEnv("REVIEW_VERIFICATION_TOKEN_BUDGET", "4500");
     fetchFile.mockResolvedValue(source + ("x".repeat(400) + "\n").repeat(20));
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(create).toHaveBeenCalledTimes(1);
     const params = create.mock.calls[0][0];
-    const byteBudget = (3000 - params.max_tokens - 512) * 3.5;
+    const byteBudget = (4500 - params.max_tokens - 512) * 3.5;
+    const fetchToolOverhead = Buffer.byteLength(JSON.stringify(FETCH_FILE_TOOL), "utf8");
     // Genuinely shrunk: the untrimmed window for this source is far larger.
     expect(JSON.parse(params.messages[1].content)[0].headContext.length).toBeLessThan(3000);
-    expect(Buffer.byteLength(JSON.stringify(params), "utf8")).toBeLessThanOrEqual(byteBudget);
+    expect(Buffer.byteLength(JSON.stringify(params), "utf8")).toBeLessThanOrEqual(byteBudget + fetchToolOverhead);
     expect(canBlock(result.findings[0])).toBe(true);
   });
 
@@ -119,6 +136,36 @@ describe("bounded blocking verification", () => {
     expect(JSON.stringify(params)).not.toContain("UNRELATED_DIFF");
     expect(options).toMatchObject({ maxRetries: 0, timeout: 30000, signal: expect.any(AbortSignal) });
     expect(fetchFile).toHaveBeenCalledWith(1, "test", "repo", finding.file, "head-sha", { signal: expect.any(AbortSignal) });
+  });
+  it("fetches a second file before deciding when the finding's evidence depends on it", async () => {
+    // The verifier's own blind spot: it only ever sees the ONE file a finding
+    // is anchored to. A claim whose disproof lives in a different file --
+    // a type definition, a function it calls -- could never be checked, only
+    // accepted or downgraded on the finding's own say-so. This is the fix:
+    // one round to investigate, one to decide.
+    const fetchCallArgs = { name: "fetch_file", arguments: JSON.stringify({ path: "src/types.ts" }) };
+    const investigateMessage = { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: fetchCallArgs }] };
+    create.mockResolvedValueOnce({ usage: { prompt_tokens: 400, completion_tokens: 50, total_tokens: 450 }, choices: [{ message: investigateMessage }] });
+    create.mockResolvedValueOnce(response([decision({ decision: "reject", reason: "The referenced type already forbids this at compile time." })]));
+    resolveFetchFile.mockResolvedValue("File: src/types.ts\n\nexport type Foo = never;");
+
+    const result = await verifyBlockingFindings([finding], [file], context);
+
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(resolveFetchFile).toHaveBeenCalledWith(fetchCallArgs.arguments, context, expect.any(Map), expect.any(Number));
+    // Investigation round offers both tools; the decision round withdraws
+    // fetch_file -- nothing left to investigate with, so the model must
+    // decide on whatever it now has, same as every other batch.
+    expect(create.mock.calls[0][0].tools).toHaveLength(2);
+    expect(create.mock.calls[1][0].tools).toEqual([expect.objectContaining({ function: expect.objectContaining({ name: "submit_verification" }) })]);
+    expect(create.mock.calls[1][0].tool_choice).toEqual({ type: "function", function: { name: "submit_verification" } });
+    // The tool result reaches the model as a real reply to its own call, not
+    // a fresh unrelated message -- the assistant turn is threaded back in.
+    const secondMessages = create.mock.calls[1][0].messages;
+    expect(secondMessages.at(-2)).toBe(investigateMessage);
+    expect(secondMessages.at(-1)).toEqual({ role: "tool", tool_call_id: "call_1", content: "File: src/types.ts\n\nexport type Foo = never;" });
+    expect(result.rejected).toHaveLength(1);
+    expect(result.rejected[0].verification?.reason).toBe("The referenced type already forbids this at compile time.");
   });
   it("will not let an accept block on evidence quoted at the wrong line", async () => {
     // An accept is what fails someone's build, so it keeps the strict bar: the
