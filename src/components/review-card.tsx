@@ -220,19 +220,26 @@ function FindingItem({ finding, number, repoFullName }: { finding: FindingDoc; n
  * One severity's findings behind a native disclosure — a "folder" for High,
  * Medium, and so on.
  *
- * Open by default. It was closed, which meant the card showed "MEDIUM 1 /
- * LOW 2 / INFO 1" and nothing else — the findings were all present, correct
- * and one click away, and every reader concluded the review had produced
- * severity counts and no content. A code review whose findings are hidden by
- * default is indistinguishable from one that found nothing, and that is the
- * worst thing this page can be. Each finding collapses individually, so the
- * two-dozen-finding case is still skimmable without hiding the whole list.
+ * Closed by default, so a card opens as a scannable index — one row per
+ * severity — rather than as a wall of findings the reader scrolls past to
+ * reach the next review.
+ *
+ * This was open for a while, for a real reason: closed groups once meant the
+ * card showed "MEDIUM 1 / LOW 2 / INFO 1" and nothing else, and every reader
+ * concluded the review had produced counts and no content. A review whose
+ * findings are invisible is indistinguishable from one that found nothing.
+ * What makes closed safe now is that the card no longer goes silent when the
+ * groups do: the header states the outcome in words ("Reviewed 4 file(s) —
+ * 3 medium.") and the footer carries duration, file coverage and comment
+ * count. The findings read as filed, not missing.
+ *
+ * If that summary line is ever removed, this has to go back to open.
  */
 function SeverityGroup({ severity, findings, repoFullName }: { severity: FindingDoc["severity"]; findings: FindingDoc[]; repoFullName?: string }) {
   const tone = SEVERITY_TONE[severity];
   return (
     <li>
-      <details open className="group/severity">
+      <details className="group/severity">
         <summary className="flex cursor-pointer list-none items-center gap-2 py-2.5 text-muted transition-colors hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden">
           <ChevronRight
             className="h-3 w-3 shrink-0 text-subtle transition-transform duration-200 group-open/severity:rotate-90"
