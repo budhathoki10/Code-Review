@@ -149,8 +149,19 @@ export function reconcile(
 
     const superRecord = { decision: verdict.decision, confidence: verdict.confidence };
 
-    if (verdict.decision === "reject" || verdict.decision === "duplicate") {
+    // A duplicate is a dedup decision, not a correctness dispute — the same
+    // defect is already tracked elsewhere, so dropping the second copy here
+    // loses nothing. A flat reject is a correctness claim from one reviewer
+    // only, and one reviewer's word was never enough to make a finding
+    // disappear before an author saw it — it goes to debate like any other
+    // disagreement instead of being dropped here.
+    if (verdict.decision === "duplicate") {
       rejected.push({ candidate, status: "rejected", ultra, super: superRecord });
+      continue;
+    }
+
+    if (verdict.decision === "reject") {
+      tracked.push({ candidate, status: "disputed", ultra, super: superRecord });
       continue;
     }
 

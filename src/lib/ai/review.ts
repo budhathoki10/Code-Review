@@ -89,14 +89,29 @@ export type SharedParams = {
   max_tokens: number;
   temperature: number;
   top_p: number;
-  chat_template_kwargs?: { thinking: boolean };
+  // Both keys, always sent: this endpoint's templates read one or the other,
+  // and the type has to carry both or the second is silently dropped by
+  // anything that builds this shape from a literal.
+  chat_template_kwargs: { thinking: boolean; enable_thinking: boolean };
 };
 
-/** Reasoning defaults on; both discovery and assessment follow NVIDIA_THINKING. */
+/**
+ * Reasoning defaults on, and is now stated rather than assumed.
+ *
+ * This used to send `{}` when reasoning was wanted, leaving the actual
+ * behaviour to whatever the deployed chat template happened to default to —
+ * so "thinking is on" was a belief about the endpoint, not something the
+ * request said, and there was no way to tell from our side which mode a
+ * review had actually run in. Both keys are sent because this endpoint's
+ * templates read one or the other (`enable_thinking` on the NIM/vLLM builds,
+ * `thinking` on the older one); sending both means the request means the same
+ * thing whichever template is deployed. Neither is part of the OpenAI schema,
+ * which is why the return type is loose at the call site.
+ */
 export function thinkingKwargs(
   thinking = process.env.NVIDIA_THINKING !== "false",
-): { chat_template_kwargs?: { thinking: boolean } } {
-  return thinking ? {} : { chat_template_kwargs: { thinking: false } };
+): { chat_template_kwargs: { thinking: boolean; enable_thinking: boolean } } {
+  return { chat_template_kwargs: { thinking, enable_thinking: thinking } };
 }
 
 export function buildSharedParams(thinking?: boolean): SharedParams {
@@ -161,7 +176,17 @@ Never report any of the following. They are not findings:
 - anything you cannot tie to a specific changed line
 - anything whose explanation ends up concluding the code is fine
 
-Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe. Every finding is independently assessed afterwards and rejected unless it can be tied to an exact line, so a guess costs you the finding and costs the author their trust in the rest.
+Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe.
+
+Nothing checks your work after this. There is no second reviewer and no assessment pass — what you write is posted to the author's pull request exactly as you wrote it. So the bar is not "worth flagging in case": it is "I traced this and I am telling a colleague their code is broken". Before you report anything, re-read the lines you are citing and confirm the failure actually happens. One wrong finding costs the author their trust in every other one.
+
+WRITE LIKE A DEVELOPER LEAVING A PR COMMENT. You are talking to the person who wrote this code, in the tone you would use for a teammate you respect:
+- Say the problem in the first sentence, plainly. "This throws when \`items\` is empty" — not "A potential null-dereference vulnerability has been identified."
+- Use "you"/"this" and normal contractions. Reference the actual identifiers from the code by name, in backticks.
+- Be short. Two or three sentences of explanation is usually right. If it needs more, it is usually because you have not found the real cause yet.
+- No corporate register, no severity theatre, no restating the finding title, no "it is recommended that", no "Additionally, it should be noted". No emoji, no praise sandwich, no apologies.
+- Titles are lowercase-ish sentence fragments that name the bug, not report headings: "\`parseConfig\` drops the last entry when the file has no trailing newline" — not "Off-By-One Error in Configuration Parser".
+- If you would not say it out loud to a colleague at their desk, do not write it.
 
 Include a confidence level, but confidence alone is never evidence.
 

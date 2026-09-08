@@ -6,10 +6,7 @@ import { GitHubRateLimitError } from "@/lib/github/file-content";
 import { DEFAULT_MODEL, generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
 import { getFileContent } from "@/lib/github/file-content";
 import { canBlock, dedupeFindings } from "@/lib/review/finding-policy";
-import { skippedVerification, verificationCandidates, verifyBlockingFindings } from "@/lib/review/verification";
 import { codeWindow, riskReasons } from "@/lib/review/risk";
-import { proofImage } from "@/lib/review/test-proof";
-import { getInstallationOctokit } from "@/lib/github/app";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
 import { describeSkipReason } from "@/lib/review/triage";
 import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
@@ -25,7 +22,7 @@ import {
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
-import { addUsage, recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
+import { recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
 import {
   reviews,
   pullRequests,
@@ -45,14 +42,15 @@ const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high
 
 /**
  * Whether to run the Ultra -> Super -> debate -> arbitration pipeline instead
- * of the single-model discovery-and-assessment path.
+ * of the single-model path.
  *
- * Off by default, and both paths are kept, because the two make different
- * bets. The multi-stage one spends far more calls to be right; the existing
- * one completes in seconds and is what production has been measured on. A
- * flag means the comparison can be made on the same pull request rather than
- * argued about, and a bad night on the provider does not require a deploy to
- * escape.
+ * Off by default. Every extra reviewer stage was an attempt to fix the first
+ * model's output after the fact, and each one bought its accuracy by dropping
+ * findings — a second model rejecting what it could not re-derive, a debate
+ * that ends in a withdrawal. The bet here is the opposite one: one pass by
+ * the strongest available model, reasoning on, and its output trusted as
+ * written. Kept behind the flag rather than deleted so the staged pipeline is
+ * still there to compare against on a given pull request.
  */
 const MULTI_STAGE = process.env.REVIEW_MULTI_STAGE === "true";
 
@@ -641,11 +639,19 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   //
   // The multi-stage path always takes its full budget: six or more model calls
   // that each may reason before answering, and a deadline shorter than that
-  // just means the later stages report their findings as unresolved. The
-  // single-model path keeps whatever is configured, capped at four minutes.
+  // just means the later stages report their findings as unresolved.
+  //
+  // The single-model cap is ten minutes, not four. Four was sized for a model
+  // answering immediately; the single call now reasons first, and measured on
+  // this endpoint that is 80-110 seconds before the first token, then the
+  // answer itself. A review ceiling below the per-request timeout does not
+  // make anything faster — it just aborts the one call the whole review
+  // consists of and reports nothing, which is the most expensive possible way
+  // to save time. BullMQ renews the job lock while the worker is alive, so a
+  // longer job does not stall.
   const deadlineMs = MULTI_STAGE
     ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000)
-    : Math.min(240_000, Number.isFinite(configuredDeadline) ? configuredDeadline : 180_000);
+    : Math.min(600_000, Number.isFinite(configuredDeadline) ? configuredDeadline : 420_000);
   const deadlineAt = startedAt + Math.max(60_000, deadlineMs);
   const discoveryDeadlineAt = deadlineAt - 40_000;
   markStage("prepare");
@@ -964,7 +970,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const keepsSeverity = severityFilter(effectiveDisabledSeverities);
   const keepsFinding = (finding: FindingDoc) => keepsCategory(finding) && keepsSeverity(finding);
 
-  let allFindings = dedupeFindings([
+  const allFindings = dedupeFindings([
     // Carried-forward findings are deliberately NOT re-mapped: their line
     // numbers were resolved against an earlier commit's diff, so looking
     // them up in this one would pair a suggestion with whatever text now
@@ -989,44 +995,17 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   ].filter(keepsFinding));
 
   markStage("mergeAndCheckpoint");
-  // A file discovery could not read is a file this run has no fresh evidence
-  // about, so its findings are held out of assessment entirely rather than
-  // assessed on nothing and marked "skipped" — which would erase an accept an
-  // earlier run had genuinely earned and stop a confirmed bug from blocking.
-  const assessable = (finding: FindingDoc) => touchedFiles.has(finding.file) && !unreviewedFiles.includes(finding.file);
-  const currentFindings = allFindings.filter(assessable);
-  let verification = existingReview?.verificationCheckpoint;
-  if (!verification && verificationCandidates(currentFindings).length > 0) {
-    const reservation = { ...skippedVerification(currentFindings, "Verification interrupted; not eligible to block."), state: "reserved" as const };
-    // Mandatory durable reservation. A crash or lost completion write must not
-    // buy a second verification call on BullMQ retry for this PR/head pair.
-    const reserved = await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { verificationCheckpoint: reservation } });
-    if (reserved.matchedCount !== 1) throw new Error("Could not reserve verification budget");
-    let proofBaseSha: string | undefined;
-    if (proofImage()) {
-      // Resolve the actual PR merge base, not the previous reviewed push: a
-      // failing test should demonstrate a regression introduced by this PR.
-      try {
-        const octokit = await getInstallationOctokit(githubInstallationId);
-        const signal = AbortSignal.timeout(5000);
-        const { data: pr } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { owner, repo, pull_number: prNumber, request: { signal } });
-        if (pr.head.sha === headSha) {
-          const { data: comparison } = await octokit.request("GET /repos/{owner}/{repo}/compare/{basehead}", { owner, repo, basehead: `${pr.base.sha}...${headSha}`, request: { signal } });
-          proofBaseSha = comparison.merge_base_commit.sha;
-        }
-      } catch (err) { log.warn({ err }, "test proof base unavailable; retaining AI assessment only"); }
-    }
-    verification = await verifyBlockingFindings(currentFindings, diff.files, { installationId: githubInstallationId, owner, repo, ref: headSha }, proofBaseSha, deadlineAt);
-    await recordUsage(verification.usage, false).catch((err) => log.warn({ err }, "failed to record verification usage"));
-    await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: { verificationCheckpoint: verification } });
-  }
-  if (verification) {
-    allFindings = dedupeFindings([
-      ...allFindings.filter((finding) => !assessable(finding)),
-      ...verification.findings.filter(keepsFinding),
-    ]);
-    reviewUsage = addUsage(reviewUsage, verification.usage);
-  }
+  // No second-model assessment pass. What the reviewer wrote is what the
+  // author reads: a re-verification round buys its precision by deleting
+  // findings it cannot independently re-derive, and the ones it deletes are
+  // disproportionately the cross-file bugs that are the whole reason to run a
+  // reviewer with this much context in the first place. Precision is bought
+  // in the review call instead — strongest model, reasoning on, evidence
+  // required before it may report anything (see ai/review.ts).
+  //
+  // Reviews written before this change still carry a verificationCheckpoint,
+  // and their findings still render with whatever assessment they earned at
+  // the time; nothing re-reads or rewrites them.
   markStage("verification");
   const blocking = allFindings.filter((finding) => canBlock(finding) && meetsThreshold(finding.severity, resolveGateThreshold(repoConfig)));
   const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
@@ -1050,8 +1029,10 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         (carriedForwardFindings.length > 0
           ? ` ${carriedForwardFindings.length} finding(s) from earlier commits are carried forward below.`
           : " Earlier commits were reviewed previously and raised nothing still outstanding.");
-    aiResult.summary = `${scopeSentence} ${blocking.length ? `${blocking.length} high/critical finding(s) passed AI evidence assessment and meet the repository's blocking threshold.` : "No findings passed the blocking policy."}\n\n` +
-      `Retained ${allFindings.length} finding(s)${verification ? `; rejected ${verification.rejected.length} after assessment` : ""}. AI assessment is not test-backed proof. Unchecked findings are advisory.\n\n` +
+    aiResult.summary = `${scopeSentence} ${blocking.length
+      ? `${blocking.length} of them are high or critical and meet this repo's blocking threshold.`
+      : "Nothing here meets the blocking threshold."}\n\n` +
+      `${allFindings.length} finding(s) below. These are read by a model, not proven by a test run — check them before you act on them.\n\n` +
       `*Current review: ${aiResult.verdict === "request_changes" ? "REQUEST CHANGES" : aiResult.verdict.toUpperCase()}.*` +
       formatCoverageNote(selection, unreviewedFiles);
   }
@@ -1064,7 +1045,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   const resolvedFindings = findResolvedFindings(
     previousReview?.findings ?? [],
     new Set(selection.chunks.flatMap((chunk) => chunk.files.map((file) => file.filename)).filter((file) => !unreviewedFiles.includes(file))),
-    [...allFindings, ...(verification?.rejected ?? [])],
+    allFindings,
   ).filter(keepsFinding);
   if (resolvedFindings.length > 0) {
     log.info({ reviewId, resolved: resolvedFindings.length }, "previous findings appear resolved");

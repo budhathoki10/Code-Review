@@ -27,24 +27,31 @@ services:
         sync: false
       - key: NVIDIA_BASE_URL
         sync: false
+      # The review is one call by one model now, so this is the model, and it
+      # is the strongest one available rather than the fastest.
       - key: NVIDIA_MODEL
-        value: nvidia/nemotron-3-super-120b-a12b
+        value: nvidia/nemotron-3-ultra-550b-a55b
       - key: NVIDIA_TEMPERATURE
         value: "0.2"
       - key: NVIDIA_TOP_P
         sync: false
       - key: NVIDIA_MAX_TOKENS
         value: "8192"
+      # Reasoning ON: with no second model re-checking findings, this is the
+      # only precision control there is. Measured on this endpoint at 22.6s
+      # for a small diff, well inside the request timeout below.
       - key: NVIDIA_THINKING
-        value: "false"
+        value: "true"
+      # Reasoning happens before the first token, so the ceiling has to cover
+      # thinking time plus the answer. 120s aborted the call partway.
+      - key: NVIDIA_REQUEST_TIMEOUT_MS
+        value: "300000"
       - key: REVIEW_FINDINGS_TOOL_ROUNDS
         value: "2"
-      - key: REVIEW_VERIFICATION_MAX_FINDINGS
-        value: "24"
       - key: REVIEW_DEADLINE_MS
-        value: "180000"
+        value: "420000"
       - key: REVIEW_RISKY_DEADLINE_MS
-        value: "240000"
+        value: "480000"
       - key: GITHUB_APP_ID
         sync: false
       - key: GITHUB_APP_PRIVATE_KEY
