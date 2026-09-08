@@ -71,6 +71,26 @@ export interface RepositoryDoc {
   };
 }
 
+/**
+ * The `$set` payload every path that discovers or re-syncs a repo's tracked
+ * installation writes — the initial /api/github/setup snapshot, a repo
+ * auto-tracked from a pull_request event, and one added via
+ * installation_repositories. Extracted so a future field, or a tightened
+ * filter, is added once instead of drifting across three near-identical
+ * writes — the class of bug where the last writer for a repo id decides
+ * which fields survive.
+ */
+export function trackedRepositoryFields(
+  installationDoc: { _id?: string; githubInstallationId: number },
+  fullName: string,
+): Pick<RepositoryDoc, "installationId" | "githubInstallationId" | "fullName"> {
+  return {
+    installationId: String(installationDoc._id),
+    githubInstallationId: installationDoc.githubInstallationId,
+    fullName,
+  };
+}
+
 export interface PullRequestDoc {
   _id?: string;
   repositoryId: string;

@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { getGithubAccountIds } from "@/lib/github/account";
 import { getInstallationAccount, getInstallationRepositories } from "@/lib/github/app";
-import { ensureIndexes, installations, repositories } from "@/lib/db/collections";
+import { ensureIndexes, installations, repositories, trackedRepositoryFields } from "@/lib/db/collections";
 
 // Build absolute redirect URLs from the app's known public origin (AUTH_URL)
 // rather than from the incoming request. Behind a tunnel (ngrok), Next.js can
@@ -73,13 +73,7 @@ export async function GET(request: NextRequest) {
       repos.map((repo) =>
         repositoriesCol.updateOne(
           { githubRepoId: repo.githubRepoId },
-          {
-            $set: {
-              installationId: String(installationDoc._id),
-              githubInstallationId,
-              fullName: repo.fullName,
-            },
-          },
+          { $set: trackedRepositoryFields(installationDoc, repo.fullName) },
           { upsert: true },
         ),
       ),
