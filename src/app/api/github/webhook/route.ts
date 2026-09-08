@@ -15,7 +15,7 @@ import { enqueueReviewJob } from "@/lib/queue/review-queue";
 import { enqueueReplyJob } from "@/lib/queue/reply-queue";
 import { claimThrottleWindow, throttleWindowRemainingMs } from "@/lib/queue/pr-throttle";
 import { scheduleThrottleTrailer } from "@/lib/queue/throttle-queue";
-import { ensureIndexes, installations, pullRequests, repositories, reviews, type RepositoryDoc } from "@/lib/db/collections";
+import { ensureIndexes, installations, pullRequests, repositories, reviews, trackedRepositoryFields, type RepositoryDoc } from "@/lib/db/collections";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isDuplicateKeyError } from "@/lib/db/mongo-errors";
@@ -290,13 +290,7 @@ async function registerRepositoryFromEvent(
   const repositoriesCol = await repositories();
   const registered = await repositoriesCol.findOneAndUpdate(
     { githubRepoId: payload.repository.id },
-    {
-      $set: {
-        installationId: String(installationDoc._id),
-        githubInstallationId,
-        fullName: payload.repository.full_name,
-      },
-    },
+    { $set: trackedRepositoryFields(installationDoc, payload.repository.full_name) },
     { upsert: true, returnDocument: "after" },
   );
 
@@ -321,11 +315,20 @@ async function registerRepositoryFromEvent(
  * Requires the installation to already exist locally, same reasoning as
  * registerRepositoryFromEvent — there is no session to attribute a new
  * installation to from inside a webhook delivery.
+ *
+ * The delete is scoped to this installation, not just the repo id. GitHub
+ * does not guarantee delivery order across installations, so a repo
+ * transferred between two orgs that both have the App installed can have the
+ * destination's `added` land before the source's `removed` — an unscoped
+ * delete would then drop the row the destination just legitimately claimed.
+ * Scoping means a stale `removed` can only ever remove a row this same
+ * installation still owns.
  */
 async function handleInstallationRepositoriesChange(
   payload: InstallationRepositoriesEvent,
   log: Logger,
 ): Promise<NextResponse> {
+  await ensureIndexes();
   const githubInstallationId = payload.installation.id;
   const installationsCol = await installations();
   const installationDoc = await installationsCol.findOne({ githubInstallationId });
@@ -342,17 +345,11 @@ async function handleInstallationRepositoriesChange(
     ...added.map((repo) =>
       repositoriesCol.updateOne(
         { githubRepoId: repo.id },
-        {
-          $set: {
-            installationId: String(installationDoc._id),
-            githubInstallationId,
-            fullName: repo.full_name,
-          },
-        },
+        { $set: trackedRepositoryFields(installationDoc, repo.full_name) },
         { upsert: true },
       ),
     ),
-    ...removed.map((repo) => repositoriesCol.deleteOne({ githubRepoId: repo.id })),
+    ...removed.map((repo) => repositoriesCol.deleteOne({ githubRepoId: repo.id, githubInstallationId })),
   ]);
 
   log.info(
