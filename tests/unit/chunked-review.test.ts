@@ -363,7 +363,7 @@ describe("predictable discovery budget", () => {
   beforeEach(() => { createMock.mockReset(); getFileContentMock.mockReset(); delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS; });
   afterEach(() => { vi.useRealTimers(); });
 
-  it.each([429, 500, 503])("retries provider status %s, then stops without starting queued work", async (status) => {
+  it.each([429, 500])("retries provider status %s, then stops without starting queued work", async (status) => {
     const { generateChunkedReview } = await loadModule();
     createMock.mockRejectedValue(Object.assign(new Error("provider unavailable"), { status }));
     const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")], [file("src/d.ts")], [file("src/poison.ts")]]);
@@ -374,6 +374,24 @@ describe("predictable discovery budget", () => {
     expect(createMock.mock.calls.length).toBeLessThanOrEqual(12);
     expect(result.unreviewedFiles).toHaveLength(4);
     expect(result.verdict).toBe("comment");
+  });
+
+  it("switches to the backup model on the very next attempt after a 503, instead of retrying the overloaded model", async () => {
+    // Measured live against NVIDIA 2026-09-09: an overloaded model answers
+    // with a 503 after 100+ seconds, not instantly, so retrying it unchanged
+    // pays that wait again for nothing. A 503 gets the same immediate-failover
+    // treatment as a timeout, not the generic refusal retry.
+    const { generateChunkedReview, BACKUP_MODEL } = await loadModule();
+    createMock
+      .mockRejectedValueOnce(Object.assign(new Error("overloaded"), { status: 503 }))
+      .mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")]]);
+
+    expect(result.unreviewedFiles).toEqual([]);
+    const modelsTried = createMock.mock.calls.map((call) => (call[0] as { model: string }).model);
+    expect(modelsTried).toHaveLength(2);
+    expect(modelsTried[1]).toBe(BACKUP_MODEL);
   });
 
   it("does not retry a 401 — the next identical request earns the same answer", async () => {

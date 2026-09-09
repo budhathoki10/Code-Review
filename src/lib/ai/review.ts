@@ -176,6 +176,19 @@ function isTimeout(error: unknown): boolean {
   return /Connection|Timeout|Abort/.test(name);
 }
 
+/**
+ * The model itself is the problem — too slow to answer, or the endpoint
+ * saying outright that this model has no capacity right now — as opposed to
+ * a generic 5xx/429 blip that the same model will likely clear on its own.
+ * Measured live 2026-09-09: an overloaded model 503s after 100+ seconds, not
+ * instantly, so retrying it unchanged just pays that wait again. Only this
+ * case justifies switching model immediately with no delay; a plain retry-
+ * worthy refusal keeps the old pause-and-retry-same-model handling.
+ */
+function isModelUnavailable(error: unknown): boolean {
+  return isTimeout(error) || (error as { status?: number })?.status === 503;
+}
+
 /** A refusal to serve the request, as opposed to an answer about the code. */
 function isTransientProviderFailure(error: unknown): boolean {
   const status = (error as { status?: number })?.status;
@@ -263,18 +276,19 @@ async function callWithBackup(
       lastError = error;
       if (!isTransientProviderFailure(error) || isLastTry || providerDown?.()) throw error;
 
-      // A timeout is about this model and this input; a refusal is about the
-      // endpoint. Only the first justifies changing model, and it justifies
-      // it immediately.
-      const timedOut = isTimeout(error);
-      if (timedOut) failedOverToBackup = true;
-      // Nothing to fail over TO, and the same request would time out again.
-      if (timedOut && BACKUP_MODEL === primaryModel) throw error;
+      // A timeout or a "this model is overloaded" 503 is about this model and
+      // this input; a generic refusal is about the endpoint in general. Only
+      // the first justifies changing model, and it justifies it immediately.
+      const modelDown = isModelUnavailable(error);
+      if (modelDown) failedOverToBackup = true;
+      // Nothing to fail over TO, and the same request would fail the same way again.
+      if (modelDown && BACKUP_MODEL === primaryModel) throw error;
 
-      // A refusal clears in a moment, so it is worth a pause. A timeout has
-      // already spent minutes and the next attempt is a different model, so
-      // waiting adds nothing but delay.
-      const delayMs = timedOut ? 0 : CHUNK_RETRY_DELAYS_MS[tryIndex];
+      // A generic refusal clears in a moment, so it is worth a pause. An
+      // unavailable model has already spent seconds-to-minutes proving it,
+      // and the next attempt is a different model, so waiting adds nothing
+      // but delay.
+      const delayMs = modelDown ? 0 : CHUNK_RETRY_DELAYS_MS[tryIndex];
       const timeLeft = deadlineAt === undefined ? undefined : deadlineAt - Date.now();
       // Enough left for the pause AND an attempt worth making. The old floor
       // here was five seconds, which let a retry start that could not
@@ -285,12 +299,12 @@ async function callWithBackup(
         {
           model,
           status: (error as { status?: number })?.status,
-          reason: timedOut ? "timeout" : "refused",
+          reason: modelDown ? (isTimeout(error) ? "timeout" : "model overloaded") : "refused",
           nextModel: failedOverToBackup ? BACKUP_MODEL : primaryModel,
           nextAttempt: tryIndex + 2,
           delayMs,
         },
-        timedOut ? "model too slow for this chunk — failing over to the backup model" : "provider refused the chunk — retrying",
+        modelDown ? "model unavailable for this chunk — failing over to the backup model" : "provider refused the chunk — retrying",
       );
       if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
