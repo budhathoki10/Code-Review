@@ -419,6 +419,40 @@ describe("predictable discovery budget", () => {
     expect(modelsTried.at(-1)).toBe(BACKUP_MODEL);
   });
 
+  it("switches to the backup model on the very next attempt after a timeout", async () => {
+    // The regression this pins cost PR #100 its entire review: the primary
+    // model timed out, the retry re-sent the same request to the same model,
+    // and between them they spent the whole deadline to report 0 of 23 files.
+    // A model too slow for an input does not get faster on a second identical
+    // request, so the failover has to happen immediately, not on attempt four.
+    const { APIConnectionTimeoutError } = await import("openai/core/error");
+    const { generateChunkedReview, BACKUP_MODEL } = await loadModule();
+    createMock
+      .mockRejectedValueOnce(new APIConnectionTimeoutError({}))
+      .mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")]]);
+
+    expect(result.unreviewedFiles).toEqual([]);
+    const modelsTried = createMock.mock.calls.map((call) => (call[0] as { model: string }).model);
+    expect(modelsTried).toHaveLength(2);
+    expect(modelsTried[1]).toBe(BACKUP_MODEL);
+  });
+
+  it("gives no single attempt most of the remaining review budget", async () => {
+    // The other half of the same failure: a 300s per-request ceiling inside a
+    // 420s review let one call hold 71% of it and the retry take the rest.
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const budgetMs = 200_000;
+    await generateChunkedReview([[file("src/a.ts")]], { deadlineAt: Date.now() + budgetMs });
+
+    const requestOptions = (createMock.mock.calls[0] as unknown[])[1] as { timeout: number };
+    expect(requestOptions.timeout).toBeLessThan(budgetMs * 0.5);
+    expect(requestOptions.timeout).toBeGreaterThan(0);
+  });
+
   it("abandons the review once provider failures repeat", async () => {
     const { generateChunkedReview } = await loadModule();
     createMock.mockRejectedValue(Object.assign(new Error("down"), { status: 503 }));

@@ -160,6 +160,22 @@ const CHUNK_RETRY_DELAYS_MS = (() => {
   return parsed.length > 0 ? parsed : [1_500, 4_000, 8_000];
 })();
 
+/**
+ * The model did not answer in time, as opposed to the endpoint refusing to
+ * serve the request.
+ *
+ * The two need different responses and conflating them cost a whole review.
+ * A 500 is the endpoint having a moment and the same request will probably
+ * work in a second. A timeout is this model being too slow for this input —
+ * re-sending it unchanged buys another timeout, and on a real pull request
+ * that is minutes of the review's budget spent proving the same thing twice.
+ */
+function isTimeout(error: unknown): boolean {
+  if ((error as { status?: number })?.status !== undefined) return false;
+  const name = error instanceof Error ? `${error.name} ${error.constructor.name}` : "";
+  return /Connection|Timeout|Abort/.test(name);
+}
+
 /** A refusal to serve the request, as opposed to an answer about the code. */
 function isTransientProviderFailure(error: unknown): boolean {
   const status = (error as { status?: number })?.status;
@@ -167,9 +183,19 @@ function isTransientProviderFailure(error: unknown): boolean {
   // No status: a dropped connection or a timeout. A schema violation or a
   // truncated body is about this chunk's content and is not retried here —
   // the same request would produce the same answer.
-  const name = error instanceof Error ? `${error.name} ${error.constructor.name}` : "";
-  return /Connection|Timeout|Abort/.test(name);
+  return isTimeout(error);
 }
+
+/**
+ * The most of the remaining review budget any single attempt may hold.
+ *
+ * Without this a per-request ceiling of five minutes inside a seven-minute
+ * review meant one call could take 71% of it, and the retry took the rest:
+ * PR #100 spent 7m22s and reported 0 of 23 files. No attempt is worth the
+ * whole review, because an attempt that consumes the budget leaves nothing
+ * to fall back with.
+ */
+const MAX_DEADLINE_FRACTION_PER_ATTEMPT = 0.45;
 
 /**
  * Runs one model call, retrying a provider that will not answer and falling
@@ -198,17 +224,34 @@ async function callWithBackup(
 ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   const requestCeiling = envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000);
   let lastError: unknown;
+  // Set the moment the primary times out. A model too slow for this input
+  // does not become fast on a second identical request, so the next attempt
+  // goes to the smaller model rather than spending the same minutes again.
+  let failedOverToBackup = false;
 
   for (let tryIndex = 0; tryIndex <= CHUNK_RETRY_DELAYS_MS.length; tryIndex++) {
     const remainingMs = deadlineAt === undefined ? undefined : deadlineAt - Date.now();
     if (remainingMs !== undefined && remainingMs <= 0) {
       throw lastError ?? new Error("Review deadline exceeded");
     }
-    // The final attempt is the backup model's: an endpoint refusing the large
-    // model is often still serving the smaller one.
+    // The backup takes over once the primary has timed out, and on the last
+    // attempt regardless: an endpoint refusing the large model is often still
+    // serving the smaller one.
     const isLastTry = tryIndex === CHUNK_RETRY_DELAYS_MS.length;
-    const model = isLastTry && BACKUP_MODEL !== primaryModel ? BACKUP_MODEL : primaryModel;
-    const timeoutMs = remainingMs === undefined ? requestCeiling : Math.min(remainingMs, requestCeiling);
+    const model = (failedOverToBackup || isLastTry) && BACKUP_MODEL !== primaryModel ? BACKUP_MODEL : primaryModel;
+    // No single attempt may hold most of what is left. The ceiling is a
+    // per-request bound; this is the review's bound on it, and without it one
+    // slow call plus its retry is the entire budget with nothing to show.
+    // Never above the remaining budget — a timeout the deadline will beat is
+    // a number that means nothing — and within that, ~45% of what is left, or
+    // a usable 20s when 45% would be too small to answer in.
+    const timeoutMs = remainingMs === undefined
+      ? requestCeiling
+      : Math.min(
+          remainingMs,
+          requestCeiling,
+          Math.max(20_000, Math.floor(remainingMs * MAX_DEADLINE_FRACTION_PER_ATTEMPT)),
+        );
 
     try {
       const response = await attempt(model, timeoutMs, remainingMs === undefined ? undefined : AbortSignal.timeout(remainingMs));
@@ -220,17 +263,36 @@ async function callWithBackup(
       lastError = error;
       if (!isTransientProviderFailure(error) || isLastTry || providerDown?.()) throw error;
 
-      const delayMs = CHUNK_RETRY_DELAYS_MS[tryIndex];
+      // A timeout is about this model and this input; a refusal is about the
+      // endpoint. Only the first justifies changing model, and it justifies
+      // it immediately.
+      const timedOut = isTimeout(error);
+      if (timedOut) failedOverToBackup = true;
+      // Nothing to fail over TO, and the same request would time out again.
+      if (timedOut && BACKUP_MODEL === primaryModel) throw error;
+
+      // A refusal clears in a moment, so it is worth a pause. A timeout has
+      // already spent minutes and the next attempt is a different model, so
+      // waiting adds nothing but delay.
+      const delayMs = timedOut ? 0 : CHUNK_RETRY_DELAYS_MS[tryIndex];
       const timeLeft = deadlineAt === undefined ? undefined : deadlineAt - Date.now();
-      // No point sleeping through the remaining budget to make a call that
-      // will be aborted on arrival.
-      if (timeLeft !== undefined && timeLeft <= delayMs + 5_000) throw error;
+      // Enough left for the pause AND an attempt worth making. The old floor
+      // here was five seconds, which let a retry start that could not
+      // possibly finish and burned the remainder of the review to find out.
+      if (timeLeft !== undefined && timeLeft <= delayMs + 20_000) throw error;
 
       logger.warn(
-        { model, status: (error as { status?: number })?.status, nextAttempt: tryIndex + 2, delayMs },
-        "provider refused the chunk — retrying",
+        {
+          model,
+          status: (error as { status?: number })?.status,
+          reason: timedOut ? "timeout" : "refused",
+          nextModel: failedOverToBackup ? BACKUP_MODEL : primaryModel,
+          nextAttempt: tryIndex + 2,
+          delayMs,
+        },
+        timedOut ? "model too slow for this chunk — failing over to the backup model" : "provider refused the chunk — retrying",
       );
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 
