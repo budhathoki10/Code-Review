@@ -220,16 +220,19 @@ describe("capacity and cost gates", () => {
     expect(evaluateSizeGate(selection, DEFAULT_CONFIG).bail).toBe(false);
   });
 
-  it("bails on coverage once the chunk budget reaches too little of the PR", () => {
+  it("reviews what fits when the chunk budget reaches only part of the PR", () => {
     const files = Array.from({ length: 1_200 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
     const decision = evaluateSizeGate(selectDiffForReview(files), DEFAULT_CONFIG);
 
-    expect(decision.bail).toBe(true);
-    expect(decision.reason).toBe("coverage-too-low");
-    // The message has to carry actual numbers and name the dimension that
-    // ran out, not just say "too large".
-    expect(decision.detail).toMatch(/characters of diff|reviewable files/);
-    expect(decision.detail).toMatch(/d/);
+    // 1,200 files is far past capacity, and the answer is still a review of
+    // the files that fit rather than a refusal: the bugs in the covered files
+    // are found, and the gap is stated instead of the whole thing being
+    // declined.
+    expect(decision.bail).toBe(false);
+    // The warning has to carry actual numbers and name the dimension that ran
+    // out, not just say "too large".
+    expect(decision.warnings.join(" ")).toMatch(/characters|reviewable files/);
+    expect(decision.warnings.join(" ")).toMatch(/\d/);
   });
 
   it("coverage is measured against reviewable files, so noise can't drag it down", () => {
@@ -425,22 +428,24 @@ describe("breadth vs depth coverage", () => {
     expect(decision.warnings.join(" ")).toContain("truncated");
   });
 
-  it("still refuses when almost none of the content was readable", () => {
+  it("reviews the readable part of a file too large to read whole, and says so", () => {
     const selection = selectDiffForReview([giant("src/huge.ts", 60_000, 5_000_000)]);
     const decision = evaluateSizeGate(selection, DEFAULT_CONFIG);
 
-    expect(decision.bail).toBe(true);
-    expect(decision.reason).toBe("coverage-too-low");
-    expect(decision.detail).toContain("characters of diff");
+    expect(decision.bail).toBe(false);
+    expect(decision.warnings.join(" ")).toContain("characters");
   });
 
-  it("still refuses when most files were never opened at all", () => {
-    // Breadth gap: this is the misleading case the 50% floor exists for.
+  it("reviews the files that fit when most were never opened, and says so", () => {
+    // Breadth gap: the case the old 50% floor refused outright. A review of
+    // the files that fit is worth more to the author than no review, as long
+    // as it does not pretend to be complete — which the warning and the
+    // posted coverage note both prevent.
     const files = Array.from({ length: 1_200 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
     const decision = evaluateSizeGate(selectDiffForReview(files), DEFAULT_CONFIG);
 
-    expect(decision.bail).toBe(true);
-    expect(decision.detail).toContain("reviewable files");
+    expect(decision.bail).toBe(false);
+    expect(decision.warnings.join(" ")).toContain("reviewable files");
   });
 
   it("does not warn when everything fit", () => {

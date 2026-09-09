@@ -14,23 +14,31 @@ function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
   };
 }
 
-describe("evidence-based merge checks", () => {
-  it("a severe finding fails the check on its own now that no assessment pass runs", () => {
-    // The reviewer's own verdict is the only verdict there is: requiring a
-    // second model's "accepted" here would make every gate a permanent no-op.
-    expect(computeConclusion("request_changes", [finding({ severity: "critical", confidence: "high" })], "high")).toBe("failure");
+describe("the check reports, it never blocks", () => {
+  // A failing check is a merge block, and a merge block asserts the finding
+  // behind it is definitely real. One model reading a diff, with nothing
+  // re-checking it, cannot assert that — the first finding this reviewer ever
+  // blocked on was a prompt string it mistook for text pasted in by accident.
+  it("does not fail on a critical finding", () => {
+    expect(computeConclusion("comment", [finding({ severity: "critical", confidence: "high" })])).toBe("neutral");
   });
-  it("an explicit non-blocking assessment keeps a finding out of the gate", () => {
-    const thrownOut = finding({ severity: "critical", verification: { status: "rejected", reason: "Guarded upstream", evidence: [] } });
-    expect(computeConclusion("request_changes", [thrownOut], "high")).toBe("neutral");
+
+  it("does not fail on any severity, at any volume", () => {
+    for (const severity of REVIEW_SEVERITIES) {
+      expect(computeConclusion("comment", [finding({ severity })])).not.toBe("failure");
+    }
+    const many = REVIEW_SEVERITIES.map((severity) => finding({ severity }));
+    expect(computeConclusion("comment", many)).toBe("neutral");
   });
-  it("respects the repository threshold", () => {
-    const assessed = finding({ severity: "high", verification: { status: "accepted", reason: "Guard removed", evidence: [{ file: "a.ts", line: 1, quote: "return 10/x" }] } });
-    expect(computeConclusion("approve", [assessed], "high")).toBe("failure");
-    expect(computeConclusion("request_changes", [assessed], "critical")).toBe("neutral");
-  });
-  it("lowering the threshold never makes medium advice block", () => {
-    expect(computeConclusion("comment", [finding({ severity: "medium" })], "info")).toBe("neutral");
+
+  it("is green only when the review found nothing at all", () => {
+    expect(computeConclusion("approve", [])).toBe("success");
+    // An "approve" verdict carrying findings is still not a clean bill: the
+    // findings were posted, so the check must not claim there was nothing.
+    expect(computeConclusion("approve", [finding({ severity: "info" })])).toBe("neutral");
+    // Coverage the review could not complete comes back as a non-approve
+    // verdict, and must never render as green.
+    expect(computeConclusion("comment", [])).toBe("neutral");
   });
 });
 

@@ -157,14 +157,16 @@ describe("large PR scenarios", () => {
     expect(outcome.typicalCalls).toBe(0);
   });
 
-  it("F. a PR far past the pipeline's capacity is still refused, on coverage", () => {
-    // 1,200 real files: the chunk budget reaches a small fraction, so a
-    // review would be a misleading account of the PR rather than a partial one.
+  it("F. a PR far past the pipeline's capacity is reviewed as far as it reaches", () => {
+    // 1,200 real files: the chunk budget reaches a fraction of them. That is
+    // reported as a partial account, not used as a reason to review nothing —
+    // the author gets the findings from the files that were read, and the
+    // coverage note names the ones that were not.
     const outcome = analyze(Array.from({ length: 1_200 }, (_, i) => real(`src/f${i}.ts`, 100)));
 
-    expect(outcome.bailed).toBe(true);
-    expect(outcome.reason).toBe("coverage-too-low");
+    expect(outcome.bailed).toBe(false);
     expect(outcome.coveragePct).toBeLessThan(50);
+    expect(outcome.coveragePct).toBeGreaterThan(0);
   });
 
   it("prints the scenario table", () => {
