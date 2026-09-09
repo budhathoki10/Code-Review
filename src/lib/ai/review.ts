@@ -89,14 +89,29 @@ export type SharedParams = {
   max_tokens: number;
   temperature: number;
   top_p: number;
-  chat_template_kwargs?: { thinking: boolean };
+  // Both keys, always sent: this endpoint's templates read one or the other,
+  // and the type has to carry both or the second is silently dropped by
+  // anything that builds this shape from a literal.
+  chat_template_kwargs: { thinking: boolean; enable_thinking: boolean };
 };
 
-/** Reasoning defaults on; both discovery and assessment follow NVIDIA_THINKING. */
+/**
+ * Reasoning defaults on, and is now stated rather than assumed.
+ *
+ * This used to send `{}` when reasoning was wanted, leaving the actual
+ * behaviour to whatever the deployed chat template happened to default to —
+ * so "thinking is on" was a belief about the endpoint, not something the
+ * request said, and there was no way to tell from our side which mode a
+ * review had actually run in. Both keys are sent because this endpoint's
+ * templates read one or the other (`enable_thinking` on the NIM/vLLM builds,
+ * `thinking` on the older one); sending both means the request means the same
+ * thing whichever template is deployed. Neither is part of the OpenAI schema,
+ * which is why the return type is loose at the call site.
+ */
 export function thinkingKwargs(
   thinking = process.env.NVIDIA_THINKING !== "false",
-): { chat_template_kwargs?: { thinking: boolean } } {
-  return thinking ? {} : { chat_template_kwargs: { thinking: false } };
+): { chat_template_kwargs: { thinking: boolean; enable_thinking: boolean } } {
+  return { chat_template_kwargs: { thinking, enable_thinking: thinking } };
 }
 
 export function buildSharedParams(thinking?: boolean): SharedParams {
@@ -160,8 +175,28 @@ Never report any of the following. They are not findings:
 - a missing test, a missing comment, or a risk signal on its own
 - anything you cannot tie to a specific changed line
 - anything whose explanation ends up concluding the code is fine
+- a claim about intent rather than behavior: that code "looks accidental", "was pasted by mistake", "doesn't belong here", or "should be in the PR description". Long prose inside a string literal is ordinary source — prompts, templates, help text, error messages, SQL and documentation are all legitimately paragraphs long. A diff shows you what the code does, never why someone typed it.
 
-Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe. Every finding is independently assessed afterwards and rejected unless it can be tied to an exact line, so a guess costs you the finding and costs the author their trust in the rest.
+SEVERITY. High and critical fail the author's build and block the merge, so they are a claim about consequence, not about how interesting the bug is:
+- critical: data loss or corruption, an auth bypass, remote code execution, a leaked secret, or a failure on every request. Someone gets paged.
+- high: a real failure a user will hit on a path this diff makes reachable — a crash, wrong output, a leak that accumulates. You would stop a release for it.
+- medium: a genuine bug on a narrow path — an edge case, an error branch, a wrong value that degrades behavior without breaking it. Fix it, don't page anyone.
+- low: real but minor — a misleading message, a small waste, an off case with no user-visible effect.
+- info: worth the author knowing, not a defect.
+
+Most real findings are medium or low. If everything you report is high, you are labelling rather than calibrating — pick the level from the consequence you can actually name, and if you cannot name a consequence worse than "a user sees something slightly wrong", it is not high.
+
+Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe.
+
+Nothing checks your work after this. There is no second reviewer and no assessment pass — what you write is posted to the author's pull request exactly as you wrote it. So the bar is not "worth flagging in case": it is "I traced this and I am telling a colleague their code is broken". Before you report anything, re-read the lines you are citing and confirm the failure actually happens. One wrong finding costs the author their trust in every other one.
+
+WRITE LIKE A DEVELOPER LEAVING A PR COMMENT. You are talking to the person who wrote this code, in the tone you would use for a teammate you respect:
+- Say the problem in the first sentence, plainly. "This throws when \`items\` is empty" — not "A potential null-dereference vulnerability has been identified."
+- Use "you"/"this" and normal contractions. Reference the actual identifiers from the code by name, in backticks.
+- Be short. Two or three sentences of explanation is usually right. If it needs more, it is usually because you have not found the real cause yet.
+- No corporate register, no severity theatre, no restating the finding title, no "it is recommended that", no "Additionally, it should be noted". No emoji, no praise sandwich, no apologies.
+- Titles are lowercase-ish sentence fragments that name the bug, not report headings: "\`parseConfig\` drops the last entry when the file has no trailing newline" — not "Off-By-One Error in Configuration Parser".
+- If you would not say it out loud to a colleague at their desk, do not write it.
 
 Include a confidence level, but confidence alone is never evidence.
 

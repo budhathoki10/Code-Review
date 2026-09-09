@@ -390,7 +390,6 @@ describe("retry does not duplicate or orphan inline comments", () => {
     // Attempt 1 posts, then the write after it fails.
     await runReviewPipeline(JOB, log);
     expect(postInlineReviewMock).toHaveBeenCalledTimes(1);
-    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
 
     // Attempt 2: BullMQ retries the same job against the same head SHA.
     await runReviewPipeline(JOB, log);
@@ -416,33 +415,16 @@ describe("retry does not duplicate or orphan inline comments", () => {
     (reviewDocs[0] as { feedback?: unknown }).feedback = { label: "false-positive", userId: "user", at: new Date() };
     await runReviewPipeline(JOB, log);
     expect((reviewDocs[0] as { feedback?: { label: string } }).feedback?.label).toBe("false-positive");
-    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("reuses the verification result and accounts for its tokens once", async () => {
+  it("does not re-run the model or re-count its tokens on a retry", async () => {
+    // The checkpoint written after generation is what makes a retry free: the
+    // second attempt reuses that output rather than paying for it again.
     await runReviewPipeline(JOB, log);
+    const tokensAfterFirst = (reviewDocs[0].metrics as { totalTokens: number }).totalTokens;
     await runReviewPipeline(JOB, log);
-    expect(verifyBlockingFindingsMock).toHaveBeenCalledTimes(1);
-    expect(reviewDocs[0].metrics).toMatchObject({ totalTokens: 1320, calls: 4 });
-    expect(reviewDocs[0].verdict).toBe("comment");
-    expect(reviewDocs[0].summary).not.toContain("REQUEST CHANGES");
-  });
-
-  it("does not spend again when an attempt died after reserving its budget", async () => {
-    reviewDocs[0].verificationCheckpoint = { ...skippedVerification([{ severity: "high", category: "bug", file: "src/a.ts", line: 1, title: "Off-by-one", explanation: "x should stay 1." }], "Interrupted"), state: "reserved" };
-    await runReviewPipeline(JOB, log);
-    expect(verifyBlockingFindingsMock).not.toHaveBeenCalled();
-    expect(reviewDocs[0].verdict).toBe("comment");
-  });
-
-  it("removes rejected accusations from findings and summary", async () => {
-    verifyBlockingFindingsMock.mockImplementation(async (findings: FindingDoc[]) => ({
-      ...skippedVerification(findings, "test"), findings: [], rejected: findings,
-    }));
-    await runReviewPipeline(JOB, log);
-    expect(reviewDocs[0].findings).toEqual([]);
-    expect(reviewDocs[0].summary).not.toContain("Off-by-one");
-    expect(reviewDocs[0].summary).not.toContain("REQUEST CHANGES");
+    expect(generateChunkedReviewMock).toHaveBeenCalledTimes(1);
+    expect((reviewDocs[0].metrics as { totalTokens: number }).totalTokens).toBe(tokensAfterFirst);
   });
 
   it("still posts inline comments on a retry that never got to post", async () => {

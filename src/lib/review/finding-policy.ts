@@ -17,15 +17,33 @@ export function dedupeFindings(findings: FindingDoc[]): FindingDoc[] {
   return [...unique.values()];
 }
 
+/**
+ * Severity decides this now, not a second model's sign-off.
+ *
+ * It used to also require `verification.status === "accepted"`, from when a
+ * separate assessment pass ran after discovery. That pass is gone — precision
+ * is the review call's job now — and leaving the check in would have meant no
+ * finding could ever block again, silently turning every gate into a no-op.
+ *
+ * An explicit "this is not blocking-grade" verdict is still honoured, because
+ * some findings still carry one: reviews written before the change, and the
+ * staged pipeline behind REVIEW_MULTI_STAGE. A finding something actually
+ * assessed and threw out must not start failing builds just because the stage
+ * that threw it out no longer runs by default. `skipped` is not such a
+ * verdict — it means nothing looked — so it falls through to severity like an
+ * unassessed finding does.
+ */
 export function canBlock(finding: FindingDoc): boolean {
-  return (finding.severity === "high" || finding.severity === "critical") &&
-    finding.verification?.status === "accepted" && finding.verification.evidence.length > 0;
+  const verdict = finding.verification?.status;
+  return (finding.severity === "high" || finding.severity === "critical")
+    && verdict !== "rejected" && verdict !== "downgraded";
 }
 
 export function evidenceLabel(finding: FindingDoc): string {
   if (finding.proof?.status === "reproduced") return "Regression reproduced · proposed test passes on base and fails on head";
-  if (!finding.verification) return finding.source === "static-analysis" ? "Static analysis" : "Advisory · not independently assessed";
-  return finding.verification.status === "accepted"
-    ? "Probable · evidence checked by AI; not test-proven"
-    : `Advisory · ${finding.verification.reason}`;
+  if (finding.source === "static-analysis") return "Static analysis";
+  // Only reviews from before the assessment pass was removed carry one.
+  if (finding.verification?.status === "accepted") return "Probable · evidence checked by AI; not test-proven";
+  if (finding.verification && finding.verification.status !== "skipped") return `Advisory · ${finding.verification.reason}`;
+  return "Read by AI · not proven by a test run";
 }

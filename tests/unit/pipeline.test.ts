@@ -15,10 +15,16 @@ function finding(overrides: Partial<FindingDoc> = {}): FindingDoc {
 }
 
 describe("evidence-based merge checks", () => {
-  it("a model verdict or high confidence alone cannot fail a check", () => {
-    expect(computeConclusion("request_changes", [finding({ severity: "critical", confidence: "high" })], "high")).toBe("neutral");
+  it("a severe finding fails the check on its own now that no assessment pass runs", () => {
+    // The reviewer's own verdict is the only verdict there is: requiring a
+    // second model's "accepted" here would make every gate a permanent no-op.
+    expect(computeConclusion("request_changes", [finding({ severity: "critical", confidence: "high" })], "high")).toBe("failure");
   });
-  it("requires accepted evidence and the repository threshold", () => {
+  it("an explicit non-blocking assessment keeps a finding out of the gate", () => {
+    const thrownOut = finding({ severity: "critical", verification: { status: "rejected", reason: "Guarded upstream", evidence: [] } });
+    expect(computeConclusion("request_changes", [thrownOut], "high")).toBe("neutral");
+  });
+  it("respects the repository threshold", () => {
     const assessed = finding({ severity: "high", verification: { status: "accepted", reason: "Guard removed", evidence: [{ file: "a.ts", line: 1, quote: "return 10/x" }] } });
     expect(computeConclusion("approve", [assessed], "high")).toBe("failure");
     expect(computeConclusion("request_changes", [assessed], "critical")).toBe("neutral");

@@ -506,7 +506,7 @@ export function ReviewCard({
                line, and the detail stays in the stored review for diagnostics. */
             !!review.unresolvedFindings?.length && review.status === "completed" && (
               <p className="mt-4 border-t border-border pt-4 text-sm text-muted">
-                No confirmed bugs. {review.unresolvedFindings.length === 1 ? "One thing" : `${review.unresolvedFindings.length} things`} looked possibly off, but there wasn&apos;t enough to point at, so {review.unresolvedFindings.length === 1 ? "it&apos;s" : "they&apos;re"} not being reported as an issue.
+                No confirmed bugs. {review.unresolvedFindings.length === 1 ? "One thing" : `${review.unresolvedFindings.length} things`} looked possibly off, but there wasn&apos;t enough to point at, so {review.unresolvedFindings.length === 1 ? "it’s" : "they’re"} not being reported as an issue.
               </p>
             )
           )}
@@ -515,9 +515,12 @@ export function ReviewCard({
           {repositoryId && review.status === "completed" && (
             <ReviewFeedback reviewId={String(review._id)} repositoryId={repositoryId} value={review.feedback?.label} findings={findings} notABugIds={notABugIds ?? []} />
           )}
-          {review.verificationCheckpoint && <p className="mt-3 text-xs text-subtle">
-            Verification: {review.verificationCheckpoint.candidates} candidates · {review.verificationCheckpoint.usage.calls} extra calls · {review.verificationCheckpoint.usage.totalTokens} reported tokens · {review.verificationCheckpoint.rejected.length} rejected.
-          </p>}
+          {/* The raw "N candidates · N extra calls · N reported tokens" line
+              that used to sit here was internal accounting printed at the
+              reader — the same numbers MetricsStrip deliberately keeps off the
+              card. It also only ever described a stage that no longer runs.
+              The rejected list below is the part with something to say, and it
+              says it in words. */}
           {!!review.verificationCheckpoint?.rejected.length && (
             <RejectedFindings rejected={review.verificationCheckpoint.rejected} />
           )}

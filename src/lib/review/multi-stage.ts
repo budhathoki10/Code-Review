@@ -302,12 +302,34 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
     ...presentable.filter((t) => t.status === "uncertain" || t.status === "candidate"),
     ...invalid,
   ];
+  // Debate and arbitration concluded these are not real defects, after a
+  // proposer tried to disprove its own claim and a challenger tried to
+  // disprove its own rejection — the strongest process this pipeline has for
+  // deciding a finding is wrong. That conclusion is still worth showing: it
+  // is folded into the results at low severity, with the reasoning attached,
+  // rather than dropped into an unreviewed pile the author never sees. Only
+  // reconciled.rejected (exact duplicates of a finding already tracked
+  // elsewhere) is left out — that is dedup, not a correctness verdict.
+  const debatedAway: FindingDoc[] = presentable
+    .filter((t) => t.status === "rejected")
+    .map((t) => {
+      const doc = toFindingDoc(t, meta.headSha);
+      return {
+        ...doc,
+        severity: "low" as const,
+        verification: {
+          evidence: doc.verification?.evidence ?? [],
+          status: "downgraded" as const,
+          reason: `Debate concluded this is not a defect, shown rather than dropped: ${doc.verification?.reason ?? ""}`,
+        },
+      };
+    });
 
   await mark("completed");
   return {
-    findings: confirmed.map((t) => toFindingDoc(t, meta.headSha)),
+    findings: [...confirmed.map((t) => toFindingDoc(t, meta.headSha)), ...debatedAway],
     unresolved: unresolved.map((t) => toFindingDoc(t, meta.headSha)),
-    rejected: [...reconciled.rejected, ...validated.filter((t) => t.status === "rejected")].map((t) => toFindingDoc(t, meta.headSha)),
+    rejected: [],
     usage,
     stage: "completed",
     stats: {

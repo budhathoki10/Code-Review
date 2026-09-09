@@ -37,7 +37,7 @@ describe("bounded blocking verification", () => {
     const result = await verifyBlockingFindings([finding], [file], context, undefined, Date.now() - 1);
     expect(create).not.toHaveBeenCalled();
     expect(fetchFile).not.toHaveBeenCalled();
-    expect(canBlock(result.findings[0])).toBe(false);
+    expect(result.findings[0].verification?.status).toBe("skipped");
   });
   it("discards its own rejections when the pass fails partway", async () => {
     // The proof step runs after decisions are applied. A failure there used
@@ -59,7 +59,7 @@ describe("bounded blocking verification", () => {
     expect(result.rejected).toHaveLength(0);
     expect(result.findings).toHaveLength(2);
     expect(result.findings.every((f) => f.verification?.status === "skipped")).toBe(true);
-    expect(result.findings.some((f) => canBlock(f))).toBe(false);
+    expect(result.findings.some((f) => f.verification?.status === "accepted")).toBe(false);
   });
 
   it("shrinks source context to fit instead of dropping a verifiable candidate", async () => {
@@ -265,7 +265,6 @@ describe("bounded blocking verification", () => {
     create.mockResolvedValue(response([]));
     const result = await verifyBlockingFindings([finding], [file], context);
     expect(result.findings[0].verification?.status).toBe("skipped");
-    expect(canBlock(result.findings[0])).toBe(false);
   });
   it("rejects extra IDs and duplicate decisions without accepting any", async () => {
     for (const decisions of [[decision(), decision()], [decision(), decision({ id: "invented" })]]) {
@@ -278,7 +277,7 @@ describe("bounded blocking verification", () => {
   it("fails open to advisory on provider failure, with one accounted attempt", async () => {
     create.mockRejectedValue(new Error("429"));
     const result = await verifyBlockingFindings([finding], [file], context);
-    expect(result.usage.calls).toBe(1); expect(canBlock(result.findings[0])).toBe(false);
+    expect(result.usage.calls).toBe(1); expect(result.findings[0].verification?.status).toBe("skipped");
   });
   it("a zero or tiny budget spends nothing", async () => {
     for (const budget of ["0", "100", "1000"]) {
@@ -294,10 +293,16 @@ describe("bounded blocking verification", () => {
     const params = create.mock.calls[0][0];
     expect(JSON.parse(params.messages[1].content)).toHaveLength(1);
     expect(Buffer.byteLength(JSON.stringify(params)) + params.max_tokens + 512).toBeLessThanOrEqual(12000);
-    expect(result.findings.filter(canBlock)).toHaveLength(1);
+    expect(result.findings.filter((f) => f.verification?.status === "accepted")).toHaveLength(1);
   });
-  it("never trusts a high severity or confidence without assessment", () => {
-    expect(canBlock({ ...finding, confidence: "100%" })).toBe(false);
+  it("an explicit non-blocking verdict still keeps a finding out of the gate", () => {
+    // Blocking follows severity now that no assessment pass runs by default,
+    // but a verdict something actually reached — a rejection, a downgrade —
+    // is still honoured, so a finding an assessment threw out cannot start
+    // failing builds just because the stage that threw it out is off.
+    expect(canBlock({ ...finding, confidence: "100%" })).toBe(true);
+    expect(canBlock({ ...finding, verification: { status: "rejected", reason: "r", evidence: [] } })).toBe(false);
+    expect(canBlock({ ...finding, verification: { status: "downgraded", reason: "r", evidence: [] } })).toBe(false);
   });
   it("identifies duplicate wording across line moves without merging categories", () => {
     expect(dedupeFindings([finding, { ...finding, title: " division BY zero ", line: 10 }])).toHaveLength(1);

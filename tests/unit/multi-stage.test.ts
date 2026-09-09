@@ -59,10 +59,14 @@ describe("reconciliation — agreement and disagreement", () => {
   });
 
   it("TEST B: confirm against reject becomes disputed rather than picking a winner", () => {
+    // A flat reject from one reviewer is a correctness claim, not a dedup
+    // decision — it goes to debate like any other disagreement instead of
+    // dropping the finding on one reviewer's word alone.
     const result = reconcile([candidate()], [verdict({ decision: "reject", reason: "Guarded upstream." })], []);
-    expect(result.tracked).toHaveLength(0);
-    expect(result.rejected).toHaveLength(1);
-    expect(result.rejected[0].status).toBe("rejected");
+    expect(result.rejected).toHaveLength(0);
+    expect(result.tracked).toHaveLength(1);
+    expect(result.tracked[0].status).toBe("disputed");
+    expect(result.disputedCount).toBe(1);
   });
 
   it("TEST B': a modify verdict is material disagreement and goes to debate", () => {
@@ -113,8 +117,10 @@ describe("reconciliation — the verifier's own discoveries", () => {
     ];
 
     const result = reconcile(primary, verdicts, discoveries);
-    expect(result.rejected).toHaveLength(1);
-    expect(result.tracked).toHaveLength(4);
+    // F003's reject goes to debate rather than the rejected pile.
+    expect(result.rejected).toHaveLength(0);
+    expect(result.tracked).toHaveLength(5);
+    expect(result.tracked.find((t) => t.candidate.id === "F003")?.status).toBe("disputed");
     expect(result.tracked.filter((t) => t.candidate.source === "super")).toHaveLength(2);
   });
 
