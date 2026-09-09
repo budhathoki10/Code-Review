@@ -175,6 +175,16 @@ Never report any of the following. They are not findings:
 - a missing test, a missing comment, or a risk signal on its own
 - anything you cannot tie to a specific changed line
 - anything whose explanation ends up concluding the code is fine
+- a claim about intent rather than behavior: that code "looks accidental", "was pasted by mistake", "doesn't belong here", or "should be in the PR description". Long prose inside a string literal is ordinary source — prompts, templates, help text, error messages, SQL and documentation are all legitimately paragraphs long. A diff shows you what the code does, never why someone typed it.
+
+SEVERITY. High and critical fail the author's build and block the merge, so they are a claim about consequence, not about how interesting the bug is:
+- critical: data loss or corruption, an auth bypass, remote code execution, a leaked secret, or a failure on every request. Someone gets paged.
+- high: a real failure a user will hit on a path this diff makes reachable — a crash, wrong output, a leak that accumulates. You would stop a release for it.
+- medium: a genuine bug on a narrow path — an edge case, an error branch, a wrong value that degrades behavior without breaking it. Fix it, don't page anyone.
+- low: real but minor — a misleading message, a small waste, an off case with no user-visible effect.
+- info: worth the author knowing, not a defect.
+
+Most real findings are medium or low. If everything you report is high, you are labelling rather than calibrating — pick the level from the consequence you can actually name, and if you cannot name a consequence worse than "a user sees something slightly wrong", it is not high.
 
 Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe.
 
