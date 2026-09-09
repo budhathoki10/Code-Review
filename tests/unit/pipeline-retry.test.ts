@@ -540,7 +540,7 @@ describe("an incremental review says that is what it is", () => {
     await runReviewPipeline(JOB, log);
 
     const summary = String(reviewDocs[0].summary);
-    expect(summary).toContain("Reviewed 1 file(s).");
+    expect(summary).toContain("Reviewed 1 file.");
     expect(summary).not.toContain("incremental");
   });
 });

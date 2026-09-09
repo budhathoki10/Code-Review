@@ -12,6 +12,7 @@ import { SuggestionBlock } from "@/components/suggestion-block";
 import { DeleteReviewButton } from "@/app/dashboard/repos/[repositoryId]/delete-review-button";
 import { ReviewFeedback } from "@/components/review-feedback";
 import { evidenceLabel } from "@/lib/review/finding-policy";
+import { formatRelativeTime } from "@/lib/format";
 
 const CATEGORY_ICON: Record<FindingDoc["category"], typeof Bug> = {
   security: ShieldAlert,
@@ -387,6 +388,8 @@ export function ReviewCard({
   repositoryId,
   repoFullName,
   notABugIds,
+  runNumber,
+  isLatestRun,
 }: {
   review: ReviewDoc;
   pullRequest: PullRequestDoc | undefined;
@@ -399,6 +402,18 @@ export function ReviewCard({
   repoFullName?: string;
   /** Findings of this review a maintainer has already marked as not a bug. */
   notABugIds?: string[];
+  /**
+   * Which run of the same pull request this is, counting from the first —
+   * only set where the list is one PR's history, since a list of different
+   * pull requests has no sequence to be part of.
+   *
+   * A commit hash is an identifier, not an order: shown seven characters of
+   * hex, nobody can tell which of two reviews came first, and that is the
+   * only question a history is opened to answer.
+   */
+  runNumber?: number;
+  /** The run whose findings are the current state of the branch. */
+  isLatestRun?: boolean;
 }) {
   const findings = visibleFindings(review);
   const severityGroups = groupFindingsBySeverity(findings);
@@ -422,13 +437,46 @@ export function ReviewCard({
               className="h-3.5 w-3.5 shrink-0 text-subtle transition-transform duration-200 group-open:rotate-90 group-open:text-foreground"
               aria-hidden="true"
             />
-            <span className="truncate text-sm font-medium text-foreground">
-              {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
+            {/* Title, then what distinguishes THIS review from the others of
+                the same pull request. Every row carried the identical PR title
+                and nothing else, so a pull request with three reviews rendered
+                three rows a reader could not tell apart — and picking one was
+                guesswork. The commit and the time are the two things that
+                actually differ between them. */}
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-sm font-medium text-foreground">
+                {pullRequest ? `#${pullRequest.githubPrNumber} — ${pullRequest.title}` : "Unknown PR"}
+              </span>
+              <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-subtle">
+                {runNumber !== undefined && (
+                  <>
+                    <span className="font-medium text-muted">Run {runNumber}</span>
+                    <span aria-hidden="true">·</span>
+                  </>
+                )}
+                <code className="font-mono text-[11px]">{review.headSha.slice(0, 7)}</code>
+                <span aria-hidden="true">·</span>
+                <time dateTime={new Date(review.createdAt).toISOString()}>
+                  {formatRelativeTime(new Date(review.createdAt))}
+                </time>
+                {/* Which run describes the branch as it stands. Without it the
+                    reader has to compare timestamps to find out whether the
+                    findings they are reading were already superseded. */}
+                {isLatestRun && (
+                  <span className="rounded-full border border-accent/30 bg-accent/10 px-1.5 py-px text-[10px] font-medium tracking-wide text-accent uppercase">
+                    Latest
+                  </span>
+                )}
+              </span>
             </span>
           </span>
           <div className="flex shrink-0 items-center gap-3">
             {review.verdict && <VerdictBadge verdict={review.verdict} />}
-            <StatusBadge status={review.status} />
+            {/* "Completed" alongside a verdict says nothing: a review that
+                reached a verdict is finished by definition, so the chip was on
+                every healthy row carrying no information. Pending and failed
+                are the states worth a badge. */}
+            {review.status !== "completed" && <StatusBadge status={review.status} />}
             {repositoryId && (
               <DeleteReviewButton
                 reviewId={String(review._id)}

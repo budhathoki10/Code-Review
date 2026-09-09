@@ -187,36 +187,34 @@ export function evaluateSizeGate(
   // The pipeline posts a "nothing to review" result for this.
   if (selection.reviewableCount === 0) return { bail: false, warnings };
 
-  // Breadth first: files the budget never reached at all.
+  // Partial coverage is disclosed, never refused.
+  //
+  // These two used to bail: below 50% of files, or below 10% of characters,
+  // the reviewer posted "this pull request is too large" and looked at
+  // nothing. The reasoning was that a partial review reads like a full one —
+  // but that is only true if it does not say otherwise, and every posted
+  // review already carries a coverage note naming the files it could not
+  // reach. Refusing outright is strictly worse for the author: a review of
+  // 40% of the files finds the bugs in 40% of the files, and the alternative
+  // on offer was none of them.
+  //
+  // What stays a bail-out is the case where we cannot even enumerate the
+  // files (handled above) — there, the gap cannot be described, so a review
+  // would be silently partial rather than openly partial.
   const files = fileCoverage(selection);
   if (files < MIN_COVERAGE_RATIO) {
-    return {
-      bail: true,
-      reason: "coverage-too-low",
-      detail:
-        `Only ${selection.coveredCount} of ${selection.reviewableCount} reviewable files (${Math.round(files * 100)}%) fit within the review budget of ` +
-        `${REVIEW_CAPACITY.files} files across ${MAX_REVIEW_CHUNKS} passes. That is below the ${Math.round(MIN_COVERAGE_RATIO * 100)}% needed for a review to be a fair account of this pull request.`,
-      warnings,
-    };
+    warnings.push(
+      `Only ${selection.coveredCount} of ${selection.reviewableCount} reviewable files (${Math.round(files * 100)}%) fit the review budget of ` +
+        `${REVIEW_CAPACITY.files} files across ${MAX_REVIEW_CHUNKS} passes; the rest are named in the coverage note.`,
+    );
   }
 
-  // Depth second, against a much lower floor: every file was opened, but a
-  // truncated one still hides content. Worth disclosing loudly; only worth
-  // refusing when almost nothing was readable.
   const chars = charCoverage(selection);
   if (chars < MIN_CHAR_COVERAGE) {
-    return {
-      bail: true,
-      reason: "coverage-too-low",
-      detail:
-        `Only ${selection.coveredChars.toLocaleString()} of ${selection.reviewableChars.toLocaleString()} characters of diff (${Math.round(chars * 100)}%) could be read within the review budget of ` +
-        `${REVIEW_CAPACITY.chars.toLocaleString()} characters across ${MAX_REVIEW_CHUNKS} passes. Oversized files are truncated to fit, and at this ratio almost none of this pull request's content was visible.`,
-      warnings,
-    };
-  }
-
-  // Reviewed, but with a large blind spot — say so before spending anything.
-  if (chars < MIN_COVERAGE_RATIO) {
+    warnings.push(
+      `Only ${Math.round(chars * 100)}% of this pull request's diff characters could be read within the budget; oversized files were truncated.`,
+    );
+  } else if (chars < MIN_COVERAGE_RATIO) {
     warnings.push(
       `Only ${Math.round(chars * 100)}% of this pull request's diff characters fit the review budget; oversized files were truncated.`,
     );

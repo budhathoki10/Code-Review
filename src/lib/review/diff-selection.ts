@@ -10,7 +10,16 @@ import { riskReasons } from "@/lib/review/risk";
  * fit inside this many chunks are reported as unreviewed rather than
  * silently dropped (see SelectedDiff.skippedForBudget).
  */
-export const MAX_REVIEW_CHUNKS = Number(process.env.MAX_REVIEW_CHUNKS ?? 4);
+/**
+ * Eight, not four: capacity is 320 files / 800,000 characters.
+ *
+ * Four was sized when a review was several model calls per chunk and the
+ * whole thing had to finish in 240 seconds. A review is now one call per
+ * chunk, chunks run four at a time, and the deadline is ten minutes — so
+ * eight chunks is two waves of roughly a minute each, and buys twice as many
+ * files before anything has to be left out.
+ */
+export const MAX_REVIEW_CHUNKS = Number(process.env.MAX_REVIEW_CHUNKS ?? 8);
 
 /**
  * What one review can actually put in front of the model, derived from the

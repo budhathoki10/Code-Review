@@ -5,7 +5,7 @@ import { getPullRequestDiff, getIncrementalDiff, type PullRequestDiff } from "@/
 import { GitHubRateLimitError } from "@/lib/github/file-content";
 import { DEFAULT_MODEL, generateChunkedReview, type ReviewResult } from "@/lib/ai/review";
 import { getFileContent } from "@/lib/github/file-content";
-import { canBlock, dedupeFindings } from "@/lib/review/finding-policy";
+import { dedupeFindings } from "@/lib/review/finding-policy";
 import { codeWindow, riskReasons } from "@/lib/review/risk";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
 import { describeSkipReason } from "@/lib/review/triage";
@@ -77,16 +77,12 @@ function meetsThreshold(severity: FindingDoc["severity"], threshold: FindingDoc[
 /**
  * `severityThreshold` is a single configured value with two different
  * unconfigured defaults: posting defaults to "info" (post everything —
- * matches pre-Phase-6 behavior) while the check-run gate defaults to "high"
- * (a brand new repo shouldn't see its first check fail over an info-level
- * nit). Once a repo explicitly configures the field, both uses respect it.
+ * matches pre-Phase-6 behavior) while the check-run gate is stricter, since
+ * failing a check is the one thing a review does that a person cannot ignore.
+ * Once a repo explicitly configures the field, both uses respect it.
  */
 function resolvePostingThreshold(config: RepositoryDoc["config"] | undefined): FindingDoc["severity"] {
   return config?.severityThreshold ?? "info";
-}
-
-function resolveGateThreshold(config: RepositoryDoc["config"] | undefined): FindingDoc["severity"] {
-  return config?.severityThreshold ?? "high";
 }
 
 async function loadPullRequestDoc(pullRequestId: string) {
@@ -111,22 +107,41 @@ async function loadRepositoryConfig(pullRequestId: string): Promise<RepositoryDo
   return repositoryDoc?.config;
 }
 
+/**
+ * The check never fails. It reports.
+ *
+ * A failing check is a merge block, and a merge block is a claim that the
+ * thing it found is definitely real. One model reading a diff cannot make
+ * that claim — nothing re-checks it, and the first finding this reviewer ever
+ * blocked on was wrong: it read a prompt string as text pasted in by mistake
+ * and turned someone's build red over it.
+ *
+ * So the strongest signal here is "neutral": findings are posted, they are on
+ * the pull request and on the dashboard, and a person decides what they are
+ * worth. Green means the review found nothing, not that the code is proven
+ * correct.
+ *
+ * `gateThreshold` is still taken, and still decides nothing about pass/fail.
+ * It stays because the severity a finding was given is worth recording
+ * against the policy it was measured by, and because a repository that later
+ * wants gating should get it from an explicit opt-in rather than from this
+ * default quietly changing back.
+ */
 export function computeConclusion(
   verdict: ReviewResult["verdict"],
   findings: FindingDoc[],
-  gateThreshold: FindingDoc["severity"],
 ): CheckConclusion {
-  if (findings.some((f) => canBlock(f) && meetsThreshold(f.severity, gateThreshold))) {
-    return "failure";
-  }
   if (verdict !== "approve" || findings.length > 0) return "neutral";
   return "success";
 }
 
 function conclusionTitle(conclusion: CheckConclusion): string {
+  // "failure" is no longer reachable from computeConclusion — the branch stays
+  // so that a repository which later opts into gating gets a sensible title
+  // rather than "No issues found" on a red check.
   if (conclusion === "failure") return "Changes requested";
   if (conclusion === "neutral") return "Feedback available";
-  return "No blocking issues";
+  return "No issues found";
 }
 
 /**
@@ -1007,10 +1022,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // and their findings still render with whatever assessment they earned at
   // the time; nothing re-reads or rewrites them.
   markStage("verification");
-  const blocking = allFindings.filter((finding) => canBlock(finding) && meetsThreshold(finding.severity, resolveGateThreshold(repoConfig)));
+  // Counted to say what was found, not to decide anything. Nothing here
+  // blocks a merge or fails a check, so a verdict of "request_changes" would
+  // be an instruction this review has no standing to give — a reader who saw
+  // REQUEST CHANGES next to a passing check would reasonably conclude one of
+  // the two was broken. The strongest verdict is "comment".
+  const severe = allFindings.filter((finding) => finding.severity === "high" || finding.severity === "critical");
   const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
   const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
-  aiResult.verdict = blocking.length ? "request_changes" : allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
+  aiResult.verdict = allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
   if (multiStageOutcome) {
     aiResult.summary = buildMultiStageSummary(allFindings, selection, unreviewedFiles) + formatCoverageNote(selection, unreviewedFiles);
   } else if (selection.chunks.length > 0) {
@@ -1023,17 +1043,30 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // budget-skipped files (see the coverage note below); scope from an
     // incremental baseline is the same claim and was only ever in a log line.
     const reviewedCount = Math.max(0, selection.coveredCount - unreviewedFiles.length);
+    // "1 file(s)" is the sound a program makes, not a sentence. This summary
+    // is the first thing a person reads on their own pull request.
+    const files = (count: number) => `${count} ${count === 1 ? "file" : "files"}`;
+    const findingsWord = (count: number) => `${count} ${count === 1 ? "finding" : "findings"}`;
     const scopeSentence = reviewedFromSha === undefined
-      ? `Reviewed ${reviewedCount} file(s).`
-      : `Reviewed the ${reviewedCount} file(s) changed since \`${reviewedFromSha.slice(0, 7)}\` — an incremental review of the latest push, not of the whole pull request.` +
+      ? `Reviewed ${files(reviewedCount)}.`
+      : `Reviewed the ${files(reviewedCount)} changed since \`${reviewedFromSha.slice(0, 7)}\` — an incremental review of the latest push, not of the whole pull request.` +
         (carriedForwardFindings.length > 0
-          ? ` ${carriedForwardFindings.length} finding(s) from earlier commits are carried forward below.`
+          ? ` ${findingsWord(carriedForwardFindings.length)} from earlier commits ${carriedForwardFindings.length === 1 ? "is" : "are"} carried forward below.`
           : " Earlier commits were reviewed previously and raised nothing still outstanding.");
-    aiResult.summary = `${scopeSentence} ${blocking.length
-      ? `${blocking.length} of them are high or critical and meet this repo's blocking threshold.`
-      : "Nothing here meets the blocking threshold."}\n\n` +
-      `${allFindings.length} finding(s) below. These are read by a model, not proven by a test run — check them before you act on them.\n\n` +
-      `*Current review: ${aiResult.verdict === "request_changes" ? "REQUEST CHANGES" : aiResult.verdict.toUpperCase()}.*` +
+    // "N of them" used to follow "Reviewed N file(s)", so the count of severe
+    // FINDINGS read as a count of files. It now says which noun it is
+    // counting, and says plainly that nothing here stops a merge — a reader
+    // deciding whether to act on a high finding should not have to work out
+    // whether it is also holding up their build.
+    // A clean review talks about the code, not about findings that do not
+    // exist. "Retained 0 finding(s). AI assessment is not test-backed proof.
+    // Unchecked findings are advisory." was three sentences of caveat about
+    // an empty list, and it was the entire summary on every clean review.
+    const findingsSentence = allFindings.length === 0
+      ? "Nothing to report."
+      : `${findingsWord(allFindings.length)} below${severe.length ? `, ${severe.length} of them high or critical` : ""}. ` +
+        "Read by a model, not proven by a test run, and nothing here blocks the merge — check them before you act on them.";
+    aiResult.summary = `${scopeSentence}\n\n${findingsSentence}\n\n` +
       formatCoverageNote(selection, unreviewedFiles);
   }
 
@@ -1189,8 +1222,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
   if (checkRunId !== undefined) {
     try {
-      const gateThreshold = resolveGateThreshold(repoConfig);
-      const conclusion = computeConclusion(aiResult.verdict, allFindings, gateThreshold);
+      const conclusion = computeConclusion(aiResult.verdict, allFindings);
       await completeCheckRun(githubInstallationId, owner, repo, checkRunId, {
         conclusion,
         title: conclusionTitle(conclusion),

@@ -4,6 +4,7 @@ import { REVIEW_QUEUE_NAME, type ReviewJobData } from "@/lib/queue/review-queue"
 import { runReviewPipeline } from "@/lib/review/pipeline";
 import { acquirePrLock } from "@/lib/queue/pr-lock";
 import { reviews } from "@/lib/db/collections";
+import { completeCheckRun } from "@/lib/github/checks";
 import { logger } from "@/lib/logger";
 
 const AI_RATE_LIMIT_MAX = Number(process.env.AI_RATE_LIMIT_MAX ?? 10);
@@ -131,7 +132,7 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
     }
 
     const reviewsCol = await reviews();
-    await reviewsCol.updateOne(
+    const failedReview = await reviewsCol.findOneAndUpdate(
       { pullRequestId: job.data.pullRequestId, headSha: job.data.headSha },
       {
         $set: {
@@ -144,8 +145,38 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
           },
         },
       },
+      { returnDocument: "after" },
     );
     log.error("job exhausted retries — review marked failed (dead letter)");
+
+    // Close the check run the pipeline opened. Without this it stays
+    // "in_progress" forever: the review is dead, every retry is spent, and
+    // the pull request shows a spinner that will never resolve — which reads
+    // as "still working" rather than "this never finished", and is the one
+    // state nobody can act on. Neutral, not failure, for the same reason
+    // nothing else here fails a build: the reviewer not running is not a
+    // statement about the code.
+    const checkRunId = failedReview?.checkRunId;
+    if (checkRunId !== undefined) {
+      try {
+        await completeCheckRun(
+          job.data.githubInstallationId,
+          job.data.owner,
+          job.data.repo,
+          checkRunId,
+          {
+            conclusion: "neutral",
+            title: "Review did not complete",
+            summary: `The reviewer could not finish after ${job.attemptsMade} attempt(s). Nothing here says anything about the code — push a commit to run it again.`,
+          },
+        );
+        log.info({ checkRunId }, "closed the check run left open by the failed review");
+      } catch (checkError) {
+        // Best effort: the review is already recorded as failed, and a
+        // GitHub outage here must not take the worker down with it.
+        log.error({ err: checkError, checkRunId }, "could not close the check run for a failed review");
+      }
+    }
   });
 
   worker.on("error", (err) => {

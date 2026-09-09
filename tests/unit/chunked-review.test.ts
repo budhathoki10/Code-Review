@@ -93,6 +93,10 @@ async function loadModule() {
   vi.resetModules();
   process.env.NVIDIA_API_KEY = "test-key";
   process.env.NVIDIA_BASE_URL = "https://example.test/v1";
+  // Retry timing is real in production and pointless here: without this the
+  // suite sleeps 13.5s for every simulated outage. The retry COUNT is
+  // unchanged, so what these tests assert about call budgets still holds.
+  process.env.REVIEW_CHUNK_RETRY_DELAYS_MS ??= "0,0,0";
   return import("@/lib/ai/review");
 }
 
@@ -359,19 +363,34 @@ describe("predictable discovery budget", () => {
   beforeEach(() => { createMock.mockReset(); getFileContentMock.mockReset(); delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS; });
   afterEach(() => { vi.useRealTimers(); });
 
-  it.each([429, 500, 503, 401])("does not split provider status %s or start queued work", async (status) => {
+  it.each([429, 500, 503])("retries provider status %s, then stops without starting queued work", async (status) => {
     const { generateChunkedReview } = await loadModule();
     createMock.mockRejectedValue(Object.assign(new Error("provider unavailable"), { status }));
     const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")], [file("src/d.ts")], [file("src/poison.ts")]]);
-    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
+
+    // A refusal is retried — that is the point — but the review-wide failure
+    // budget still stops a dead endpoint being paid for once per chunk, and
+    // the chunk is never split (splitting cannot repair a 500).
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(12);
     expect(result.unreviewedFiles).toHaveLength(4);
     expect(result.verdict).toBe("comment");
   });
 
-  it("keeps reviewing after a single transient provider failure", async () => {
-    // One 500 is not an outage. The endpoint returns intermittent failures
-    // with successful calls either side, so abandoning the queue on the first
-    // one discarded chunks that had never been attempted.
+  it("does not retry a 401 — the next identical request earns the same answer", async () => {
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockRejectedValue(Object.assign(new Error("unauthorized"), { status: 401 }));
+    const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")], [file("src/d.ts")], [file("src/poison.ts")]]);
+
+    // Our own credentials, not the provider's capacity: retrying three times
+    // and falling back to another model proves the same thing three times.
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(result.unreviewedFiles).toHaveLength(4);
+  });
+
+  it("recovers a chunk that hit a single transient provider failure", async () => {
+    // One 500 is not an outage. This chunk used to be abandoned outright and
+    // its file reported unreviewed, so a blip silently cost a whole file's
+    // review; it is now re-sent and lands.
     const { generateChunkedReview } = await loadModule();
     createMock
       .mockRejectedValueOnce(Object.assign(new Error("blip"), { status: 500 }))
@@ -379,9 +398,25 @@ describe("predictable discovery budget", () => {
 
     const result = await generateChunkedReview([[file("src/a.ts")], [file("src/b.ts")], [file("src/c.ts")]]);
 
-    // Only the chunk that actually failed is unreviewed; the rest still ran.
-    expect(result.unreviewedFiles).toEqual(["src/a.ts"]);
-    expect(createMock.mock.calls.length).toBeGreaterThan(1);
+    expect(result.unreviewedFiles).toEqual([]);
+    expect(createMock.mock.calls.length).toBeGreaterThan(3);
+  });
+
+  it("falls back to the backup model when the primary keeps refusing", async () => {
+    const { generateChunkedReview, BACKUP_MODEL } = await loadModule();
+    // Every attempt on the primary fails; the last attempt switches model and
+    // is answered.
+    createMock
+      .mockRejectedValueOnce(Object.assign(new Error("down"), { status: 500 }))
+      .mockRejectedValueOnce(Object.assign(new Error("down"), { status: 500 }))
+      .mockRejectedValueOnce(Object.assign(new Error("down"), { status: 500 }))
+      .mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+
+    const result = await generateChunkedReview([[file("src/a.ts")]]);
+
+    expect(result.unreviewedFiles).toEqual([]);
+    const modelsTried = createMock.mock.calls.map((call) => (call[0] as { model: string }).model);
+    expect(modelsTried.at(-1)).toBe(BACKUP_MODEL);
   });
 
   it("abandons the review once provider failures repeat", async () => {
@@ -390,8 +425,9 @@ describe("predictable discovery budget", () => {
 
     const result = await generateChunkedReview([[file("src/a.ts")], [file("src/b.ts")], [file("src/c.ts")]]);
 
-    // Two failures reach the threshold, so the third chunk is never attempted.
-    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
+    // Retries are bounded per chunk, and once the shared failure budget is
+    // reached no further chunk is attempted at all.
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(12);
     expect(result.unreviewedFiles).toHaveLength(3);
   });
 
@@ -410,15 +446,18 @@ describe("predictable discovery budget", () => {
     expect(requestOptions?.signal).toBeUndefined();
   });
 
-  it("does not split real SDK connection and timeout errors", async () => {
+  it("retries real SDK connection and timeout errors without splitting the chunk", async () => {
     const { APIConnectionTimeoutError, APIConnectionError } = await import("openai/core/error");
     const { generateChunkedReview } = await loadModule();
     for (const error of [new APIConnectionTimeoutError({}), new APIConnectionError({})]) {
       createMock.mockReset().mockRejectedValue(error);
       const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")]]);
-      expect(createMock).toHaveBeenCalledTimes(1);
+      // A dropped connection is the transport, not the chunk: re-sent the
+      // bounded number of times, and never split into halves that would each
+      // fail the same way.
+      expect(createMock.mock.calls.length).toBe(4);
       expect(result.unreviewedFiles).toHaveLength(2);
-      expect(result.usage.calls).toBe(1);
+      expect(result.usage.calls).toBe(4);
     }
   });
 
