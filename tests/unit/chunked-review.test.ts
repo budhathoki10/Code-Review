@@ -504,12 +504,14 @@ describe("predictable discovery budget", () => {
     for (const error of [new APIConnectionTimeoutError({}), new APIConnectionError({})]) {
       createMock.mockReset().mockRejectedValue(error);
       const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")]]);
-      // A dropped connection is the transport, not the chunk: re-sent the
-      // bounded number of times, and never split into halves that would each
-      // fail the same way.
-      expect(createMock.mock.calls.length).toBe(4);
+      // A timeout means this model is too slow for this input, on the primary
+      // as much as the backup: one attempt on each, then give up rather than
+      // retrying the backup against the same input it already proved too
+      // slow for — that retry cannot succeed and only spends budget the
+      // chunks still waiting need.
+      expect(createMock.mock.calls.length).toBe(2);
       expect(result.unreviewedFiles).toHaveLength(2);
-      expect(result.usage.calls).toBe(4);
+      expect(result.usage.calls).toBe(2);
     }
   });
 

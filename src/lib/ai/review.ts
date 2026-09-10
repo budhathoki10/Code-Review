@@ -281,8 +281,13 @@ async function callWithBackup(
       // the first justifies changing model, and it justifies it immediately.
       const modelDown = isModelUnavailable(error);
       if (modelDown) failedOverToBackup = true;
-      // Nothing to fail over TO, and the same request would fail the same way again.
-      if (modelDown && BACKUP_MODEL === primaryModel) throw error;
+      // Nothing to fail over TO — either backup is the same model as primary,
+      // or this attempt was already running on the backup and it is the one
+      // that just proved unavailable. Retrying it again is not a failover,
+      // it is the same doomed call a second time: measured live, this burned
+      // the entire review deadline on a backup stuck in thinking mode instead
+      // of leaving time for the chunks still waiting.
+      if (modelDown && (model === BACKUP_MODEL || BACKUP_MODEL === primaryModel)) throw error;
 
       // A generic refusal clears in a moment, so it is worth a pause. An
       // unavailable model has already spent seconds-to-minutes proving it,
