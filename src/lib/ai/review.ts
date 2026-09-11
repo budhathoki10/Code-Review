@@ -3,6 +3,7 @@ import { z } from "zod";
 import { logger } from "@/lib/logger";
 import type { FindingDoc } from "@/lib/db/collections";
 import { addUsage, usageFromResponse, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
+import { parseToolArguments } from "@/lib/ai/tool-arguments";
 import { getFileContent, GitHubRateLimitError } from "@/lib/github/file-content";
 import { buildDiffText, type PullRequestFile } from "@/lib/github/diff";
 import { envNumber } from "@/lib/env";
@@ -38,7 +39,7 @@ const findingsSchema = z.object({
   findings: z.preprocess((value) => {
     if (typeof value !== "string") return value;
     try {
-      return JSON.parse(value);
+      return parseToolArguments(value);
     } catch {
       return value;
     }
@@ -510,7 +511,7 @@ function appendVerdictLine(summary: string, verdict: ReviewResult["verdict"]): s
 export async function resolveFetchFile(rawArgs: string, ctx: RepoContext, cache: Map<string, string>, deadlineAt?: number): Promise<string> {
   let path: string;
   try {
-    const parsed = JSON.parse(rawArgs) as { path?: unknown };
+    const parsed = parseToolArguments(rawArgs) as { path?: unknown };
     path = typeof parsed.path === "string" ? parsed.path.trim() : "";
   } catch {
     return "Error: fetch_file arguments were not valid JSON.";
@@ -703,7 +704,7 @@ async function runFindingsLoopInner(
     if (submitCall) {
       let parsedArgs: unknown;
       try {
-        parsedArgs = JSON.parse(submitCall.function.arguments);
+        parsedArgs = parseToolArguments(submitCall.function.arguments);
       } catch {
         throw new Error("Model returned invalid JSON in submit_findings tool call arguments");
       }
@@ -1007,7 +1008,7 @@ async function runFindingsWithBisect(
     // The model's line number is an assertion, not an observation. Correct it
     // against the patch before anything downstream treats it as a location.
     const anchored = anchorFindings(result.value.findings, files);
-    if (anchored.stats.corrected > 0 || anchored.stats.unanchored > 0) {
+    if (anchored.stats.corrected > 0 || anchored.stats.unanchored > 0 || anchored.stats.dropped > 0) {
       logger.info({ ...anchored.stats, files: files.length }, "finding line numbers anchored to the patch");
     }
     return { findings: anchored.findings, usage: result.usage, unreviewedFiles: [] };

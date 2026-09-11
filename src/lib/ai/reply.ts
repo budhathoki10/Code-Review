@@ -5,6 +5,7 @@ import { usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { getFileContent } from "@/lib/github/file-content";
 import type { ThreadMessage } from "@/lib/github/review-comments";
 import { DEFAULT_MODEL, thinkingKwargs } from "@/lib/ai/review";
+import { parseToolArguments } from "@/lib/ai/tool-arguments";
 
 /**
  * Answering a question about one finding is a different job from producing a
@@ -253,7 +254,7 @@ export async function generateReplyAnswer(
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(toolCall.function.arguments);
+    parsed = parseToolArguments(toolCall.function.arguments);
   } catch {
     throw new Error("Model returned invalid JSON in submit_answer arguments");
   }
