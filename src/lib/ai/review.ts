@@ -6,6 +6,9 @@ import { addUsage, usageFromResponse, EMPTY_USAGE, type TokenUsage } from "@/lib
 import { getFileContent, GitHubRateLimitError } from "@/lib/github/file-content";
 import { buildDiffText, type PullRequestFile } from "@/lib/github/diff";
 import { envNumber } from "@/lib/env";
+import { anchorFindings } from "@/lib/review/finding-anchor";
+import { createHash } from "node:crypto";
+import { splitPatchSections } from "@/lib/review/patch-sections";
 
 const findingSchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
@@ -16,6 +19,8 @@ const findingSchema = z.object({
   explanation: z.string(),
   suggestion: z.string().optional(),
   confidence: z.string().optional(),
+  /** The source line this finding is about, verbatim. Used to correct `line` against the patch — see review/finding-anchor.ts. */
+  codeSnippet: z.string().optional(),
 });
 
 /**
@@ -133,7 +138,8 @@ export const DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
  * recently — so it is a known-good reviewer rather than a guess. It is only
  * ever reached after the primary has already failed twice on the same chunk.
  */
-export const BACKUP_MODEL = process.env.NVIDIA_BACKUP_MODEL ?? "nvidia/nemotron-3-super-120b-a12b";
+export const BACKUP_MODEL = process.env.NVIDIA_BACKUP_MODEL
+  ?? (process.env.NVIDIA_MODEL === "nvidia/nemotron-3-super-120b-a12b" ? DEFAULT_MODEL : "nvidia/nemotron-3-super-120b-a12b");
 
 /**
  * How many times one chunk is re-sent after the provider refuses it, and how
@@ -334,7 +340,7 @@ export const MAX_FINDINGS_TOOL_ROUNDS = (() => {
 })();
 /** Distinct file paths fetch_file may resolve (success or failure) per review. */
 const MAX_FETCH_FILE_CALLS = envNumber("REVIEW_MAX_FETCH_FILE_CALLS", 10);
-/** Per-file truncation — 5 × 20k ≈ one MAX_DIFF_CHARS-sized addition worst case. */
+/** Auxiliary full-file context cap; changed diff sections themselves are complete. */
 const MAX_FETCHED_FILE_CHARS = 20_000;
 /** Ceiling for one investigation read when the review itself is unbounded. */
 const FETCH_FILE_TIMEOUT_MS = 10_000;
@@ -378,9 +384,11 @@ SEVERITY. High and critical fail the author's build and block the merge, so they
 
 Most real findings are medium or low. If everything you report is high, you are labelling rather than calibrating — pick the level from the consequence you can actually name, and if you cannot name a consequence worse than "a user sees something slightly wrong", it is not high.
 
+FINDING A DEFECT DOES NOT FINISH A FILE. Report it and keep reading the same function, the same file, the rest of the diff. Two or three real bugs in one function is an ordinary outcome for hand-written parsing, validation or error-handling code, and reporting the second one is not padding — "do not fill the list" forbids inventing findings, never finding more of them. The failure this rule exists to stop is real and measured: given a parser with a broken regex on one line and a broken split two lines below it, the review named the regex, moved to the next file, and left the other bug in the code. Before you leave a changed region, ask what else in it you have not actually checked yet.
+
 Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe.
 
-DISMISSING A CANDIDATE NEEDS THE SAME EVIDENCE AS REPORTING ONE. When you notice something that might be a defect and then decide it is fine, that conclusion has to rest on something you actually checked — the guard, the caller, the type, the test — not on how the code looks. "This is probably handled", "that is unlikely", "this should be backward compatible", "this seems safe" and "the tests presumably cover it" are not verifications; they are the same speculation forbidden above, pointed at the opposite answer. If clearing a candidate depends on code you have not read, use fetch_file and read it. Clear it because you checked, or report it. Silently dropping something you noticed but never verified is the one failure this review cannot recover from — a defect you dismissed reaches production unreviewed, while a finding the author disagrees with costs them ten seconds.
+DISMISSING A CANDIDATE NEEDS THE SAME EVIDENCE AS REPORTING ONE. When you notice something that might be a defect and then decide it is fine, that conclusion has to rest on something you actually checked — the guard, the caller, the type, the test — not on how the code looks. "This is probably handled", "that is unlikely", "this should be backward compatible", "this seems safe" and "the tests presumably cover it" are not verifications; they are the same speculation forbidden above, pointed at the opposite answer. If clearing a candidate depends on code you have not read, use fetch_file and read it. Clear it because you checked, or report it. The diff in front of you counts as having read it: a file added by this pull request is present here in full, so "I cannot be certain this function exists or what its signature is" is answered by scrolling to it, not reported as a finding. Never raise a doubt the diff itself already settles. Silently dropping something you noticed but never verified is the one failure this review cannot recover from — a defect you dismissed reaches production unreviewed, while a finding the author disagrees with costs them ten seconds.
 
 The bar is "I traced this and I am telling a colleague their code is broken". Before you report anything, re-read the lines you are citing and confirm the failure actually happens. Findings are advisory and do not block the merge, so a genuine bug you traced is always worth reporting — staying silent about a real defect costs the author more than a finding they can dismiss.
 
@@ -429,6 +437,11 @@ const FINDINGS_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
                   "Optional. Fill this ONLY when the fix is a direct replacement for the single line named in `line`, and write ONLY the literal replacement code — no explanation, no markdown fence, no alternatives, no 'consider ...' phrasing. This is posted as a one-click 'commit suggestion' on GitHub, so anything here that is not code becomes something a developer can click to commit as code. The replacement may span several lines (e.g. splitting one line into three) — only the ORIGINAL line has to be a single line. Severity and category do not enter into this decision: a `low`-severity `quality` nit that is one line (a `||` that should be `??`, a hardcoded number that should be a named constant, a `let` that should be `const`) qualifies exactly as much as a `critical` bug, and those small mechanical fixes are the ones a reviewer most wants to apply in one click — so fill it there too rather than describing the change in prose. The test is the SHAPE of the fix, never its importance. A finding that mentions OTHER occurrences of the same nit is still suggestible: `line` names one specific line, so if replacing that one line is a mechanical fix, fill `suggestion` for it and let `explanation` list the other places — do not withhold the fix for the anchored line just because the same change is wanted elsewhere. Low-severity findings in particular are almost always this shape, and should end up with a suggestion far more often than not. If the fix needs judgment, requires changing multiple original lines TOGETHER to be correct, or is not reducible to replacing that one line, leave this empty and put the guidance in `explanation` instead.",
               },
               confidence: { type: "string" },
+              codeSnippet: {
+                type: "string",
+                description:
+                  "REQUIRED. The single source line this finding is about, copied character-for-character from the diff — the line `line` is supposed to point at. Copy it, do not retype or summarise it: it is matched against the patch to place the comment, and a paraphrase matches nothing. Include the leading indentation but not the diff's own +/- marker. If the defect genuinely spans several lines, give the one line a reader should look at first.",
+              },
             },
             required: ["severity", "category", "file", "title", "explanation"],
           },
@@ -599,8 +612,8 @@ async function runFindingsLoopInner(
    * Shared across every chunk and every bisect retry of one review, because
    * that is what FINDINGS_SYSTEM_PROMPT promises the model ("at most N
    * distinct files ... for this review"). Created per-call, it silently
-   * became a per-chunk budget: 4 chunks plus 12 bisect attempts re-issued it
-   * 16 times over, and each fetched file is re-sent as tool-result tokens in
+   * became a per-chunk budget: every root/bisect attempt re-issued it, and
+   * each fetched file is re-sent as tool-result tokens in
    * its chunk's own multi-round conversation.
    */
   fileCache: Map<string, string>,
@@ -619,7 +632,9 @@ async function runFindingsLoopInner(
 
   for (let round = 0; round <= roundsAvailable; round++) {
     const isFinalRound = round === roundsAvailable;
+    let continuing = false;
 
+    while (true) {
     // Undefined means the caller asked for no deadline; only a configured one
     // can expire, and only then does the request carry an abort signal.
     const remainingMs = deadlineAt === undefined ? undefined : deadlineAt - Date.now();
@@ -632,6 +647,7 @@ async function runFindingsLoopInner(
     // would reintroduce exactly that blind spot if the extra attempts were not
     // added here.
     let attemptsThisRound = 0;
+    const forceSubmit = isFinalRound || continuing;
     const response = await callWithBackup(
       (attemptModel, attemptTimeoutMs, signal) => {
         attemptsThisRound += 1;
@@ -641,16 +657,19 @@ async function runFindingsLoopInner(
         return getClient().chat.completions.create({
           model: attemptModel,
           ...sharedParams,
+          // The truncated response already contains the expensive reasoning.
+          // The continuation should only turn it into the final tool result.
+          ...(continuing ? thinkingKwargs(false) : {}),
           messages,
-          tools: isFinalRound ? [FINDINGS_TOOL] : [FINDINGS_TOOL, FETCH_FILE_TOOL],
-          tool_choice: isFinalRound ? { type: "function", function: { name: "submit_findings" } } : "required",
+          tools: forceSubmit ? [FINDINGS_TOOL] : [FINDINGS_TOOL, FETCH_FILE_TOOL],
+          tool_choice: forceSubmit ? { type: "function", function: { name: "submit_findings" } } : "required",
         }, { maxRetries: 0, timeout: attemptTimeoutMs, ...(signal ? { signal } : {}) });
       },
       model,
       deadlineAt,
       providerDown,
     );
-    logger.info({ durationMs: Date.now() - callStartedAt, round, attempts: attemptsThisRound, finishReason: response.choices[0]?.finish_reason }, "finding model call completed");
+    logger.info({ durationMs: Date.now() - callStartedAt, round, continuation: continuing, attempts: attemptsThisRound, finishReason: response.choices[0]?.finish_reason }, "finding model call completed");
     // usageFromResponse counts the attempt that answered; the ones that were
     // refused before it carried no usage body but were still calls.
     totalUsage = addUsage(totalUsage, usageFromResponse(response.usage));
@@ -658,8 +677,24 @@ async function runFindingsLoopInner(
     // Mirrored out so the wrapper can still recover it if a later round throws.
     usageSink[0] = totalUsage;
 
-    if (response.choices[0]?.finish_reason === "length") throw new Error("Model output exhausted its token budget");
     const message = response.choices[0]?.message;
+    if (response.choices[0]?.finish_reason === "length") {
+      const vendorReasoning = (message as unknown as { reasoning_content?: unknown } | undefined)?.reasoning_content;
+      const partial = [
+        typeof vendorReasoning === "string" ? vendorReasoning : "",
+        typeof message?.content === "string" ? message.content : "",
+      ].filter(Boolean).join("\n");
+      if (!continuing && partial.trim()) {
+        messages.push({ role: "assistant", content: partial });
+        messages.push({
+          role: "user",
+          content: "Continue from the analysis above. Do not repeat it. Call submit_findings now with the final concise findings.",
+        });
+        continuing = true;
+        continue;
+      }
+      throw new Error("Model output exhausted its token budget");
+    }
     const toolCalls = (message?.tool_calls ?? []).filter(
       (c): c is OpenAI.Chat.Completions.ChatCompletionMessageFunctionToolCall => c.type === "function",
     );
@@ -675,7 +710,7 @@ async function runFindingsLoopInner(
       return { value: findingsSchema.parse(parsedArgs), usage: totalUsage };
     }
 
-    if (isFinalRound) {
+    if (forceSubmit) {
       throw new Error("Model did not call submit_findings on the forced final round");
     }
 
@@ -688,7 +723,7 @@ async function runFindingsLoopInner(
         role: "user",
         content: 'Call either "fetch_file" to investigate further, or "submit_findings" to finish. Do not just respond with prose.',
       });
-      continue;
+      break;
     }
 
     messages.push({ role: "assistant", tool_calls: toolCalls });
@@ -698,6 +733,8 @@ async function runFindingsLoopInner(
           ? await resolveFetchFile(call.function.arguments, repoContext!, fileCache, deadlineAt)
           : `Error: unknown tool "${call.function.name}".`;
       messages.push({ role: "tool", tool_call_id: call.id, content });
+    }
+      break;
     }
   }
 
@@ -765,6 +802,10 @@ function buildDiffBlock(diffText: string, options?: GenerateReviewOptions): stri
  * existing retry handles it (see review-worker-factory.ts).
  */
 export interface GenerateReviewOptions {
+  maxChunksPerAttempt?: number;
+  /** Completed sections from this exact review; keys include input and model settings. */
+  completedChunks?: Record<string, ChunkCheckpoint>;
+  onChunkComplete?: (key: string, result: ChunkCheckpoint) => Promise<void>;
   riskContext?: string;
   deadlineAt?: number;
   thinking?: boolean;
@@ -819,7 +860,9 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
     }
   });
 
-  await Promise.all(workers);
+  const settled = await Promise.allSettled(workers);
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
   return results;
 }
 
@@ -900,6 +943,11 @@ interface BisectBudget {
   fatal?: boolean;
 }
 
+export interface ChunkCheckpoint {
+  findings: ReviewResult["findings"];
+  usage: TokenUsage;
+}
+
 interface ChunkFindingsResult {
   findings: ReviewResult["findings"];
   usage: TokenUsage;
@@ -912,19 +960,16 @@ interface ChunkFindingsResult {
  * and retries each half independently, halving again on repeat failure
  * until it reaches single files.
  *
- * The problem this solves: a chunk is up to 40 files in ONE prompt, and the
+ * The problem this solves: several files may share ONE prompt, and the
  * findings pass either returns a validated `submit_findings` payload for
  * the whole chunk or throws. A single file that derails the model — a
  * prompt-injection attempt in a comment, a pathological patch that pushes
  * the response past `max_tokens` mid-JSON, a schema violation on one
  * finding — therefore used to discard the other 39 files' review along with
- * it, and (because the throw propagates out of the job) made BullMQ re-run
- * the entire review from scratch, re-paying every chunk's tokens up to
- * three times.
+ * it. Completed root chunks are now checkpointed before BullMQ continues.
  *
- * Splitting is by FILE, never by text offset: half a unified diff is not a
- * diff, and feeding the model a patch cut mid-hunk would produce confident
- * findings about lines that do not exist. A single file that still fails on
+ * Splitting prefers files. A single file is split only through the hunk-aware
+ * section builder, which reconstructs valid coordinates. A section that still fails on
  * its own is genuinely unreviewable in this pass, so it is dropped from the
  * review and named in `unreviewedFiles` for the coverage note — the one
  * outcome this function will not produce is a silently shorter review.
@@ -958,7 +1003,14 @@ async function runFindingsWithBisect(
       // keep sleeping and re-sending once it has.
       () => budget.providerFailures >= PROVIDER_FAILURE_THRESHOLD,
     );
-    return { findings: result.value.findings, usage: result.usage, unreviewedFiles: [] };
+    budget.providerFailures = 0;
+    // The model's line number is an assertion, not an observation. Correct it
+    // against the patch before anything downstream treats it as a location.
+    const anchored = anchorFindings(result.value.findings, files);
+    if (anchored.stats.corrected > 0 || anchored.stats.unanchored > 0) {
+      logger.info({ ...anchored.stats, files: files.length }, "finding line numbers anchored to the patch");
+    }
+    return { findings: anchored.findings, usage: result.usage, unreviewedFiles: [] };
   } catch (error) {
     const names = files.map((file) => file.filename);
     const spent = error instanceof FindingsLoopError ? error.usage : EMPTY_USAGE;
@@ -1000,12 +1052,15 @@ async function runFindingsWithBisect(
     // A single file that fails on its own has nothing left to split. Give
     // up on it specifically, keep everything already salvaged, and let the
     // caller name it in the review.
-    if (files.length === 1) {
+    const sections = files.length === 1
+      ? splitPatchSections(files[0].patch ?? "", Math.max(256, Math.floor((files[0].patch?.length ?? 0) / 2)))
+      : [];
+    if (files.length === 1 && sections.length < 2) {
       logger.warn({ file: names[0], err: error }, "findings pass failed for a single file — dropping it from this review");
       return { findings: [], usage: spent, unreviewedFiles: names };
     }
 
-    if (budget.remaining <= 0) {
+    if (budget.remaining < 2) {
       logger.warn(
         { files: names.length, err: error },
         "findings pass failed and the bisect budget is exhausted — reporting these files as unreviewed",
@@ -1013,18 +1068,19 @@ async function runFindingsWithBisect(
       return { findings: [], usage: spent, unreviewedFiles: names };
     }
 
-    const mid = Math.floor(files.length / 2);
+    const candidates = files.length === 1 ? sections.map((patch) => ({ ...files[0], patch })) : files;
+    const mid = Math.floor(candidates.length / 2);
     budget.remaining -= 2;
     logger.warn(
-      { files: files.length, splitInto: [mid, files.length - mid], budgetLeft: budget.remaining, err: error },
+      { files: files.length, splitInto: [mid, candidates.length - mid], budgetLeft: budget.remaining, err: error },
       "findings pass failed for a chunk — splitting and retrying each half",
     );
 
     // Sequential, not concurrent: the halves are a retry of work that just
     // failed, and firing both at once against a provider that may be rate
     // limiting is how a 429 becomes two 429s.
-    const left = await runFindingsWithBisect(model, sharedParams, files.slice(0, mid), options, budget, fileCache);
-    const right = await runFindingsWithBisect(model, sharedParams, files.slice(mid), options, budget, fileCache);
+    const left = await runFindingsWithBisect(model, sharedParams, candidates.slice(0, mid), options, budget, fileCache);
+    const right = await runFindingsWithBisect(model, sharedParams, candidates.slice(mid), options, budget, fileCache);
 
     return {
       findings: [...left.findings, ...right.findings],
@@ -1056,9 +1112,29 @@ export async function generateChunkedReview(
   // Substituting a default here would make "unbounded" inexpressible and
   // silently cap callers that deliberately opted out, so `deadlineAt` stays
   // optional all the way down and is never defaulted.
-  const results = await mapWithConcurrency(chunks, Number.isFinite(CHUNK_CONCURRENCY) ? Math.min(4, CHUNK_CONCURRENCY) : 2, (files) =>
-    runFindingsWithBisect(model, sharedParams, files, options, budget, fileCache),
-  );
+  // Wait for all in-flight checkpoint writes even if one worker fails. This
+  // prevents a retry racing with writes still running in the previous attempt.
+  let checkpointError: unknown;
+  let startedChunks = 0;
+  const results = await mapWithConcurrency(chunks, Number.isFinite(CHUNK_CONCURRENCY) ? Math.min(4, CHUNK_CONCURRENCY) : 2, async (files) => {
+    const key = createHash("sha256").update(JSON.stringify({ version: 1, model, sharedParams, files,
+      instructions: options?.customInstructions, repo: options?.repoContext, title: options?.prTitle,
+      body: options?.prBody, categories: options?.disabledCategories, severities: options?.disabledSeverities,
+    })).digest("hex");
+    const saved = options?.completedChunks?.[key];
+    if (saved) return { findings: saved.findings, usage: EMPTY_USAGE, unreviewedFiles: [] };
+    if (startedChunks >= (options?.maxChunksPerAttempt ?? Infinity)) {
+      return { findings: [], usage: EMPTY_USAGE, unreviewedFiles: files.map((file) => file.filename) };
+    }
+    startedChunks++;
+    const result = await runFindingsWithBisect(model, sharedParams, files, options, budget, fileCache);
+    if (!result.unreviewedFiles.length && options?.onChunkComplete) {
+      try { await options.onChunkComplete(key, { findings: result.findings, usage: result.usage }); }
+      catch (error) { checkpointError = error; }
+    }
+    return result;
+  });
+  if (checkpointError) throw checkpointError;
   let usage = EMPTY_USAGE;
   const merged: ReviewResult["findings"] = [];
   const unreviewedFiles: string[] = [];
@@ -1091,6 +1167,6 @@ export async function generateChunkedReview(
     summary: appendVerdictLine(result.summary, result.verdict),
     usage,
     chunkCount: chunks.length,
-    unreviewedFiles,
+    unreviewedFiles: [...new Set(unreviewedFiles)],
   };
 }

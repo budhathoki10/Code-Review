@@ -2,20 +2,11 @@ import { createTwoFilesPatch } from "diff";
 import { getFileContent } from "@/lib/github/file-content";
 import { logger } from "@/lib/logger";
 
-/**
- * How much locally-computed patch text one file may contribute. A file whose
- * diff GitHub refused to render is, by definition, enormous — recomputing it
- * in full and handing the model 2 MB of hunks would blow the very budget
- * this fallback exists to keep the file inside. Deliberately generous enough
- * that a typical "too big for GitHub" file (a few thousand changed lines)
- * still arrives whole.
- */
-const MAX_GENERATED_PATCH_CHARS = Number(process.env.MAX_GENERATED_PATCH_CHARS ?? 60_000);
+/** Retain complete reconstructed patches; section planning bounds model requests. */
 
 /** Context lines around each hunk — matches what GitHub's own patches carry. */
 const PATCH_CONTEXT_LINES = 3;
 
-const TRUNCATION_NOTE = "\n...[locally computed diff truncated — file too large to include in full]";
 
 /**
  * Marker used when a file's diff could not be produced by any route. It is
@@ -45,19 +36,27 @@ export function diffUnavailableNote(filename: string, reason: string): string {
  * base, a deleted file has no head, and both are normal.
  */
 export interface FallbackPatch {
-  /** The patch to review — possibly truncated to fit the review budget. */
+  /** Complete patch; request sizing happens later in the section planner. */
   patch: string;
   /**
-   * Length of the diff BEFORE truncation.
-   *
-   * Coverage is measured against this, not against the truncated result.
-   * Without it, a file whose 400,000-character diff was cut to 60,000 reports
-   * as fully covered, because everything downstream only ever sees the
-   * shortened patch — the truncation becomes invisible at exactly the point
-   * the coverage gate is trying to measure it. Zero when there was no diff to
-   * measure (an unavailable or identical file).
+   * Original diff length. Retained for compatibility with callers that may
+   * supply an upstream-shortened patch. Zero when no text diff exists.
    */
   originalChars: number;
+}
+
+/** Linear, exact fallback for rewrites whose minimal diff exceeds the CPU deadline. */
+export function buildReplacementPatch(baseContent: string, headContent: string): string {
+  const lines = (text: string) => text === "" ? [] : text.replace(/\n$/, "").split("\n");
+  const oldLines = lines(baseContent);
+  const newLines = lines(headContent);
+  return [
+    `@@ -${oldLines.length ? 1 : 0},${oldLines.length} +${newLines.length ? 1 : 0},${newLines.length} @@`,
+    ...oldLines.map((line) => `-${line}`),
+    ...(oldLines.length && !baseContent.endsWith("\n") ? ["\\ No newline at end of file"] : []),
+    ...newLines.map((line) => `+${line}`),
+    ...(newLines.length && !headContent.endsWith("\n") ? ["\\ No newline at end of file"] : []),
+  ].join("\n") + "\n";
 }
 
 export async function buildFallbackPatch(
@@ -68,12 +67,13 @@ export async function buildFallbackPatch(
   status: string,
   baseRef: string,
   headRef: string,
+  previousFilename?: string,
 ): Promise<FallbackPatch> {
   const wantsBase = status !== "added";
   const wantsHead = status !== "removed";
 
   const [baseContent, headContent] = await Promise.all([
-    wantsBase ? getFileContent(installationId, owner, repo, filename, baseRef) : Promise.resolve(""),
+    wantsBase ? getFileContent(installationId, owner, repo, previousFilename ?? filename, baseRef) : Promise.resolve(""),
     wantsHead ? getFileContent(installationId, owner, repo, filename, headRef) : Promise.resolve(""),
   ]);
 
@@ -95,8 +95,17 @@ export async function buildFallbackPatch(
     headContent ?? "",
     undefined,
     undefined,
-    { context: PATCH_CONTEXT_LINES },
+    { context: PATCH_CONTEXT_LINES, timeout: 2_000 },
   );
+
+  if (patch === undefined) {
+    // Myers diff can be quadratic on a full rewrite. A replacement hunk is
+    // larger but exact, linear to construct, and the section planner can
+    // review it without blocking BullMQ's lock renewal for minutes.
+    const body = buildReplacementPatch(baseContent ?? "", headContent ?? "");
+    logger.info({ filename, chars: body.length }, "diff computation timed out; preserving full replacement patch");
+    return { patch: body, originalChars: body.length };
+  }
 
   // createTwoFilesPatch emits its own "===" banner and ---/+++ header lines;
   // strip them so the result starts at the first @@ hunk, matching the shape
@@ -105,15 +114,10 @@ export async function buildFallbackPatch(
   const body = firstHunk === -1 ? "" : patch.slice(firstHunk);
 
   if (body.length === 0) {
-    return { patch: diffUnavailableNote(filename, "the file's contents are identical at both commits"), originalChars: 0 };
-  }
-
-  if (body.length > MAX_GENERATED_PATCH_CHARS) {
-    logger.info({ filename, chars: body.length }, "locally computed patch truncated to fit the review budget");
-    return {
-      patch: `${body.slice(0, MAX_GENERATED_PATCH_CHARS)}${TRUNCATION_NOTE}`,
-      originalChars: body.length,
-    };
+    // Both sides were successfully read. Empty-file creation/deletion and
+    // rename-only changes are metadata changes, not retrieval failures.
+    const metadata = `@@ -0,0 +0,0 @@\n# No text changes; file status: ${status}${previousFilename ? `; previous path: ${previousFilename}` : ""}.\n`;
+    return { patch: metadata, originalChars: metadata.length };
   }
 
   return { patch: body, originalChars: body.length };

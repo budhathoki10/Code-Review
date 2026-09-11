@@ -4,8 +4,9 @@ const { getFileContentMock } = vi.hoisted(() => ({ getFileContentMock: vi.fn() }
 
 vi.mock("@/lib/github/file-content", () => ({ getFileContent: getFileContentMock }));
 
-import { buildFallbackPatch, diffUnavailableNote } from "@/lib/github/patch-fallback";
+import { buildFallbackPatch, buildReplacementPatch, diffUnavailableNote } from "@/lib/github/patch-fallback";
 import { computeCommentableLines } from "@/lib/github/diff-lines";
+import { applyPatch } from "diff";
 
 describe("buildFallbackPatch", () => {
   beforeEach(() => {
@@ -66,7 +67,7 @@ describe("buildFallbackPatch", () => {
     expect(patch).toContain("DIFF UNAVAILABLE");
   });
 
-  it("truncates a reconstructed patch that would blow the review budget", async () => {
+  it("retains the tail of a reconstructed patch even with the legacy truncation setting", async () => {
     // The budget is read at module load, so the module is reloaded with it set.
     process.env.MAX_GENERATED_PATCH_CHARS = "500";
     vi.resetModules();
@@ -80,17 +81,33 @@ describe("buildFallbackPatch", () => {
 
     const { patch } = await build(1, "acme", "widgets", "src/big.ts", "modified", "base", "head");
 
-    expect(patch).toContain("truncated");
-    expect(patch.length).toBeLessThan(1000);
+    expect(patch).not.toContain("truncated");
+    expect(patch).toContain("+CHANGED 1999");
+    expect(patch).toContain("-line 1999");
   });
 
-  it("never returns an empty string — an identical file still says so explicitly", async () => {
+  it("marks successfully read identical content as metadata, not unavailable", async () => {
     getFileContentMock.mockResolvedValue("same\n");
 
     const { patch } = await buildFallbackPatch(1, "acme", "widgets", "src/a.ts", "modified", "base", "head");
 
     expect(patch.length).toBeGreaterThan(0);
-    expect(patch).toContain("DIFF UNAVAILABLE");
+    expect(patch).toContain("No text changes");
+    expect(patch).not.toContain("DIFF UNAVAILABLE");
+  });
+
+  it("the timeout fallback preserves both complete versions", () => {
+    const base = "old\nlast old";
+    const head = "new\nlast new";
+    const patch = buildReplacementPatch(base, head);
+    expect(applyPatch(base, `--- a/rewrite.ts\n+++ b/rewrite.ts\n${patch}`)).toBe(head);
+  });
+
+  it("reads the previous path when reconstructing a rename", async () => {
+    getFileContentMock.mockResolvedValue("same\n");
+    const { patch } = await buildFallbackPatch(1, "acme", "widgets", "new.ts", "renamed", "base", "head", "old.ts");
+    expect(getFileContentMock.mock.calls.map((call) => [call[3], call[4]])).toEqual([["old.ts", "base"], ["new.ts", "head"]]);
+    expect(patch).toContain("previous path: old.ts");
   });
 });
 

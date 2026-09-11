@@ -10,7 +10,7 @@ import { DEFAULT_MODEL, thinkingKwargs } from "@/lib/ai/review";
  * Answering a question about one finding is a different job from producing a
  * review, and deliberately does not reuse the review path: it is a single
  * bounded call with no chunking, no bisect budget, and no findings schema.
- * Sharing that machinery would drag a 65-call worst case into what should
+ * Sharing that machinery would drag a multi-call review window into what should
  * cost exactly one call.
  */
 

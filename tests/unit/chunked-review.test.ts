@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { PullRequestFile } from "@/lib/github/diff";
+import type { ChunkCheckpoint } from "@/lib/ai/review";
 
 const { createMock, getFileContentMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
@@ -33,6 +34,7 @@ function toolResponse(name: string, args: unknown) {
 interface CreateParams {
   tools?: { function: { name: string } }[];
   messages: { role: string; content: string }[];
+  chat_template_kwargs?: { thinking: boolean; enable_thinking: boolean };
 }
 
 function toolNames(params: CreateParams): string[] {
@@ -105,6 +107,80 @@ describe("generateChunkedReview failure isolation", () => {
     createMock.mockReset();
     getFileContentMock.mockReset();
     delete process.env.REVIEW_MAX_BISECT_ATTEMPTS;
+  });
+
+  it("resumes saved chunks across work windows and invalidates changed input", async () => {
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockResolvedValue(toolResponse("submit_findings", { findings: [] }));
+    const saved: NonNullable<Parameters<typeof generateChunkedReview>[1]>["completedChunks"] = {};
+    const onChunkComplete = vi.fn(async (key, result) => { saved[key] = result; });
+    const chunks = [[file("src/a.ts")], [file("src/b.ts")], [file("src/d.ts")]];
+    const options = { completedChunks: saved, onChunkComplete, maxChunksPerAttempt: 1 };
+    const first = await generateChunkedReview(chunks, options);
+    expect(first.unreviewedFiles).toEqual(["src/b.ts", "src/d.ts"]);
+    const second = await generateChunkedReview(chunks, options);
+    expect(second.unreviewedFiles).toEqual(["src/d.ts"]);
+    const third = await generateChunkedReview(chunks, options);
+    expect(third.unreviewedFiles).toEqual([]);
+    expect(createMock).toHaveBeenCalledTimes(3);
+    expect(third.usage.calls).toBe(1);
+    chunks[0][0].patch += "\n+changed again";
+    await generateChunkedReview(chunks, options);
+    expect(createMock).toHaveBeenCalledTimes(4);
+    expect(onChunkComplete).toHaveBeenCalledTimes(4);
+  });
+
+  it("retries only failed chunks after a transient provider error", async () => {
+    const { generateChunkedReview } = await loadModule();
+    const saved: NonNullable<Parameters<typeof generateChunkedReview>[1]>["completedChunks"] = {};
+    let broken = true;
+    createMock.mockImplementation((params: CreateParams) => {
+      if (broken && userContent(params).includes("src/b.ts")) throw Object.assign(new Error("outage"), { status: 503 });
+      return Promise.resolve(toolResponse("submit_findings", { findings: [] }));
+    });
+    const options = { completedChunks: saved, onChunkComplete: async (key: string, result: ChunkCheckpoint) => { saved[key] = result; } };
+    const chunks = [[file("src/a.ts")], [file("src/b.ts")]];
+    const first = await generateChunkedReview(chunks, options);
+    expect(first.unreviewedFiles).toEqual(["src/b.ts"]);
+    const calls = createMock.mock.calls.length;
+    broken = false;
+    expect((await generateChunkedReview(chunks, options)).unreviewedFiles).toEqual([]);
+    expect(createMock).toHaveBeenCalledTimes(calls + 1);
+  });
+
+  it("continues from retained reasoning after output exhaustion without rerunning the file", async () => {
+    const { generateChunkedReview } = await loadModule();
+    let findingsCalls = 0;
+    createMock.mockImplementation((params: CreateParams) => {
+      if (toolNames(params).includes("submit_verdict")) {
+        return Promise.resolve(toolResponse("submit_verdict", { verdict: "comment", summary: "Reviewed." }));
+      }
+      findingsCalls++;
+      if (findingsCalls === 1) {
+        return Promise.resolve({ choices: [{ finish_reason: "length", message: { content: "analysis up to the cutoff" } }] });
+      }
+      expect(params.messages.some((message) => message.role === "assistant" && message.content === "analysis up to the cutoff")).toBe(true);
+      expect(params.messages.some((message) => message.role === "user" && message.content.includes("Do not repeat"))).toBe(true);
+      expect(params.chat_template_kwargs).toEqual({ thinking: false, enable_thinking: false });
+      return Promise.resolve(toolResponse("submit_findings", { findings: [] }));
+    });
+    const result = await generateChunkedReview([[file("src/large.ts")]]);
+    expect(result.unreviewedFiles).toEqual([]);
+    expect(findingsCalls).toBe(2);
+  });
+
+  it("splits a single file when a truncated response has no reusable continuation", async () => {
+    const { generateChunkedReview } = await loadModule();
+    const patch = "@@ -0,0 +1,200 @@\n" + Array.from({ length: 200 }, (_, i) => `+const value${i} = ${i};`).join("\n");
+    createMock.mockImplementation((params: CreateParams) => {
+      const body = userContent(params);
+      if (body.includes("value0 =") && body.includes("value199 =")) return Promise.resolve({ choices: [{ finish_reason: "length", message: { content: null } }] });
+      return Promise.resolve(toolResponse("submit_findings", { findings: [] }));
+    });
+    const result = await generateChunkedReview([[{ filename: "src/large.ts", status: "added", patch }]]);
+    expect(result.unreviewedFiles).toEqual([]);
+    expect(createMock.mock.calls.length).toBeGreaterThan(1);
+    expect(createMock.mock.calls.some(([params]) => userContent(params).includes("value199 =") && !userContent(params).includes("value0 ="))).toBe(true);
   });
 
   it("salvages the other files when one file in a chunk fails the findings pass", async () => {
@@ -360,7 +436,13 @@ describe("bisect budget scoping", () => {
 
 
 describe("predictable discovery budget", () => {
-  beforeEach(() => { createMock.mockReset(); getFileContentMock.mockReset(); delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS; });
+  beforeEach(() => {
+    createMock.mockReset();
+    getFileContentMock.mockReset();
+    delete process.env.REVIEW_FINDINGS_TOOL_ROUNDS;
+    delete process.env.REVIEW_PROVIDER_FAILURE_THRESHOLD;
+    delete process.env.REVIEW_CHUNK_CONCURRENCY;
+  });
   afterEach(() => { vi.useRealTimers(); });
 
   it.each([429, 500])("retries provider status %s, then stops without starting queued work", async (status) => {
@@ -424,6 +506,26 @@ describe("predictable discovery budget", () => {
 
     expect(result.unreviewedFiles).toEqual([]);
     expect(createMock.mock.calls.length).toBeGreaterThan(3);
+  });
+
+  it("does not let separated transient failures abandon later chunks", async () => {
+    process.env.REVIEW_PROVIDER_FAILURE_THRESHOLD = "2";
+    process.env.REVIEW_CHUNK_CONCURRENCY = "1";
+    const { generateChunkedReview } = await loadModule();
+    createMock.mockImplementation((params: CreateParams) => {
+      const content = userContent(params);
+      if (content.includes("src/a.ts") || content.includes("src/c.ts")) {
+        throw Object.assign(new Error("intermittent refusal"), { status: 500 });
+      }
+      return Promise.resolve(toolResponse("submit_findings", { findings: [] }));
+    });
+
+    const result = await generateChunkedReview([
+      [file("src/a.ts")], [file("src/b.ts")], [file("src/c.ts")], [file("src/d.ts")],
+    ]);
+
+    expect(result.unreviewedFiles).toEqual(["src/a.ts", "src/c.ts"]);
+    expect(createMock.mock.calls.some(([params]) => userContent(params as CreateParams).includes("src/d.ts"))).toBe(true);
   });
 
   it("falls back to the backup model when the primary keeps refusing", async () => {

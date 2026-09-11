@@ -9,6 +9,7 @@ import {
 } from "@/lib/review/diff-selection";
 import { MAX_FINDINGS_TOOL_ROUNDS } from "@/lib/ai/review";
 import { REVIEW_JOB_ATTEMPTS } from "@/lib/queue/review-queue";
+import { envNumber } from "@/lib/env";
 
 export const FORCE_COMMAND = "@prsentry review --force";
 
@@ -88,7 +89,9 @@ const PROMPT_OVERHEAD_TOKENS = 1_200;
  * cheap and worthless. Left at 250k, every large PR would bail on cost
  * instead of being reviewed.
  */
-const MAX_ESTIMATED_TOKENS = Number(process.env.REVIEW_MAX_ESTIMATED_TOKENS ?? 600_000);
+// Optional operator cost limit. By default every eligible file is scheduled;
+// request sizes, concurrency and resumable work windows bound each attempt.
+const MAX_ESTIMATED_TOKENS = Math.max(0, envNumber("REVIEW_MAX_ESTIMATED_TOKENS", 0));
 
 /** Warn (but proceed) once a review is projected to cost this share of the ceiling. */
 const COST_WARN_RATIO = Number(process.env.REVIEW_COST_WARN_RATIO ?? 0.6);
@@ -230,7 +233,7 @@ export function evaluateSizeGate(
   }
 
   const cost = estimateReviewCost(selection);
-  if (cost.expectedTokens > MAX_ESTIMATED_TOKENS) {
+  if (MAX_ESTIMATED_TOKENS > 0 && cost.expectedTokens > MAX_ESTIMATED_TOKENS) {
     return {
       bail: true,
       reason: "cost-ceiling",
@@ -240,7 +243,7 @@ export function evaluateSizeGate(
       warnings,
     };
   }
-  if (cost.expectedTokens > MAX_ESTIMATED_TOKENS * COST_WARN_RATIO) {
+  if (MAX_ESTIMATED_TOKENS > 0 && cost.expectedTokens > MAX_ESTIMATED_TOKENS * COST_WARN_RATIO) {
     warnings.push(
       `This review is projected to cost about ${cost.expectedTokens.toLocaleString()} tokens (ceiling ${MAX_ESTIMATED_TOKENS.toLocaleString()}).`,
     );

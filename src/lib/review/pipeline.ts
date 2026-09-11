@@ -1,5 +1,6 @@
 // this is the main heart of the code
 import { ObjectId } from "mongodb";
+import { createHash } from "node:crypto";
 import type { Logger } from "pino";
 import { getPullRequestDiff, getIncrementalDiff, type PullRequestDiff } from "@/lib/github/diff";
 import { GitHubRateLimitError } from "@/lib/github/file-content";
@@ -7,7 +8,7 @@ import { DEFAULT_MODEL, generateChunkedReview, type ReviewResult } from "@/lib/a
 import { getFileContent } from "@/lib/github/file-content";
 import { dedupeFindings } from "@/lib/review/finding-policy";
 import { codeWindow, riskReasons } from "@/lib/review/risk";
-import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY } from "@/lib/review/diff-selection";
+import { selectDiffForReview, formatCoverageNote, coverageRatio, REVIEW_CAPACITY, MAX_REVIEW_CHUNKS } from "@/lib/review/diff-selection";
 import { describeSkipReason } from "@/lib/review/triage";
 import { loadRepoConfig, formatConfigErrors } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, estimateReviewCost } from "@/lib/review/gate";
@@ -22,7 +23,7 @@ import {
 import { postInlineReview } from "@/lib/github/inline-comments";
 import { createCheckRun, completeCheckRun, type CheckConclusion } from "@/lib/github/checks";
 import { runStaticAnalysis } from "@/lib/review/static-analysis";
-import { recordUsage, estimateCost, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
+import { recordUsage, estimateCost, addUsage, EMPTY_USAGE, REVIEW_TOKEN_CEILING, type TokenUsage } from "@/lib/db/usage";
 import {
   reviews,
   pullRequests,
@@ -53,6 +54,13 @@ const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high
  * still there to compare against on a given pull request.
  */
 const MULTI_STAGE = process.env.REVIEW_MULTI_STAGE === "true";
+
+export class ReviewIncompleteError extends Error {
+  constructor(public readonly madeProgress: boolean, remaining: number) {
+    super(`Review incomplete: ${remaining} file(s) remain. Saved sections will be reused on retry.`);
+    this.name = "ReviewIncompleteError";
+  }
+}
 
 /**
  * How long the AI call waits for static analysis to finish before giving up
@@ -504,11 +512,9 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     ...new Set([...(repoConfig?.disabledCategories ?? []), ...reviewConfig.disabledCategories]),
   ];
 
-  // Filtering runs before the size gate so the gate measures real reviewable
-  // work: a 400-file formatting PR is usually under 20 files by this count,
-  // and gating on GitHub's raw file count would refuse a PR there is nothing
-  // expensive about. Within the reviewable set, size still doesn't decide
-  // *whether* to review — only how the diff is split across AI passes.
+  // Binary and explicit path filtering run before sizing. Optional generated
+  // and trivial-file filters remain available, but complete text coverage is
+  // the default. Size decides request boundaries, never total PR coverage.
   const selection = selectDiffForReview(diff.files, {
     pathFilters: reviewConfig.pathFilters,
     skipTriage: forced,
@@ -632,42 +638,22 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // review that made zero provider calls records that as a fact rather than
   // as a missing field.
   let reviewUsage: TokenUsage = EMPTY_USAGE;
+  const selectionKey = createHash("sha256").update(JSON.stringify({
+    chunks: selection.chunks, prTitle, prBody, repoConfig, reviewConfig,
+    model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL, thinking: process.env.NVIDIA_THINKING,
+  })).digest("hex");
   let unreviewedFiles: string[] = [];
   /** Set only on the multi-stage path, so the summary and the stored row can report what each stage concluded. */
   let multiStageOutcome: Awaited<ReturnType<typeof runMultiStageReview>> | undefined;
   const riskFiles = selection.analyzableFiles.map((file) => ({ file: file.filename, reasons: riskReasons(file) }))
     .filter((file) => file.reasons.length > 0);
 
-  const configuredDeadline = Number(process.env[riskFiles.length ? "REVIEW_RISKY_DEADLINE_MS" : "REVIEW_DEADLINE_MS"] ?? (riskFiles.length ? 240_000 : 180_000));
-  // The single-model path is two calls and 240s is generous for it. The
-  // multi-stage path is six or more — primary, verifier, focused confirmation,
-  // two debate rounds a side, arbitration — each of which may reason before it
-  // answers, so the old ceiling would guarantee it ran out of budget partway
-  // and reported everything after that point as unresolved. Accuracy over
-  // speed is the whole trade this pipeline makes; the ceiling has to reflect
-  // it. BullMQ renews the job lock while the worker is alive, so a longer job
-  // does not stall.
-  // Written out rather than nested, because the nested form was wrong-looking
-  // enough that a reviewer read it as able to exceed its own ceiling. It
-  // could not — Math.min capped it — but an expression that takes arithmetic
-  // to disprove is a defect in its own right, whatever it evaluates to.
-  //
-  // The multi-stage path always takes its full budget: six or more model calls
-  // that each may reason before answering, and a deadline shorter than that
-  // just means the later stages report their findings as unresolved.
-  //
-  // The single-model cap is ten minutes, not four. Four was sized for a model
-  // answering immediately; the single call now reasons first, and measured on
-  // this endpoint that is 80-110 seconds before the first token, then the
-  // answer itself. A review ceiling below the per-request timeout does not
-  // make anything faster — it just aborts the one call the whole review
-  // consists of and reports nothing, which is the most expensive possible way
-  // to save time. BullMQ renews the job lock while the worker is alive, so a
-  // longer job does not stall.
+  // Each worker window has its own deadline; successful chunks survive it.
   const deadlineMs = MULTI_STAGE
     ? envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000)
-    : Math.min(600_000, Number.isFinite(configuredDeadline) ? configuredDeadline : 420_000);
-  const deadlineAt = startedAt + Math.max(60_000, deadlineMs);
+    : envNumber(riskFiles.length ? "REVIEW_RISKY_DEADLINE_MS" : "REVIEW_DEADLINE_MS", 600_000);
+  // Preparation/network time must not consume the model's entire work window.
+  const deadlineAt = Date.now() + Math.max(60_000, deadlineMs);
   const discoveryDeadlineAt = deadlineAt - 40_000;
   markStage("prepare");
 
@@ -694,7 +680,8 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       findings: [],
     };
     staticFindings = [];
-  } else if (existingReview?.aiCheckpoint) {
+  } else if (existingReview?.aiCheckpoint?.coverageVersion === 2
+    && existingReview.aiCheckpoint.selectionKey === selectionKey && existingReview.aiCheckpoint.unreviewedFiles.length === 0) {
     // A previous attempt at THIS head commit already finished the model work
     // and then failed somewhere after it. Reuse that output rather than
     // re-spending the whole token budget — the diff is byte-identical, so a
@@ -880,6 +867,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       }
     } else {
 
+    let completedThisAttempt = 0;
     const generated = await generateChunkedReview(
       selection.chunks.map((chunk) => chunk.files),
       {
@@ -892,6 +880,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
         riskContext,
         deadlineAt: discoveryDeadlineAt,
+        completedChunks: existingReview?.chunkCheckpoints,
+        maxChunksPerAttempt: MAX_REVIEW_CHUNKS,
+        onChunkComplete: async (key, result) => {
+          const saved = await reviewsCol.updateOne({ pullRequestId, headSha }, {
+            $set: { [`chunkCheckpoints.${key}`]: result },
+          });
+          if (saved.matchedCount !== 1) throw new Error("Review disappeared while saving section progress");
+          completedThisAttempt++;
+        },
       },
     );
     markStage("discovery");
@@ -910,7 +907,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
       );
     }
 
-    reviewUsage = generated.usage;
+    reviewUsage = addUsage(existingReview?.aiCheckpoint ?? EMPTY_USAGE, generated.usage);
     unreviewedFiles = generated.unreviewedFiles;
 
     // Token accounting is a side metric, not part of the review — a failure
@@ -944,15 +941,17 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         {
           $set: {
             aiCheckpoint: {
+              coverageVersion: 2,
+              selectionKey,
               verdict: generated.verdict,
               summary: generated.summary,
               findings: generated.findings,
               unreviewedFiles: generated.unreviewedFiles,
               staticFindings,
-              inputTokens: generated.usage.inputTokens,
-              outputTokens: generated.usage.outputTokens,
-              totalTokens: generated.usage.totalTokens,
-              calls: generated.usage.calls,
+              inputTokens: reviewUsage.inputTokens,
+              outputTokens: reviewUsage.outputTokens,
+              totalTokens: reviewUsage.totalTokens,
+              calls: reviewUsage.calls,
               at: new Date(),
             },
           },
@@ -964,6 +963,15 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         // behaviour we had before this existed.
         log.warn({ reviewId, err: checkpointError }, "failed to checkpoint model output — a retry would re-run generation");
       });
+    if (unreviewedFiles.length > 0) {
+      await reviewsCol.updateOne({ pullRequestId, headSha }, { $set: {
+        status: "pending", coverageComplete: false,
+        summary: `Review in progress; ${unreviewedFiles.length} file(s) still need review. Completed sections are saved.`,
+        findings: [...generated.findings, ...staticFindings,
+          ...(previousReview?.findings ?? []).filter((finding) => unreviewedFiles.includes(finding.file))],
+      } });
+      throw new ReviewIncompleteError(completedThisAttempt > 0, unreviewedFiles.length);
+    }
     }
   }
 
@@ -1028,7 +1036,8 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   // REQUEST CHANGES next to a passing check would reasonably conclude one of
   // the two was broken. The strongest verdict is "comment".
   const severe = allFindings.filter((finding) => finding.severity === "high" || finding.severity === "critical");
-  const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0;
+  const incompleteCoverage = unreviewedFiles.length > 0 || selection.skippedForBudget.length > 0
+    || selection.truncatedFiles.length > 0 || selection.diffUnavailable.length > 0;
   const previousVerdict = incompleteCoverage ? "comment" : aiResult.verdict;
   aiResult.verdict = allFindings.length || previousVerdict !== "approve" ? "comment" : "approve";
   if (multiStageOutcome) {
@@ -1042,7 +1051,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     // statement about the whole branch. This file already argues that case for
     // budget-skipped files (see the coverage note below); scope from an
     // incremental baseline is the same claim and was only ever in a log line.
-    const reviewedCount = Math.max(0, selection.coveredCount - unreviewedFiles.length);
+    const reviewedCount = Math.max(0, selection.coveredCount - new Set([...unreviewedFiles, ...selection.truncatedFiles]).size);
     // "1 file(s)" is the sound a program makes, not a sentence. This summary
     // is the first thing a person reads on their own pull request.
     const files = (count: number) => `${count} ${count === 1 ? "file" : "files"}`;
@@ -1246,7 +1255,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     durationMs: Date.now() - startedAt,
     filesSeen: diff.fileCount,
     filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,
-    filesReviewed: Math.max(0, selection.coveredCount - unreviewedFiles.length),
+    filesReviewed: Math.max(0, selection.coveredCount - new Set([...unreviewedFiles, ...selection.truncatedFiles]).size),
     findingsProduced: allFindings.length,
     commentsPosted: posted.length,
     estimatedCostUsd: estimateCost(reviewUsage),

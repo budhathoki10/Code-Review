@@ -25,7 +25,7 @@ export interface UsageDoc {
   /** Completion tokens returned. */
   outputTokens: number;
   totalTokens: number;
-  /** Individual provider calls — up to 65 per review (see the worst-case breakdown in review-worker-factory.ts). */
+  /** Individual provider calls accumulated across review work windows. */
   calls: number;
   /** Reviews contributing to these totals — `calls / reviews` gives average calls per review. */
   reviews: number;
@@ -335,7 +335,14 @@ export interface ReviewDoc {
    * index uses, so it can only ever be reused for the commit that produced
    * it. A new push writes a new review row and gets no checkpoint.
    */
+  chunkCheckpoints?: Record<string, {
+    findings: FindingDoc[];
+    usage: { inputTokens: number; outputTokens: number; totalTokens: number; calls: number };
+  }>;
   aiCheckpoint?: {
+    /** Versioned so old truncated selections cannot masquerade as a full review. */
+    coverageVersion?: number;
+    selectionKey?: string;
     verdict: "approve" | "request_changes" | "comment";
     summary: string;
     findings: FindingDoc[];

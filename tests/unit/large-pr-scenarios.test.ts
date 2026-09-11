@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+beforeEach(() => vi.stubEnv("REVIEW_SKIP_GENERATED_FILES", "true"));
+afterEach(() => vi.unstubAllEnvs());
 import {
   selectDiffForReview,
   coverageRatio,
@@ -116,23 +118,23 @@ describe("large PR scenarios", () => {
     expect(outcome.filesSeen).toBe(100);
     expect(outcome.totalLines).toBe(19_996);
     // Lockfile + build output + the formatting sweep all drop out.
-    expect(outcome.filtered).toBe(46);
-    expect(outcome.reviewableFiles).toBe(54);
+    expect(outcome.filtered).toBe(6);
+    expect(outcome.reviewableFiles).toBe(94);
     expect(outcome.bailed).toBe(false);
     // Batched, not one call per file: 54 reviewable files review in single
     // figures of calls. Chunks are deliberately small enough for the model to
     // hold in its head, so this is no longer one or two of them — but it is
     // still an order of magnitude below the file count.
-    expect(outcome.chunks).toBeLessThanOrEqual(Math.ceil(54 / MAX_DIFF_FILES));
-    expect(outcome.chunks).toBeLessThan(outcome.reviewableFiles / 5);
+    expect(outcome.chunks).toBeGreaterThanOrEqual(Math.ceil(94 / MAX_DIFF_FILES));
+    expect(outcome.coveragePct).toBe(100);
   });
 
-  it("C. a 400-file prettier run costs nothing", () => {
+  it("C. formatting heuristics cannot hide changes by default", () => {
     const outcome = analyze(Array.from({ length: 400 }, (_, i) => reformatted(`src/f${i}.ts`, 50)));
 
-    expect(outcome.reviewableFiles).toBe(0);
-    expect(outcome.chunks).toBe(0);
-    expect(outcome.typicalCalls).toBe(0);
+    expect(outcome.reviewableFiles).toBe(400);
+    expect(outcome.chunks).toBeGreaterThan(0);
+    expect(outcome.coveragePct).toBe(100);
   });
 
   it("D. a lockfile-only PR costs nothing", () => {
@@ -168,7 +170,7 @@ describe("large PR scenarios", () => {
     const outcome = analyze(Array.from({ length: 1_200 }, (_, i) => real(`src/f${i}.ts`, 100)));
 
     expect(outcome.bailed).toBe(false);
-    expect(outcome.coveragePct).toBeLessThan(50);
+    expect(outcome.coveragePct).toBe(100);
     expect(outcome.coveragePct).toBeGreaterThan(0);
   });
 
@@ -241,19 +243,20 @@ describe("coverage is measured on both dimensions", () => {
     );
 
     expect(coverageRatio(selection)).toBe(Math.min(fileCov, charCov));
-    expect(charCov).toBeLessThan(1);
+    expect(charCov).toBe(1);
   });
 
-  it("a truncated giant file is not counted as fully covered", () => {
+  it("a giant file is split into sections with complete coverage", () => {
     // One file whose patch far exceeds the per-file truncation limit. By file
     // count this is 1/1 = 100% covered; by characters it plainly is not, and
     // the gate must see the smaller number.
     const giant = real("src/giant.ts", 40_000);
     const selection = selectDiffForReview([giant]);
 
-    expect(selection.truncatedFiles).toContain("src/giant.ts");
+    expect(selection.truncatedFiles).toEqual([]);
+    expect(selection.chunks.length).toBeGreaterThan(1);
     expect(fileCoverage(selection)).toBe(1);
-    expect(charCoverage(selection)).toBeLessThan(0.5);
+    expect(charCoverage(selection)).toBe(1);
     expect(coverageRatio(selection)).toBe(charCoverage(selection));
   });
 
