@@ -5,6 +5,7 @@ import { getClient } from "@/lib/ai/review";
 import { addUsage, EMPTY_USAGE, usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { requestParams, type StageModel } from "@/lib/ai/models";
 import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
+import { parseToolArguments } from "@/lib/ai/tool-arguments";
 
 /**
  * One structured call to a reviewer, with bounded retry, and a hard rule: a
@@ -91,7 +92,7 @@ export async function callStage<T>({
 
       let parsed: unknown;
       try {
-        parsed = JSON.parse(call.function.arguments);
+        parsed = parseToolArguments(call.function.arguments);
       } catch {
         throw new Error("Tool arguments were not valid JSON");
       }

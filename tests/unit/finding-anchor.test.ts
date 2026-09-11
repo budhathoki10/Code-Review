@@ -88,7 +88,7 @@ describe("anchorFindings", () => {
     );
 
     expect(findings[0].line).toBe(6);
-    expect(stats).toEqual({ corrected: 1, confirmed: 0, unanchored: 0 });
+    expect(stats).toEqual({ corrected: 1, confirmed: 0, unanchored: 0, delined: 0, dropped: 0 });
   });
 
   it("leaves a already-correct line alone and counts it confirmed", () => {
@@ -102,16 +102,33 @@ describe("anchorFindings", () => {
     expect(stats.corrected).toBe(0);
   });
 
-  it("keeps the model's line when there is no snippet to anchor to", () => {
+  it("strips the model's line when there is no snippet to anchor to", () => {
     const { findings, stats } = anchorFindings(
       [{ file: "drizzle-orm/src/mysql-core/errors.ts", line: 110 }],
       files,
     );
 
-    // Unanchored, not discarded: a finding with a doubtful line is still worth
-    // more to the author than no finding.
-    expect(findings[0].line).toBe(110);
+    // Kept, but with no line: a finding whose location nothing corroborates
+    // still reaches the author through the summary body, where it cannot
+    // point at unrelated code the way an unverified inline comment does.
+    expect(findings).toHaveLength(1);
+    expect(findings[0].line).toBeUndefined();
     expect(stats.unanchored).toBe(1);
+    expect(stats.delined).toBe(1);
+  });
+
+  it("strips the line when the snippet matches nothing in the patch", () => {
+    const { findings, stats } = anchorFindings(
+      [{
+        file: "drizzle-orm/src/mysql-core/errors.ts",
+        line: 236,
+        codeSnippet: "password: element instanceof HTMLInputElement,",
+      }],
+      files,
+    );
+
+    expect(findings[0].line).toBeUndefined();
+    expect(stats.delined).toBe(1);
   });
 
   it("leaves findings about a file that is not in the diff untouched", () => {
@@ -128,5 +145,60 @@ describe("anchorFindings", () => {
     const original = { file: "drizzle-orm/src/mysql-core/errors.ts", line: 110, codeSnippet: "\tNO_REFERENCED_ROW: 1452," };
     anchorFindings([original], files);
     expect(original.line).toBe(110);
+  });
+});
+
+/**
+ * The shape that produced a High-severity security finding on LingoBridge#5:
+ * the model reported a password flag as hardcoded false and supplied, as the
+ * fix, the line already sitting in the file — differing only in quote style.
+ */
+describe("self-refuting suggestions", () => {
+  const CAPTURE = [
+    "@@ -1,4 +300,4 @@",
+    "     const eligibility = evaluateSelection({",
+    '+      password: element instanceof HTMLInputElement && element.type === "password",',
+    "       supportedPage,",
+    "     });",
+  ].join("\n");
+  const files = [file("apps/extension/entrypoints/selection.content.ts", CAPTURE)];
+
+  it("drops a finding whose suggestion is already the file's content", () => {
+    const { findings, stats } = anchorFindings(
+      [{
+        file: "apps/extension/entrypoints/selection.content.ts",
+        line: 236,
+        suggestion: "  password: element instanceof HTMLInputElement && element.type === 'password',",
+      }],
+      files,
+    );
+
+    expect(findings).toHaveLength(0);
+    expect(stats.dropped).toBe(1);
+  });
+
+  it("keeps a finding whose suggestion genuinely differs from the file", () => {
+    const { findings, stats } = anchorFindings(
+      [{
+        file: "apps/extension/entrypoints/selection.content.ts",
+        line: 301,
+        suggestion: '      password: element instanceof HTMLInputElement && element.type === "secret",',
+      }],
+      files,
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(stats.dropped).toBe(0);
+  });
+
+  it("does not drop on a short line that happens to appear in the file", () => {
+    const SHORT = ["@@ -1,2 +10,2 @@", "+    return null;", "     }"].join("\n");
+    const { findings, stats } = anchorFindings(
+      [{ file: "a.ts", line: 10, suggestion: "    return null;" }],
+      [file("a.ts", SHORT)],
+    );
+
+    expect(findings).toHaveLength(1);
+    expect(stats.dropped).toBe(0);
   });
 });

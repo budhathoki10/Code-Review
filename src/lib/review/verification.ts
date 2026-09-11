@@ -9,6 +9,7 @@ import { computeLineContents } from "@/lib/github/diff-lines";
 import { dedupeFindings } from "@/lib/review/finding-policy";
 import { codeWindow, riskReasons } from "@/lib/review/risk";
 import { proofImage, reproduceFinding } from "@/lib/review/test-proof";
+import { parseToolArguments } from "@/lib/ai/tool-arguments";
 
 type Checkpoint = NonNullable<ReviewDoc["verificationCheckpoint"]>;
 
@@ -305,7 +306,7 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
           call.type === "function" && call.function.name === "submit_verification",
       );
       if (response.choices[0]?.finish_reason === "length" || !call) throw new Error("Invalid verifier response");
-      const parsed = decisionSchema.parse(JSON.parse(call.function.arguments));
+      const parsed = decisionSchema.parse(parseToolArguments(call.function.arguments));
       const submitted = new Set(batch.map((item) => item.id));
       if (new Set(parsed.decisions.map((item) => item.id)).size !== parsed.decisions.length ||
           parsed.decisions.some((item) => !submitted.has(item.id))) throw new Error("Invalid verifier finding IDs");
