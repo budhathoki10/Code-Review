@@ -17,9 +17,15 @@ import { logger } from "@/lib/logger";
  * Measured on this endpoint: 100k-char chunks (~25-30k input tokens) hit
  * `finish_reason: "length"` and cost a 458-file PR every one of its files,
  * while a 35k-char chunk answers with `tool_calls` and room to spare.
+ *
+ * The file count is an attention budget, not a size one. Measured on an
+ * 11-file PR with a real bug repeated across four dialect files: as one
+ * chunk the model reported nothing in two runs of three, and as four chunks
+ * it reported findings in three of three, naming the bug in all four files.
+ * A chunk it can hold in its head is worth more than a chunk that fits.
  */
-export const MAX_DIFF_FILES = Number(process.env.MAX_DIFF_FILES ?? 40);
-export const MAX_DIFF_CHARS = Number(process.env.MAX_DIFF_CHARS ?? 35_000);
+export const MAX_DIFF_FILES = Number(process.env.MAX_DIFF_FILES ?? 8);
+export const MAX_DIFF_CHARS = Number(process.env.MAX_DIFF_CHARS ?? 15_000);
 
 const FILES_PER_PAGE = 100;
 

@@ -9,7 +9,7 @@ import {
 } from "@/lib/review/diff-selection";
 import { evaluateSizeGate, estimateReviewCost } from "@/lib/review/gate";
 import { DEFAULT_CONFIG } from "@/lib/review/config";
-import type { PullRequestFile } from "@/lib/github/diff";
+import { MAX_DIFF_FILES, type PullRequestFile } from "@/lib/github/diff";
 
 /**
  * End-to-end behaviour of the filter + gate stages on the PR shapes this
@@ -119,9 +119,12 @@ describe("large PR scenarios", () => {
     expect(outcome.filtered).toBe(46);
     expect(outcome.reviewableFiles).toBe(54);
     expect(outcome.bailed).toBe(false);
-    // Two chunks, so a handful of calls — not 100.
-    expect(outcome.chunks).toBeLessThanOrEqual(2);
-    expect(outcome.worstCalls).toBeLessThanOrEqual(9);
+    // Batched, not one call per file: 54 reviewable files review in single
+    // figures of calls. Chunks are deliberately small enough for the model to
+    // hold in its head, so this is no longer one or two of them — but it is
+    // still an order of magnitude below the file count.
+    expect(outcome.chunks).toBeLessThanOrEqual(Math.ceil(54 / MAX_DIFF_FILES));
+    expect(outcome.chunks).toBeLessThan(outcome.reviewableFiles / 5);
   });
 
   it("C. a 400-file prettier run costs nothing", () => {

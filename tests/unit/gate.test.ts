@@ -321,7 +321,9 @@ describe("estimateReviewCost", () => {
     const { selectDiffForReview: select } = await import("@/lib/review/diff-selection");
 
     // Sized to land between the 60% warn line (12,000) and the 20,000 ceiling.
-    const selection = select([bulkyFile("src/a.ts", 1_280)]);
+    // Several files rather than one: a single file is truncated at 60% of the
+    // per-chunk char budget, so one file can no longer reach this cost.
+    const selection = select(Array.from({ length: 4 }, (_, i) => bulkyFile(`src/a${i}.ts`, 340)));
     const decision = gateWithCeiling(selection, { pathFilters: [], disabledCategories: [] });
     const cost = estimateReviewCost(selection);
 

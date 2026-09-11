@@ -872,10 +872,17 @@ const MAX_BISECT_ATTEMPTS = envNumber("REVIEW_MAX_BISECT_ATTEMPTS", 12);
  * while the calls either side of it succeed. Tripping on the first failure
  * meant a single blip discarded chunks that had not been attempted, which is
  * how a 31-file review returned findings for none of them.
+ *
+ * Eight, not two, because this is a count against a chunk budget that grew
+ * from 8 to 60. Two failures out of eight chunks is a fair signal that the
+ * provider is gone; two out of sixty is a normal rate on this endpoint, and
+ * at that setting a flaky minute abandoned three quarters of a review that
+ * was otherwise succeeding — measured on an 11-file PR split four ways,
+ * where three of its files went unreviewed behind two transient failures.
  */
 // NaN here makes `providerFailures >= threshold` false forever, so a real
 // outage is never recognised and every chunk pays for its own failure.
-const PROVIDER_FAILURE_THRESHOLD = envNumber("REVIEW_PROVIDER_FAILURE_THRESHOLD", 2);
+const PROVIDER_FAILURE_THRESHOLD = envNumber("REVIEW_PROVIDER_FAILURE_THRESHOLD", 8);
 
 interface BisectBudget {
   remaining: number;
