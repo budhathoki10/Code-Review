@@ -40,7 +40,7 @@
     "markdownlint": "^0.41.1",
     "mongodb": "^6.21.0",
     "motion": "^13.1.0",
-    "next": "16.3.1",
+    "next": "16.3.4",
     "next-auth": "^5.0.0-beta.32",
     "openai": "^7.4.0",
     "oxlint": "^1.80.0",
