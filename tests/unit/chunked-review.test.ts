@@ -397,12 +397,18 @@ describe("predictable discovery budget", () => {
   it("does not retry a 401 — the next identical request earns the same answer", async () => {
     const { generateChunkedReview } = await loadModule();
     createMock.mockRejectedValue(Object.assign(new Error("unauthorized"), { status: 401 }));
-    const result = await generateChunkedReview([[file("src/a.ts"), file("src/b.ts")], [file("src/d.ts")], [file("src/poison.ts")]]);
+    // More chunks than run concurrently, so the fatal latch has later chunks
+    // left to stop — with only as many chunks as workers every one is already
+    // in flight before the first 401 lands, and the test would pass on the
+    // concurrency limit alone without the latch doing anything.
+    const chunks = Array.from({ length: 10 }, (_, i) => [file(`src/f${i}.ts`)]);
+    const result = await generateChunkedReview(chunks);
 
-    // Our own credentials, not the provider's capacity: retrying three times
-    // and falling back to another model proves the same thing three times.
-    expect(createMock.mock.calls.length).toBeLessThanOrEqual(2);
-    expect(result.unreviewedFiles).toHaveLength(4);
+    // Our own credentials, not the provider's capacity: retrying each chunk
+    // and falling back to another model proves the same thing many times
+    // over. One call per chunk that started, and nothing started after.
+    expect(createMock.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(result.unreviewedFiles).toHaveLength(10);
   });
 
   it("recovers a chunk that hit a single transient provider failure", async () => {

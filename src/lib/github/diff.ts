@@ -8,9 +8,18 @@ import { logger } from "@/lib/logger";
  * Per-AI-pass budget, NOT a review cutoff. A PR bigger than this is split
  * into several passes by selectDiffForReview (see review/diff-selection.ts)
  * rather than skipped — these two constants bound one chunk, not the review.
+ *
+ * The char budget is sized against the model's COMPLETION budget, not its
+ * context window. Reasoning is on, and the reasoning trace is spent out of
+ * `NVIDIA_MAX_TOKENS` before the `submit_findings` tool call is emitted — so
+ * a chunk large enough to reason at length about truncates the answer and
+ * throws "Model output exhausted its token budget", losing the whole chunk.
+ * Measured on this endpoint: 100k-char chunks (~25-30k input tokens) hit
+ * `finish_reason: "length"` and cost a 458-file PR every one of its files,
+ * while a 35k-char chunk answers with `tool_calls` and room to spare.
  */
-export const MAX_DIFF_FILES = 40;
-export const MAX_DIFF_CHARS = 100_000;
+export const MAX_DIFF_FILES = Number(process.env.MAX_DIFF_FILES ?? 40);
+export const MAX_DIFF_CHARS = Number(process.env.MAX_DIFF_CHARS ?? 35_000);
 
 const FILES_PER_PAGE = 100;
 

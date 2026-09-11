@@ -11,15 +11,18 @@ import { riskReasons } from "@/lib/review/risk";
  * silently dropped (see SelectedDiff.skippedForBudget).
  */
 /**
- * Eight, not four: capacity is 320 files / 800,000 characters.
+ * Twenty-four, giving 960 files / 840,000 characters of capacity.
  *
- * Four was sized when a review was several model calls per chunk and the
- * whole thing had to finish in 240 seconds. A review is now one call per
- * chunk, chunks run four at a time, and the deadline is ten minutes — so
- * eight chunks is two waves of roughly a minute each, and buys twice as many
- * files before anything has to be left out.
+ * This number only ever bounded how much of a PR gets looked at, so it has
+ * to rise whenever the per-chunk budget falls or the same PR loses coverage.
+ * MAX_DIFF_CHARS dropped from 100k to 35k so reasoning fits in the model's
+ * completion budget (see github/diff.ts), which would have cut capacity from
+ * 800k chars to 280k and pushed two thirds of a large PR into "exceeds the
+ * review size budget". Tripling the chunk count restores it — the work per
+ * chunk is smaller, so more of them is the same total work, just in calls
+ * that can actually answer.
  */
-export const MAX_REVIEW_CHUNKS = Number(process.env.MAX_REVIEW_CHUNKS ?? 8);
+export const MAX_REVIEW_CHUNKS = Number(process.env.MAX_REVIEW_CHUNKS ?? 24);
 
 /**
  * What one review can actually put in front of the model, derived from the
