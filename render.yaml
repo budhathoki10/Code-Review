@@ -48,10 +48,14 @@ services:
         value: "300000"
       - key: REVIEW_FINDINGS_TOOL_ROUNDS
         value: "2"
+      # A large PR is now ~24 smaller calls rather than 8 oversized ones, four
+      # at a time. Measured on a 458-file PR: 504s to reach 260 files. At 420s
+      # the tail of a big PR is cut off by the clock and reported unreviewed,
+      # which is the failure this chunking change exists to remove.
       - key: REVIEW_DEADLINE_MS
-        value: "420000"
+        value: "600000"
       - key: REVIEW_RISKY_DEADLINE_MS
-        value: "480000"
+        value: "600000"
       - key: GITHUB_APP_ID
         sync: false
       - key: GITHUB_APP_PRIVATE_KEY

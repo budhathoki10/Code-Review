@@ -79,7 +79,16 @@ const PROMPT_OVERHEAD_TOKENS = 1_200;
  * bounded-but-real cost, so there needs to be a ceiling on that cost that
  * isn't the file count.
  */
-const MAX_ESTIMATED_TOKENS = Number(process.env.REVIEW_MAX_ESTIMATED_TOKENS ?? 250_000);
+/*
+ * Raised with the chunk budget, and it is a real cost increase rather than a
+ * rounding change: the per-chunk prompt overhead is paid once per call, so
+ * splitting a PR into 60 small chunks instead of 8 large ones spends that
+ * overhead 60 times. That is the price of the model actually reading the
+ * code — at 100k-char chunks it skimmed and reported nothing, which was
+ * cheap and worthless. Left at 250k, every large PR would bail on cost
+ * instead of being reviewed.
+ */
+const MAX_ESTIMATED_TOKENS = Number(process.env.REVIEW_MAX_ESTIMATED_TOKENS ?? 600_000);
 
 /** Warn (but proceed) once a review is projected to cost this share of the ceiling. */
 const COST_WARN_RATIO = Number(process.env.REVIEW_COST_WARN_RATIO ?? 0.6);

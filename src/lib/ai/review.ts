@@ -281,8 +281,13 @@ async function callWithBackup(
       // the first justifies changing model, and it justifies it immediately.
       const modelDown = isModelUnavailable(error);
       if (modelDown) failedOverToBackup = true;
-      // Nothing to fail over TO, and the same request would fail the same way again.
-      if (modelDown && BACKUP_MODEL === primaryModel) throw error;
+      // Nothing to fail over TO — either backup is the same model as primary,
+      // or this attempt was already running on the backup and it is the one
+      // that just proved unavailable. Retrying it again is not a failover,
+      // it is the same doomed call a second time: measured live, this burned
+      // the entire review deadline on a backup stuck in thinking mode instead
+      // of leaving time for the chunks still waiting.
+      if (modelDown && (model === BACKUP_MODEL || BACKUP_MODEL === primaryModel)) throw error;
 
       // A generic refusal clears in a moment, so it is worth a pause. An
       // unavailable model has already spent seconds-to-minutes proving it,
@@ -353,7 +358,7 @@ const FINDINGS_SYSTEM_PROMPT = `You are a senior engineer conducting a real pull
 
 Report only defects introduced by this diff. For each finding, name the triggering input or execution path, the changed line that causes the failure, and the observable consequence. Check surrounding guards and callers for counterevidence before reporting.
 
-An empty findings array is a correct and common answer. A diff with nothing wrong in it must produce zero findings — do not fill the list to look thorough.
+A diff with nothing wrong in it must produce zero findings — do not fill the list to look thorough. But a non-trivial diff usually does contain something worth telling the author: an edge case the new code does not handle, an error path that behaves wrongly, an input the parsing does not cover. Look hard before concluding there is nothing.
 
 Never report any of the following. They are not findings:
 - code that is correct, safe, harmless, equivalent, or an improvement
@@ -375,7 +380,9 @@ Most real findings are medium or low. If everything you report is high, you are 
 
 Speculation is not a finding. If you find yourself writing "could", "may", "might" or "potentially" without a concrete trigger you can name, do not report it. If you are unsure whether the surrounding code already handles a case, use fetch_file to check before reporting rather than reporting a maybe.
 
-Nothing checks your work after this. There is no second reviewer and no assessment pass — what you write is posted to the author's pull request exactly as you wrote it. So the bar is not "worth flagging in case": it is "I traced this and I am telling a colleague their code is broken". Before you report anything, re-read the lines you are citing and confirm the failure actually happens. One wrong finding costs the author their trust in every other one.
+DISMISSING A CANDIDATE NEEDS THE SAME EVIDENCE AS REPORTING ONE. When you notice something that might be a defect and then decide it is fine, that conclusion has to rest on something you actually checked — the guard, the caller, the type, the test — not on how the code looks. "This is probably handled", "that is unlikely", "this should be backward compatible", "this seems safe" and "the tests presumably cover it" are not verifications; they are the same speculation forbidden above, pointed at the opposite answer. If clearing a candidate depends on code you have not read, use fetch_file and read it. Clear it because you checked, or report it. Silently dropping something you noticed but never verified is the one failure this review cannot recover from — a defect you dismissed reaches production unreviewed, while a finding the author disagrees with costs them ten seconds.
+
+The bar is "I traced this and I am telling a colleague their code is broken". Before you report anything, re-read the lines you are citing and confirm the failure actually happens. Findings are advisory and do not block the merge, so a genuine bug you traced is always worth reporting — staying silent about a real defect costs the author more than a finding they can dismiss.
 
 WRITE LIKE A DEVELOPER LEAVING A PR COMMENT. You are talking to the person who wrote this code, in the tone you would use for a teammate you respect:
 - Say the problem in the first sentence, plainly. "This throws when \`items\` is empty" — not "A potential null-dereference vulnerability has been identified."
@@ -790,7 +797,16 @@ export interface GenerateReviewOptions {
  * and a 429 mid-review fails the whole job. Two at a time still roughly
  * halves wall-clock versus sequential.
  */
-const CHUNK_CONCURRENCY = Number(process.env.REVIEW_CHUNK_CONCURRENCY ?? 2);
+/**
+ * Four, because the chunk budget shrank. Chunks are 35k chars rather than
+ * 100k (see github/diff.ts), so a large PR is now ~24 calls where it used to
+ * be 8 — and at two at a time that is twelve waves, which does not fit the
+ * review deadline and leaves the tail of the PR unreviewed for a reason that
+ * has nothing to do with the code. Measured on the 458-file case: four at a
+ * time finished 24 chunks in 504s with 16 files unreviewed, against 233
+ * unreviewed before. The ceiling below still caps this at four.
+ */
+const CHUNK_CONCURRENCY = Number(process.env.REVIEW_CHUNK_CONCURRENCY ?? 4);
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
@@ -856,10 +872,17 @@ const MAX_BISECT_ATTEMPTS = envNumber("REVIEW_MAX_BISECT_ATTEMPTS", 12);
  * while the calls either side of it succeed. Tripping on the first failure
  * meant a single blip discarded chunks that had not been attempted, which is
  * how a 31-file review returned findings for none of them.
+ *
+ * Eight, not two, because this is a count against a chunk budget that grew
+ * from 8 to 60. Two failures out of eight chunks is a fair signal that the
+ * provider is gone; two out of sixty is a normal rate on this endpoint, and
+ * at that setting a flaky minute abandoned three quarters of a review that
+ * was otherwise succeeding — measured on an 11-file PR split four ways,
+ * where three of its files went unreviewed behind two transient failures.
  */
 // NaN here makes `providerFailures >= threshold` false forever, so a real
 // outage is never recognised and every chunk pays for its own failure.
-const PROVIDER_FAILURE_THRESHOLD = envNumber("REVIEW_PROVIDER_FAILURE_THRESHOLD", 2);
+const PROVIDER_FAILURE_THRESHOLD = envNumber("REVIEW_PROVIDER_FAILURE_THRESHOLD", 8);
 
 interface BisectBudget {
   remaining: number;

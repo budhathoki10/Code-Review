@@ -221,13 +221,15 @@ describe("capacity and cost gates", () => {
   });
 
   it("reviews what fits when the chunk budget reaches only part of the PR", () => {
-    const files = Array.from({ length: 1_200 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
+    // Sized off the capacity rather than hardcoded, so raising the chunk
+    // budget retunes the fixture instead of silently turning this into a test
+    // of a PR that now fits.
+    const files = Array.from({ length: REVIEW_CAPACITY.files * 3 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
     const decision = evaluateSizeGate(selectDiffForReview(files), DEFAULT_CONFIG);
 
-    // 1,200 files is far past capacity, and the answer is still a review of
-    // the files that fit rather than a refusal: the bugs in the covered files
-    // are found, and the gap is stated instead of the whole thing being
-    // declined.
+    // Far past capacity, and the answer is still a review of the files that
+    // fit rather than a refusal: the bugs in the covered files are found, and
+    // the gap is stated instead of the whole thing being declined.
     expect(decision.bail).toBe(false);
     // The warning has to carry actual numbers and name the dimension that ran
     // out, not just say "too large".
@@ -319,7 +321,9 @@ describe("estimateReviewCost", () => {
     const { selectDiffForReview: select } = await import("@/lib/review/diff-selection");
 
     // Sized to land between the 60% warn line (12,000) and the 20,000 ceiling.
-    const selection = select([bulkyFile("src/a.ts", 1_280)]);
+    // Several files rather than one: a single file is truncated at 60% of the
+    // per-chunk char budget, so one file can no longer reach this cost.
+    const selection = select(Array.from({ length: 4 }, (_, i) => bulkyFile(`src/a${i}.ts`, 340)));
     const decision = gateWithCeiling(selection, { pathFilters: [], disabledCategories: [] });
     const cost = estimateReviewCost(selection);
 
@@ -441,7 +445,7 @@ describe("breadth vs depth coverage", () => {
     // the files that fit is worth more to the author than no review, as long
     // as it does not pretend to be complete — which the warning and the
     // posted coverage note both prevent.
-    const files = Array.from({ length: 1_200 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
+    const files = Array.from({ length: REVIEW_CAPACITY.files * 3 }, (_, i) => srcFile(`src/f${i}.ts`, 100));
     const decision = evaluateSizeGate(selectDiffForReview(files), DEFAULT_CONFIG);
 
     expect(decision.bail).toBe(false);
