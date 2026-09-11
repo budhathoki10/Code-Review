@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+// Exercise the optional generated-file exclusion policy in these legacy cases.
+beforeEach(() => vi.stubEnv("REVIEW_SKIP_GENERATED_FILES", "true"));
+afterEach(() => vi.unstubAllEnvs());
 
 import { selectDiffForReview, formatCoverageNote } from "@/lib/review/diff-selection";
 import { MAX_DIFF_CHARS, MAX_DIFF_FILES, type PullRequestFile } from "@/lib/github/diff";
@@ -83,14 +86,13 @@ describe("selectDiffForReview", () => {
     expect(selection.chunks[0].files.length).toBeLessThanOrEqual(MAX_DIFF_FILES);
   });
 
-  it("truncates a single oversized file instead of dropping it", () => {
+  it("preserves an indivisible oversized line instead of silently truncating it", () => {
     const selection = selectDiffForReview([file("src/huge.ts", MAX_DIFF_CHARS * 2)]);
 
-    expect(selection.truncatedFiles).toEqual(["src/huge.ts"]);
+    expect(selection.truncatedFiles).toEqual([]);
     expect(selection.chunks).toHaveLength(1);
     const patch = selection.chunks[0].files[0].patch ?? "";
-    expect(patch.length).toBeLessThan(MAX_DIFF_CHARS);
-    expect(patch).toContain("patch truncated");
+    expect(patch.length).toBe(MAX_DIFF_CHARS * 2);
   });
 
   it("never reviews zero chunks for a PR that has real changes", () => {
@@ -107,7 +109,8 @@ describe("selectDiffForReview", () => {
     const reviewed = selection.chunks.flatMap((chunk) => chunk.files.map((f) => f.filename));
     // Every analyzable file is either reviewed or explicitly reported.
     expect(reviewed.length + selection.skippedForBudget.length).toBe(selection.analyzableFiles.length);
-    expect(selection.skippedForBudget.length).toBeGreaterThan(0);
+    expect(selection.skippedForBudget).toEqual([]);
+    expect(selection.coveredCount).toBe(500);
   });
 
   it("returns no chunks when only noise changed", () => {
@@ -124,16 +127,15 @@ describe("formatCoverageNote", () => {
     expect(formatCoverageNote(selection)).toBe("");
   });
 
-  it("reports unreviewed files", () => {
+  it("does not claim a size gap when all 500 files are scheduled", () => {
     const files = Array.from({ length: 500 }, (_, i) => file(`src/f${i}.ts`, 5_000));
     const note = formatCoverageNote(selectDiffForReview(files));
 
-    expect(note).toContain("were not reviewed");
-    expect(note).toContain("smaller pull requests");
+    expect(note).toBe("");
   });
 
   it("reports partially reviewed files", () => {
-    const note = formatCoverageNote(selectDiffForReview([file("src/huge.ts", MAX_DIFF_CHARS * 2)]));
+    const note = formatCoverageNote(selectDiffForReview([{ ...file("src/huge.ts", 100), originalPatchChars: 1000 }]));
 
     expect(note).toContain("only partially reviewed");
     expect(note).toContain("src/huge.ts");

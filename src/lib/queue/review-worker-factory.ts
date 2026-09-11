@@ -1,7 +1,7 @@
 import { Worker, DelayedError, type WorkerOptions } from "bullmq";
 import { getRedisConnection } from "@/lib/queue/connection";
 import { REVIEW_QUEUE_NAME, type ReviewJobData } from "@/lib/queue/review-queue";
-import { runReviewPipeline } from "@/lib/review/pipeline";
+import { runReviewPipeline, ReviewIncompleteError } from "@/lib/review/pipeline";
 import { acquirePrLock } from "@/lib/queue/pr-lock";
 import { reviews } from "@/lib/db/collections";
 import { completeCheckRun } from "@/lib/github/checks";
@@ -59,6 +59,15 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
 
       try {
         await runReviewPipeline(job.data, log);
+      } catch (error) {
+        if (error instanceof ReviewIncompleteError && error.madeProgress) {
+          // A large PR needs more work windows, not a larger prompt. Progress
+          // is durable; continuations do not consume outage retry attempts.
+          if (!token) throw new Error("missing worker token — cannot continue review");
+          await job.moveToDelayed(Date.now() + 5_000, token);
+          throw new DelayedError();
+        }
+        throw error;
       } finally {
         await lock.release();
       }
@@ -72,27 +81,10 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
       // Counts job starts, not raw provider calls, and one job is a whole
       // chunked review (see generateChunkedReview in src/lib/ai/review.ts).
       //
-      // The unit that matters is an ATTEMPT, not a call: one findings attempt
-      // is a tool-calling loop of up to MAX_FINDINGS_TOOL_ROUNDS + 1 = 4
-      // provider calls. REVIEW_MAX_BISECT_ATTEMPTS budgets attempts, so it
-      // costs 4x its face value in calls. Worst case per job:
-      //
-      //   root attempts:   MAX_REVIEW_CHUNKS (4) x 4 rounds       = 16
-      //   bisect attempts: REVIEW_MAX_BISECT_ATTEMPTS (12) x 4    = 48
-      //   verdict/summary: once per review                        =  1
-      //                                                             ----
-      //                                                               65
-      //
-      // Verified empirically, not derived on paper — see the "bounds total
-      // provider calls" test in tests/unit/chunked-review.test.ts, which
-      // drives every attempt through every round and counts the mock.
-      //
-      // So the effective endpoint call rate can reach 65 × AI_RATE_LIMIT_MAX
-      // per AI_RATE_LIMIT_DURATION_MS. If tuning against a provider-side RPM
-      // cap, divide the target RPM by 65 before setting AI_RATE_LIMIT_MAX —
-      // a deliberately conservative bound, since a typical review is one or
-      // two chunks that each submit on their first round and never bisect,
-      // i.e. 2-3 calls, well under 5% of this ceiling.
+      // This limits job/window starts, not raw model requests. One window can
+      // start MAX_REVIEW_CHUNKS roots plus bounded bisect attempts; every
+      // attempt may use several tool rounds and transport retries. Tune this
+      // conservatively against the provider's request-per-minute allowance.
       limiter: { max: AI_RATE_LIMIT_MAX, duration: AI_RATE_LIMIT_DURATION_MS },
       ...options,
     },

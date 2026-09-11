@@ -182,6 +182,8 @@ export async function getFileContent(
       return remember(key, undefined);
     }
 
+    if (data.size === 0 && "content" in data && data.content === "") return remember(key, "");
+
     // Over 1 MB: the Contents API returns the metadata with empty content
     // and this marker instead of the file. The Blobs API has no such limit.
     if (data.content === "" || ("encoding" in data && data.encoding === TOO_LARGE)) {
@@ -191,7 +193,8 @@ export async function getFileContent(
     }
 
     if (!("content" in data)) return remember(key, undefined);
-    return remember(key, Buffer.from(data.content, "base64").toString("utf-8"));
+    const decoded = Buffer.from(data.content, "base64").toString("utf-8");
+    return remember(key, decoded.slice(0, 8192).includes("\u0000") ? undefined : decoded);
   } catch (error) {
     if (options) throw error; // Never cache a timeout/rate limit as a missing file.
     if (error instanceof GitHubRateLimitError) throw error;

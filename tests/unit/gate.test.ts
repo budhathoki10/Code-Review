@@ -1,4 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+beforeEach(() => vi.stubEnv("REVIEW_SKIP_GENERATED_FILES", "true"));
+afterEach(() => vi.unstubAllEnvs());
 import { parseRepoConfig, DEFAULT_CONFIG, formatConfigErrors, REVIEW_CATEGORIES } from "@/lib/review/config";
 import { evaluateSizeGate, formatBailoutComment, isForceCommand, FORCE_COMMAND, estimateReviewCost } from "@/lib/review/gate";
 import { selectDiffForReview, formatCoverageNote, coverageRatio, fileCoverage, charCoverage, REVIEW_CAPACITY, MAX_REVIEW_CHUNKS } from "@/lib/review/diff-selection";
@@ -233,8 +235,8 @@ describe("capacity and cost gates", () => {
     expect(decision.bail).toBe(false);
     // The warning has to carry actual numbers and name the dimension that ran
     // out, not just say "too large".
-    expect(decision.warnings.join(" ")).toMatch(/characters|reviewable files/);
-    expect(decision.warnings.join(" ")).toMatch(/\d/);
+    expect(decision.warnings.join(" ")).not.toContain("reviewable files");
+    expect(selectDiffForReview(files).coveredCount).toBe(files.length);
   });
 
   it("coverage is measured against reviewable files, so noise can't drag it down", () => {
@@ -360,11 +362,13 @@ describe("Phase 2 acceptance", () => {
     expect(formatCoverageNote(selection)).toContain("were skipped");
   });
 
-  it("a 400-file prettier run filters down to fewer than 20 real files", () => {
+  it("a repository can explicitly opt into filtering trivial changes", () => {
     const reformatted = Array.from({ length: 395 }, (_, i) => reformattedFile(`src/f${i}.ts`));
     const real = Array.from({ length: 5 }, (_, i) => srcFile(`src/real${i}.ts`));
 
+    process.env.REVIEW_SKIP_TRIVIAL_FILES = "true";
     const selection = selectDiffForReview([...reformatted, ...real]);
+    delete process.env.REVIEW_SKIP_TRIVIAL_FILES;
 
     expect(selection.reviewableCount).toBeLessThan(20);
     expect(selection.triaged.filter((t) => t.reason === "whitespace-only")).toHaveLength(395);
@@ -449,7 +453,8 @@ describe("breadth vs depth coverage", () => {
     const decision = evaluateSizeGate(selectDiffForReview(files), DEFAULT_CONFIG);
 
     expect(decision.bail).toBe(false);
-    expect(decision.warnings.join(" ")).toContain("reviewable files");
+    expect(selectDiffForReview(files).coveredCount).toBe(files.length);
+    expect(decision.warnings.join(" ")).not.toContain("reviewable files");
   });
 
   it("does not warn when everything fit", () => {

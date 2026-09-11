@@ -5,7 +5,7 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
-  /** Provider calls these totals came from — 1 for a single call, up to 65 for a full chunked review (see review-worker-factory.ts). */
+  /** Provider calls represented by these totals, including transport retries. */
   calls: number;
 }
 

@@ -41,6 +41,17 @@ describe("getFileContent", () => {
     expect(await getFileContent(1, "acme", "widgets", "src/a.ts", "sha1")).toBe("hello world");
   });
 
+  it("reads an empty file without a needless blob request", async () => {
+    requestMock.mockResolvedValue({ data: { type: "file", size: 0, content: "", sha: "empty" } });
+    expect(await getFileContent(1, "acme", "widgets", "empty.yaml", "head")).toBe("");
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects binary contents from the small-file route too", async () => {
+    requestMock.mockResolvedValue({ data: { type: "file", content: b64("SQLite\u0000binary"), sha: "binary" } });
+    expect(await getFileContent(1, "acme", "widgets", "unknown.dat", "head")).toBeUndefined();
+  });
+
   it("optional context respects cancellation before making any request", async () => {
     const controller = new AbortController(); controller.abort();
     await expect(getFileContent(1, "acme", "widgets", "a.ts", "sha", { signal: controller.signal })).rejects.toThrow();

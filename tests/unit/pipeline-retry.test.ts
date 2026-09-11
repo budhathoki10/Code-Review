@@ -214,12 +214,15 @@ describe("retry reuses the AI checkpoint", () => {
 
   it("does not advance the baseline or approve when discovery misses a file", async () => {
     generateChunkedReviewMock.mockResolvedValueOnce({ verdict: "approve", summary: "No issues", findings: [], usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, calls: 1 }, chunkCount: 1, unreviewedFiles: ["src/a.ts"] });
-    await runReviewPipeline(JOB, log);
+    await expect(runReviewPipeline(JOB, log)).rejects.toThrow("Review incomplete");
     expect(pullRequestDocs[0].lastReviewedSha).toBeUndefined();
     expect(reviewDocs[0].coverageComplete).toBe(false);
-    expect(reviewDocs[0].verdict).toBe("comment");
-    expect((reviewDocs[0].metrics as Doc).filesReviewed).toBe(0);
-    expect((reviewDocs[0].metrics as Doc).stages).toHaveProperty("discovery");
+    expect(reviewDocs[0].status).toBe("pending");
+    expect(postSummaryCommentMock).not.toHaveBeenCalled();
+    // Incomplete raw checkpoints must not short-circuit the next attempt.
+    await runReviewPipeline(JOB, log);
+    expect(generateChunkedReviewMock).toHaveBeenCalledTimes(2);
+    expect(reviewDocs[0].coverageComplete).toBe(true);
   });
 
   it("keeps a previously accepted finding blocking when its file cannot be re-reviewed", async () => {
@@ -247,7 +250,7 @@ describe("retry reuses the AI checkpoint", () => {
       chunkCount: 1, unreviewedFiles: ["src/a.ts"],
     });
 
-    await runReviewPipeline(JOB, log);
+    await expect(runReviewPipeline(JOB, log)).rejects.toThrow("Review incomplete");
 
     const carried = (reviewDocs[0].findings as FindingDoc[]).find((f) => f.file === "src/a.ts");
     expect(carried?.verification?.status).toBe("accepted");

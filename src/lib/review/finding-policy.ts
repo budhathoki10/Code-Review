@@ -45,5 +45,5 @@ export function evidenceLabel(finding: FindingDoc): string {
   // Only reviews from before the assessment pass was removed carry one.
   if (finding.verification?.status === "accepted") return "Probable · evidence checked by AI; not test-proven";
   if (finding.verification && finding.verification.status !== "skipped") return `Advisory · ${finding.verification.reason}`;
-  return "Read by AI · not proven by a test run";
+  return "Read by AI";
 }

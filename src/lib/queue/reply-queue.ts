@@ -35,7 +35,7 @@ function getQueue(): Queue<ReplyJobData> {
  * review queue dedups on `pullRequestId-headSha` (two questions on the same
  * commit would collide and one would be silently dropped), serializes per PR
  * behind a 5-minute lock (a question asked during a review would wait out the
- * review), rate-limits for 65-call reviews rather than single calls, and
+ * review), rate-limits long multi-call review windows rather than single calls, and
  * writes its failures onto the review doc — which would mark a healthy
  * completed review as failed when a reply failed.
  *

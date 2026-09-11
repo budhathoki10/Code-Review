@@ -1,6 +1,8 @@
 import { getInstallationOctokit } from "@/lib/github/app";
 import { buildFallbackPatch } from "@/lib/github/patch-fallback";
 import { logger } from "@/lib/logger";
+import { envNumber } from "@/lib/env";
+import { isBinaryPath } from "@/lib/github/file-types";
 
 //  this  ask for the github to get the changed file
 
@@ -24,8 +26,8 @@ import { logger } from "@/lib/logger";
  * it reported findings in three of three, naming the bug in all four files.
  * A chunk it can hold in its head is worth more than a chunk that fits.
  */
-export const MAX_DIFF_FILES = Number(process.env.MAX_DIFF_FILES ?? 8);
-export const MAX_DIFF_CHARS = Number(process.env.MAX_DIFF_CHARS ?? 15_000);
+export const MAX_DIFF_FILES = Math.max(1, Math.floor(envNumber("MAX_DIFF_FILES", 8)));
+export const MAX_DIFF_CHARS = Math.max(1024, Math.floor(envNumber("MAX_DIFF_CHARS", 15_000)));
 
 const FILES_PER_PAGE = 100;
 
@@ -46,7 +48,7 @@ export const GITHUB_MAX_PR_FILES = 3000;
  * remaining files are marked "diff unavailable", which is the same honest
  * outcome, just without paying for it.
  */
-const MAX_PATCH_FALLBACKS = Number(process.env.MAX_PATCH_FALLBACKS ?? 20);
+const MAX_PATCH_FALLBACKS = Math.max(0, envNumber("MAX_PATCH_FALLBACKS", GITHUB_MAX_PR_FILES));
 
 export interface PullRequestFile {
   filename: string;
@@ -56,6 +58,7 @@ export interface PullRequestFile {
   changes?: number;
   additions?: number;
   deletions?: number;
+  previousFilename?: string;
   /** True when this file's patch was computed locally because GitHub returned `patch: null`, or is a "diff unavailable" marker. */
   patchSource?: "github" | "local" | "unavailable";
   /**
@@ -85,6 +88,7 @@ export function buildDiffText(files: { filename: string; patch?: string }[]): st
 }
 
 interface RawFile {
+  previous_filename?: string;
   filename: string;
   patch?: string | null;
   status: string;
@@ -96,6 +100,7 @@ interface RawFile {
 function toPullRequestFile(raw: RawFile): PullRequestFile {
   return {
     filename: raw.filename,
+    previousFilename: raw.previous_filename,
     // Normalize null to undefined up front so the rest of the pipeline has
     // exactly one "no patch" representation to reason about.
     patch: raw.patch ?? undefined,
@@ -127,7 +132,7 @@ async function fillMissingPatches(
   headRef: string,
   log: { info: (obj: object, msg: string) => void; warn: (obj: object, msg: string) => void },
 ): Promise<void> {
-  const missing = files.filter((file) => file.patch === undefined && file.status !== "removed");
+  const missing = files.filter((file) => file.patch === undefined && !isBinaryPath(file.filename));
   if (missing.length === 0) return;
 
   log.info({ count: missing.length }, "files returned without a patch — reconstructing diffs locally");
@@ -149,6 +154,7 @@ async function fillMissingPatches(
       file.status,
       baseRef,
       headRef,
+      file.previousFilename,
     );
     file.patch = fallback.patch;
     file.patchSource = fallback.patch.includes("# DIFF UNAVAILABLE") ? "unavailable" : "local";
@@ -204,7 +210,7 @@ export async function getPullRequestDiff(
   // The base/head SHAs are only needed to reconstruct diffs GitHub declined
   // to render, so they're fetched lazily — a PR where every file came back
   // with a patch (the overwhelming majority) pays nothing for this.
-  const needsFallback = files.some((file) => file.patch === undefined && file.status !== "removed");
+  const needsFallback = files.some((file) => file.patch === undefined && !isBinaryPath(file.filename));
   if (!oversized && needsFallback) {
     const { data: pr } = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
       owner,
@@ -273,6 +279,10 @@ export async function getIncrementalDiff(
   }
 
   const files = [...byName.values()].map(toPullRequestFile);
+
+  // Compare pagination pages commits, not files; GitHub only supplies the
+  // first 300 changed paths. Force the pipeline's full-PR fallback at the cap.
+  if (files.length >= 300) throw new Error("Incremental compare reached GitHub's 300-file limit; full PR diff required");
 
   await fillMissingPatches(installationId, owner, repo, files, baseSha, headSha, logger);
 

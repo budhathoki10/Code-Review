@@ -175,7 +175,7 @@ describe("getPullRequestDiff", () => {
 
     const diff = await getPullRequestDiff(1, "acme", "widgets", 7);
 
-    expect(buildFallbackPatchMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/huge.ts", "modified", "base1", "head1");
+    expect(buildFallbackPatchMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/huge.ts", "modified", "base1", "head1", undefined);
     expect(diff.files[0].patch).toContain("+new");
     expect(diff.files[0].patchSource).toBe("local");
     expect(diff.diffText).toContain("src/huge.ts");
@@ -183,7 +183,7 @@ describe("getPullRequestDiff", () => {
 
   it("marks a file whose diff cannot be obtained as unavailable rather than dropping it", async () => {
     paginateMock.mockResolvedValue([
-      { filename: "src/opaque.bin", status: "modified", patch: null, changes: 9000 },
+      { filename: "src/opaque.ts", status: "modified", patch: null, changes: 9000 },
     ]);
     requestMock.mockResolvedValue({ data: { base: { sha: "base1" }, head: { sha: "head1" } } });
     buildFallbackPatchMock.mockResolvedValue({
@@ -210,11 +210,34 @@ describe("getPullRequestDiff", () => {
     expect(buildFallbackPatchMock).not.toHaveBeenCalled();
   });
 
-  it("does not try to reconstruct a deleted file's diff", async () => {
+  it("reconstructs a deleted file's diff so removals are reviewed", async () => {
     paginateMock.mockResolvedValue([{ filename: "src/gone.ts", status: "removed", patch: null, changes: 40 }]);
+    requestMock.mockResolvedValue({ data: { base: { sha: "base1" }, head: { sha: "head1" } } });
+    buildFallbackPatchMock.mockResolvedValue({ patch: "@@ -1 +0,0 @@\n-old", originalChars: 22 });
 
     await getPullRequestDiff(1, "acme", "widgets", 7);
 
+    expect(buildFallbackPatchMock).toHaveBeenCalledWith(1, "acme", "widgets", "src/gone.ts", "removed", "base1", "head1", undefined);
+  });
+
+  it("reconstructs more than twenty missing source patches", async () => {
+    paginateMock.mockResolvedValue(Array.from({ length: 25 }, (_, i) => ({ filename: `src/${i}.ts`, status: "modified", patch: null })));
+    requestMock.mockResolvedValue({ data: { base: { sha: "base" }, head: { sha: "head" } } });
+    buildFallbackPatchMock.mockResolvedValue({ patch: "@@ -1 +1 @@\n-a\n+b", originalChars: 20 });
+    const diff = await getPullRequestDiff(1, "acme", "widgets", 7);
+    expect(buildFallbackPatchMock).toHaveBeenCalledTimes(25);
+    expect(diff.files.every((file) => file.patchSource === "local")).toBe(true);
+  });
+
+  it("does not download binary databases to try to reconstruct a text diff", async () => {
+    paginateMock.mockResolvedValue([{ filename: "data/huge.db", status: "removed", patch: null }]);
+    await getPullRequestDiff(1, "acme", "widgets", 7);
+    expect(requestMock).not.toHaveBeenCalled();
     expect(buildFallbackPatchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects a capped incremental comparison so the caller fetches the full PR", async () => {
+    paginateMock.mockResolvedValue([{ files: Array.from({ length: 300 }, (_, i) => ({ filename: `src/${i}.ts`, status: "modified", patch: "+x" })) }]);
+    await expect(getIncrementalDiff(1, "acme", "widgets", "base", "head")).rejects.toThrow("300-file limit");
   });
 });
