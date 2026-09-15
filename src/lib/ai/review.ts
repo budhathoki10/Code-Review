@@ -949,6 +949,16 @@ export interface ChunkCheckpoint {
   usage: TokenUsage;
 }
 
+/**
+ * The Mongo driver writes an `undefined` field as null, so a finding the
+ * anchor pass de-lined (`line: undefined`) comes back from its checkpoint as
+ * `line: null` — which the schema rejects, failing every resumed attempt the
+ * same way. Dropping nulls restores the shape that was saved.
+ */
+function fromCheckpoint(finding: ReviewResult["findings"][number]): ReviewResult["findings"][number] {
+  return Object.fromEntries(Object.entries(finding).filter(([, value]) => value !== null)) as ReviewResult["findings"][number];
+}
+
 interface ChunkFindingsResult {
   findings: ReviewResult["findings"];
   usage: TokenUsage;
@@ -1123,7 +1133,7 @@ export async function generateChunkedReview(
       body: options?.prBody, categories: options?.disabledCategories, severities: options?.disabledSeverities,
     })).digest("hex");
     const saved = options?.completedChunks?.[key];
-    if (saved) return { findings: saved.findings, usage: EMPTY_USAGE, unreviewedFiles: [] };
+    if (saved) return { findings: saved.findings.map(fromCheckpoint), usage: EMPTY_USAGE, unreviewedFiles: [] };
     if (startedChunks >= (options?.maxChunksPerAttempt ?? Infinity)) {
       return { findings: [], usage: EMPTY_USAGE, unreviewedFiles: files.map((file) => file.filename) };
     }
