@@ -17,6 +17,15 @@ services:
         value: "10"
       - key: AI_RATE_LIMIT_DURATION_MS
         value: "60000"
+      # BullMQ's default 30s lock can mark long AI reviews as stalled while
+      # they are still inside provider calls. This value follows the 15m
+      # staged-review ceiling plus 2m of headroom.
+      - key: REVIEW_BULLMQ_LOCK_DURATION_MS
+        value: "1020000"
+      - key: REVIEW_BULLMQ_STALLED_INTERVAL_MS
+        value: "60000"
+      - key: REVIEW_BULLMQ_MAX_STALLED_COUNT
+        value: "3"
       - key: MONGODB_URI
         sync: false
       - key: MONGODB_DB
