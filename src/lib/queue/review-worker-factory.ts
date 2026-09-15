@@ -6,9 +6,27 @@ import { acquirePrLock } from "@/lib/queue/pr-lock";
 import { reviews } from "@/lib/db/collections";
 import { completeCheckRun } from "@/lib/github/checks";
 import { logger } from "@/lib/logger";
+import { envNumber } from "@/lib/env";
 
-const AI_RATE_LIMIT_MAX = Number(process.env.AI_RATE_LIMIT_MAX ?? 10);
-const AI_RATE_LIMIT_DURATION_MS = Number(process.env.AI_RATE_LIMIT_DURATION_MS ?? 60_000);
+const AI_RATE_LIMIT_MAX = envNumber("AI_RATE_LIMIT_MAX", 10);
+const AI_RATE_LIMIT_DURATION_MS = envNumber("AI_RATE_LIMIT_DURATION_MS", 60_000);
+const LONGEST_REVIEW_DEADLINE_MS = Math.max(
+  envNumber("REVIEW_DEADLINE_MS", 600_000),
+  envNumber("REVIEW_RISKY_DEADLINE_MS", 600_000),
+  envNumber("REVIEW_MULTI_STAGE_DEADLINE_MS", 900_000),
+);
+export const REVIEW_BULLMQ_LOCK_DURATION_MS = Math.max(
+  60_000,
+  envNumber("REVIEW_BULLMQ_LOCK_DURATION_MS", LONGEST_REVIEW_DEADLINE_MS + 120_000),
+);
+export const REVIEW_BULLMQ_STALLED_INTERVAL_MS = Math.max(
+  30_000,
+  envNumber("REVIEW_BULLMQ_STALLED_INTERVAL_MS", 60_000),
+);
+export const REVIEW_BULLMQ_MAX_STALLED_COUNT = Math.max(
+  1,
+  Math.floor(envNumber("REVIEW_BULLMQ_MAX_STALLED_COUNT", 3)),
+);
 
 /**
  * Per-PR lock TTL (see pr-lock.ts) and the delay before a job blocked on
@@ -75,6 +93,12 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
     {
       connection: getRedisConnection(),
       concurrency: 5,
+      // Review jobs can legitimately spend many minutes inside provider
+      // calls. BullMQ's default 30s lock is tuned for short processors, so
+      // make the heartbeat/stall window match this pipeline's deadline.
+      lockDuration: REVIEW_BULLMQ_LOCK_DURATION_MS,
+      stalledInterval: REVIEW_BULLMQ_STALLED_INTERVAL_MS,
+      maxStalledCount: REVIEW_BULLMQ_MAX_STALLED_COUNT,
       // Bounds how often this process calls the AI provider, independent of
       // job concurrency — avoids tripping the provider's own rate limits.
       //
