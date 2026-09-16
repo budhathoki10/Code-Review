@@ -199,7 +199,7 @@ export function DashboardShell({
   }, []);
 
   return (
-    <div className="flex flex-1">
+    <div className="flex h-dvh flex-1 overflow-hidden">
       <CommandPalette ref={paletteRef} repos={repos} installUrl={installUrl} />
       <aside className="hidden shrink-0 border-r border-border lg:flex">
         <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} accounts={accounts} />
@@ -248,7 +248,7 @@ export function DashboardShell({
         )}
       </AnimatePresence>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
         <header className="sticky top-0 z-10 flex h-16 items-center justify-between gap-4 border-b border-border bg-card/95 px-4 backdrop-blur-md sm:px-6">
           <button
             type="button"
