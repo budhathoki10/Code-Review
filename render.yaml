@@ -40,6 +40,20 @@ services:
       # is the strongest one available rather than the fastest.
       - key: NVIDIA_MODEL
         value: nvidia/nemotron-3-ultra-550b-a55b
+      # Distinct from NVIDIA_MODEL on purpose: this is what a chunk fails over
+      # to after the primary refuses it twice, so it must be a different,
+      # known-good model, not a copy of the one that just failed.
+      - key: NVIDIA_BACKUP_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b
+      - key: REVIEW_PRIMARY_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b
+      # ultra-550b with reasoning on measured outputTokens:0 and a connection
+      # timeout on every attempt as a verifier (see src/lib/ai/models.ts) —
+      # super-120b is the model that actually verifies.
+      - key: REVIEW_VERIFIER_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b
+      - key: REVIEW_ARBITER_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b
       - key: NVIDIA_TEMPERATURE
         value: "0.2"
       - key: NVIDIA_TOP_P

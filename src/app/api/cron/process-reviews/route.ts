@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Worker } from "bullmq";
 import { createReviewWorker } from "@/lib/queue/review-worker-factory";
 import { createThrottleTrailerWorker } from "@/lib/queue/throttle-worker-factory";
+import { getReviewQueue } from "@/lib/queue/review-queue";
+import { reconcileOrphanedReviews } from "@/lib/review/reconcile-orphaned";
 import { logger } from "@/lib/logger";
 
 /**
@@ -67,6 +69,15 @@ export async function GET(request: NextRequest) {
     sweep(throttleTrailerWorker, MAX_DURATION_MS),
   ]);
 
-  logger.info({ review, throttleTrailer }, "cron review sweep finished");
-  return NextResponse.json({ ok: true, review, throttleTrailer });
+  // Catches reviews left `pending` forever by a job that vanished from the
+  // queue without going through the worker's own "failed" handler — see
+  // reconcile-orphaned.ts. Runs after the sweeps above so a job that just
+  // legitimately finished this tick isn't raced.
+  const orphaned = await reconcileOrphanedReviews(getReviewQueue()).catch((err) => {
+    logger.error({ err }, "orphaned-review reconciliation failed");
+    return { reconciled: 0 };
+  });
+
+  logger.info({ review, throttleTrailer, orphaned }, "cron review sweep finished");
+  return NextResponse.json({ ok: true, review, throttleTrailer, orphaned });
 }
