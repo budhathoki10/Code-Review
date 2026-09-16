@@ -35,7 +35,8 @@ export const REVIEW_JOB_ATTEMPTS = 3;
 
 let queue: Queue<ReviewJobData> | undefined;
 
-function getQueue(): Queue<ReviewJobData> {
+/** Exported so callers that only need to inspect the queue (e.g. the orphaned-review reconciler) don't each open their own connection. */
+export function getReviewQueue(): Queue<ReviewJobData> {
   if (!queue) {
     queue = new Queue<ReviewJobData>(REVIEW_QUEUE_NAME, { connection: getRedisConnection() });
   }
@@ -66,7 +67,7 @@ export async function enqueueReviewJob(data: ReviewJobData): Promise<void> {
     ? `${data.pullRequestId}-${data.headSha}-force-${data.requestId}`
     : `${data.pullRequestId}-${data.headSha}`;
 
-  await getQueue().add("run-review", data, {
+  await getReviewQueue().add("run-review", data, {
     jobId,
     attempts: REVIEW_JOB_ATTEMPTS,
     backoff: { type: "exponential", delay: 5_000 },
