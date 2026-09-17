@@ -69,6 +69,18 @@ services:
       # thinking time plus the answer. 120s aborted the call partway.
       - key: NVIDIA_REQUEST_TIMEOUT_MS
         value: "300000"
+      # Independent provider fallback used by review generation, staged
+      # verification/arbitration, and finding-thread replies.
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: OPENROUTER_MODEL
+        value: nvidia/nemotron-3-ultra-550b-a55b
+      - key: OPENROUTER_REQUEST_TIMEOUT_MS
+        value: "120000"
+      - key: OPENROUTER_APP_NAME
+        value: PRSentry
       - key: REVIEW_FINDINGS_TOOL_ROUNDS
         value: "2"
       # A large PR is now ~24 smaller calls rather than 8 oversized ones, four

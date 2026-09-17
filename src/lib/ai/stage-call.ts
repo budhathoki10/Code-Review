@@ -1,7 +1,7 @@
 import type OpenAI from "openai";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
-import { getClient } from "@/lib/ai/review";
+import { createChatCompletion } from "@/lib/ai/provider";
 import { addUsage, EMPTY_USAGE, usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { requestParams, type StageModel } from "@/lib/ai/models";
 import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
@@ -70,15 +70,24 @@ export async function callStage<T>({
 
     const startedAt = Date.now();
     try {
-      const response = await getClient().chat.completions.create(
+      let providerAttempts = 0;
+      const response = await createChatCompletion(
         requestParams(model, [{ role: "system", content: system }, { role: "user", content: user }], tool),
         {
           maxRetries: 0,
           timeout: Math.min(remainingMs, model.timeoutMs),
           signal: AbortSignal.timeout(remainingMs),
         },
+        {
+          deadlineAt,
+          operation: `review stage: ${stage}`,
+          onProviderAttempt: () => { providerAttempts += 1; },
+        },
       );
-      usage = addUsage(usage, usageFromResponse(response.usage));
+      usage = addUsage(usage, {
+        ...usageFromResponse(response.usage),
+        calls: providerAttempts,
+      });
 
       const choice = response.choices[0];
       // Truncation is not an empty result. Reasoning traces share this budget,

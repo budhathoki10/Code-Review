@@ -4,9 +4,14 @@ import type { CandidateFinding, TrackedFinding } from "@/lib/review/stage-types"
 
 const { create } = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("@/lib/ai/review", () => ({
-  getClient: () => ({ chat: { completions: { create } } }),
   DEFAULT_MODEL: "test-model",
   thinkingKwargs: () => ({}),
+}));
+vi.mock("@/lib/ai/provider", () => ({
+  createChatCompletion: (params: unknown, options: unknown, context?: { onProviderAttempt?: () => void }) => {
+    context?.onProviderAttempt?.();
+    return create(params, options);
+  },
 }));
 
 import { runDebate } from "@/lib/review/debate";

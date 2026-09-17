@@ -8,10 +8,15 @@ const { create, fetchFile, resolveFetchFile, proofImage, reproduce } = vi.hoiste
 }));
 vi.mock("@/lib/ai/review", () => ({
   DEFAULT_MODEL: "test-model",
-  getClient: () => ({ chat: { completions: { create } } }),
   thinkingKwargs: () => ({}),
   FETCH_FILE_TOOL: { type: "function", function: { name: "fetch_file", description: "", parameters: {} } },
   resolveFetchFile,
+}));
+vi.mock("@/lib/ai/provider", () => ({
+  createChatCompletion: (params: unknown, options: unknown, context?: { onProviderAttempt?: () => void }) => {
+    context?.onProviderAttempt?.();
+    return create(params, options);
+  },
 }));
 vi.mock("@/lib/github/file-content", () => ({ getFileContent: fetchFile }));
 // Mocked so the proof step is controllable and never reaches a real container.
