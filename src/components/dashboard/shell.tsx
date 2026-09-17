@@ -133,7 +133,7 @@ function SidebarContent({
   onNavigate?: () => void;
 }) {
   return (
-    <div className="flex h-full w-[272px] flex-col bg-card">
+    <div className="flex h-full min-h-0 w-full flex-col overflow-hidden bg-card">
       <Link href="/dashboard" className="flex h-16 items-center gap-2.5 border-b border-border px-4" onClick={onNavigate}>
         <BrandMark className="h-5 w-5" />
         <span className="text-sm font-semibold tracking-tight text-foreground">AI Code Review</span>
@@ -199,9 +199,9 @@ export function DashboardShell({
   }, []);
 
   return (
-    <div className="flex h-dvh flex-1 overflow-hidden">
+    <div className="flex h-dvh min-h-0 max-h-dvh flex-none overflow-hidden">
       <CommandPalette ref={paletteRef} repos={repos} installUrl={installUrl} />
-      <aside className="hidden shrink-0 border-r border-border lg:flex">
+      <aside className="hidden h-full min-h-0 w-[272px] shrink-0 overflow-hidden border-r border-border lg:flex">
         <SidebarContent repos={repos} activeId={activeId} installUrl={installUrl} accounts={accounts} />
       </aside>
 
@@ -224,9 +224,9 @@ export function DashboardShell({
               animate={{ x: 0 }}
               exit={{ x: "-100%" }}
               transition={{ duration: 0.2, ease: "easeOut" }}
-              className="fixed inset-y-0 left-0 z-50 w-[272px] border-r border-border bg-card lg:hidden"
+              className="fixed inset-y-0 left-0 z-50 flex w-[272px] flex-col overflow-hidden border-r border-border bg-card lg:hidden"
             >
-              <div className="flex items-center justify-end px-2 pt-2">
+              <div className="flex shrink-0 items-center justify-end px-2 pt-2">
                 <button
                   type="button"
                   onClick={() => setMobileOpen(false)}
@@ -248,8 +248,8 @@ export function DashboardShell({
         )}
       </AnimatePresence>
 
-      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
-        <header className="sticky top-0 z-10 flex h-16 items-center justify-between gap-4 border-b border-border bg-card/95 px-4 backdrop-blur-md sm:px-6">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-10 flex h-16 shrink-0 items-center justify-between gap-4 border-b border-border bg-card/95 px-4 backdrop-blur-md sm:px-6">
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
@@ -325,7 +325,9 @@ export function DashboardShell({
           </div>
         </header>
 
-        <main className="flex flex-1 flex-col px-4 py-10 sm:px-8 lg:px-12">{children}</main>
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto px-4 py-10 sm:px-8 lg:px-12">
+          {children}
+        </main>
       </div>
     </div>
   );
