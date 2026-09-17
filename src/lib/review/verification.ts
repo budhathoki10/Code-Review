@@ -2,7 +2,8 @@ import { z } from "zod";
 import type OpenAI from "openai";
 import type { FindingDoc, ReviewDoc } from "@/lib/db/collections";
 import { addUsage, EMPTY_USAGE, usageFromResponse } from "@/lib/db/usage";
-import { DEFAULT_MODEL, FETCH_FILE_TOOL, getClient, resolveFetchFile, thinkingKwargs, type RepoContext } from "@/lib/ai/review";
+import { DEFAULT_MODEL, FETCH_FILE_TOOL, resolveFetchFile, thinkingKwargs, type RepoContext } from "@/lib/ai/review";
+import { createChatCompletion } from "@/lib/ai/provider";
 import { getFileContent } from "@/lib/github/file-content";
 import type { PullRequestFile } from "@/lib/github/diff";
 import { computeLineContents } from "@/lib/github/diff-lines";
@@ -268,11 +269,14 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
   const decided: DecisionRecord[] = [];
   for (const batch of batches) {
     if (Date.now() >= deadlineAt) break;
-    // Counted even when the provider fails without reporting usage.
-    result.usage = addUsage(result.usage, { ...EMPTY_USAGE, calls: 1 });
     try {
       const callParams = { maxRetries: 0, timeout: Math.max(1, Math.min(30000, deadlineAt - Date.now())), signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) };
-      let response = await getClient().chat.completions.create(paramsFor(batch), callParams);
+      const countAttempt = () => { result.usage = addUsage(result.usage, { ...EMPTY_USAGE, calls: 1 }); };
+      let response = await createChatCompletion(paramsFor(batch), callParams, {
+        deadlineAt,
+        operation: "review verification",
+        onProviderAttempt: countAttempt,
+      });
       result.usage = addUsage(result.usage, { ...usageFromResponse(response.usage), calls: 0 });
 
       // The investigation round offers both tools; the model picks fetch_file
@@ -293,10 +297,14 @@ export async function verifyBlockingFindings(findings: FindingDoc[], files: Pull
           tool_call_id: call.id,
           content: await resolveFetchFile(call.function.arguments, repoContext, fetchCache, deadlineAt),
         })));
-        result.usage = addUsage(result.usage, { ...EMPTY_USAGE, calls: 1 });
-        response = await getClient().chat.completions.create(
+        response = await createChatCompletion(
           paramsFor(batch, [message!, ...toolResults], true),
           { ...callParams, timeout: Math.max(1, Math.min(30000, deadlineAt - Date.now())), signal: AbortSignal.timeout(Math.max(1, deadlineAt - Date.now())) },
+          {
+            deadlineAt,
+            operation: "review verification follow-up",
+            onProviderAttempt: countAttempt,
+          },
         );
         result.usage = addUsage(result.usage, { ...usageFromResponse(response.usage), calls: 0 });
       }

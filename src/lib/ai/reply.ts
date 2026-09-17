@@ -5,6 +5,7 @@ import { usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { getFileContent } from "@/lib/github/file-content";
 import type { ThreadMessage } from "@/lib/github/review-comments";
 import { DEFAULT_MODEL, thinkingKwargs } from "@/lib/ai/review";
+import { createChatCompletion } from "@/lib/ai/provider";
 import { parseToolArguments } from "@/lib/ai/tool-arguments";
 
 /**
@@ -18,26 +19,6 @@ import { parseToolArguments } from "@/lib/ai/tool-arguments";
 const answerSchema = z.object({
   answer: z.string(),
 });
-
-let client: OpenAI | undefined;
-
-function getClient(): OpenAI {
-  if (!client) {
-    const apiKey = process.env.NVIDIA_API_KEY;
-    const baseURL = process.env.NVIDIA_BASE_URL;
-    if (!apiKey || !baseURL) {
-      throw new Error("Missing NVIDIA_API_KEY or NVIDIA_BASE_URL");
-    }
-    // Same bounds as the review client — see the note in ai/review.ts.
-    client = new OpenAI({
-      apiKey,
-      baseURL,
-      maxRetries: envNumber("NVIDIA_MAX_RETRIES", 2),
-      timeout: envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000),
-    });
-  }
-  return client;
-}
 
 function envNumber(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -230,7 +211,8 @@ export async function generateReplyAnswer(
     .filter(Boolean)
     .join("\n\n");
 
-  const response = await getClient().chat.completions.create({
+  let providerAttempts = 0;
+  const response = await createChatCompletion({
     model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
     // A reply is one call with a developer waiting on it, so the reasoning
     // trace is pure latency here too — see thinkingKwargs in ai/review.ts.
@@ -244,9 +226,13 @@ export async function generateReplyAnswer(
     ],
     tools: [ANSWER_TOOL],
     tool_choice: { type: "function", function: { name: "submit_answer" } },
+  }, undefined, {
+    operation: "review reply",
+    onProviderAttempt: () => { providerAttempts += 1; },
   });
 
-  const usage = usageFromResponse(response.usage);
+  const responseUsage = usageFromResponse(response.usage);
+  const usage = { ...responseUsage, calls: responseUsage.calls + Math.max(0, providerAttempts - 1) };
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall || toolCall.type !== "function") {
     throw new Error("Model did not return a submit_answer tool call");

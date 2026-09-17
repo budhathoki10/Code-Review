@@ -10,6 +10,9 @@ import { envNumber } from "@/lib/env";
 import { anchorFindings } from "@/lib/review/finding-anchor";
 import { createHash } from "node:crypto";
 import { splitPatchSections } from "@/lib/review/patch-sections";
+import { createChatCompletion } from "@/lib/ai/provider";
+
+export { getClient } from "@/lib/ai/provider";
 
 const findingSchema = z.object({
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
@@ -56,33 +59,6 @@ const reviewSchema = z.object({
 });
 
 export type ReviewResult = z.infer<typeof reviewSchema>;
-
-let client: OpenAI | undefined;
-
-export function getClient(): OpenAI {
-  if (!client) {
-    const apiKey = process.env.NVIDIA_API_KEY;
-    const baseURL = process.env.NVIDIA_BASE_URL;
-    if (!apiKey || !baseURL) {
-      throw new Error("Missing NVIDIA_API_KEY or NVIDIA_BASE_URL");
-    }
-    // Bounds set explicitly rather than left to the SDK defaults (2 retries,
-    // a 10-minute timeout). This endpoint returns 500s and "Service
-    // temporarily overloaded" 503s under load, and a silent SDK retry of a
-    // call that already takes tens of seconds is invisible in the metrics —
-    // `calls` only counts responses we parsed, so a retried call looked like
-    // one slow call. A per-request ceiling well under BullMQ's stall window
-    // means a wedged request fails the job (and is retried with backoff)
-    // rather than holding a worker slot open.
-    client = new OpenAI({
-      apiKey,
-      baseURL,
-      maxRetries: envNumber("NVIDIA_MAX_RETRIES", 2),
-      timeout: envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000),
-    });
-  }
-  return client;
-}
 
 /**
  * Model params every call in a review shares.
@@ -651,11 +627,7 @@ async function runFindingsLoopInner(
     const forceSubmit = isFinalRound || continuing;
     const response = await callWithBackup(
       (attemptModel, attemptTimeoutMs, signal) => {
-        attemptsThisRound += 1;
-        // Mirrored out before each attempt so a chunk that never succeeds
-        // still reports what it spent getting there.
-        usageSink[0] = { ...totalUsage, calls: totalUsage.calls + attemptsThisRound };
-        return getClient().chat.completions.create({
+        return createChatCompletion({
           model: attemptModel,
           ...sharedParams,
           // The truncated response already contains the expensive reasoning.
@@ -664,7 +636,16 @@ async function runFindingsLoopInner(
           messages,
           tools: forceSubmit ? [FINDINGS_TOOL] : [FINDINGS_TOOL, FETCH_FILE_TOOL],
           tool_choice: forceSubmit ? { type: "function", function: { name: "submit_findings" } } : "required",
-        }, { maxRetries: 0, timeout: attemptTimeoutMs, ...(signal ? { signal } : {}) });
+        }, { maxRetries: 0, timeout: attemptTimeoutMs, ...(signal ? { signal } : {}) }, {
+          deadlineAt,
+          operation: "review findings",
+          onProviderAttempt: () => {
+            attemptsThisRound += 1;
+            // Mirrored out before each provider attempt so a failed NVIDIA
+            // request followed by OpenRouter is visible in usage accounting.
+            usageSink[0] = { ...totalUsage, calls: totalUsage.calls + attemptsThisRound };
+          },
+        });
       },
       model,
       deadlineAt,
