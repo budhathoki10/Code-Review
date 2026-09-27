@@ -223,8 +223,16 @@ export interface ReviewMetrics {
   findingsProduced: number;
   /** Inline comments actually posted (after the per-review cap). */
   commentsPosted: number;
-  /** USD, from the configured per-million-token rates. Approximate by construction — see estimateCost. */
+  /** USD, from the per-million-token rates of the model this review ran on. Approximate by construction — see estimateCost. */
   estimatedCostUsd: number;
+  /**
+   * True when the repository owner's own API key paid for this review.
+   *
+   * Without it, operator spend and user spend are indistinguishable in the
+   * data, and the total on the dashboard would read as the operator's bill
+   * when some of it was never theirs.
+   */
+  byo?: boolean;
 }
 
 export interface ReviewDoc {
@@ -374,7 +382,13 @@ export interface ReviewDoc {
       /** The chunk budget reached too little of the PR for the review to be a fair account of it. */
       | "coverage-too-low"
       /** Projected token spend exceeded the per-review cost ceiling. */
-      | "cost-ceiling";
+      | "cost-ceiling"
+      /**
+       * The repository owner's own AI key could not be used — rejected,
+       * disabled, or undecryptable. Terminal until they fix it in settings:
+       * retrying sends another doomed request to their provider.
+       */
+      | "ai-credentials";
     detail: string;
     filesSeen?: number;
     filesFiltered?: number;
@@ -414,6 +428,63 @@ export interface FindingFeedbackDoc {
   at: Date;
 }
 
+/**
+ * A user's own AI provider choice, including their API key.
+ *
+ * Keyed by the Auth.js user id rather than by GitHub account id, because the
+ * key belongs to the person, not to one of the GitHub logins they happen to
+ * have linked — `getGithubAccountIds` returns several for older accounts, and
+ * a key stored against one of them would vanish when they connect a repo
+ * under another.
+ *
+ * Separate from `RepositoryDoc.config` on purpose. That document is per-repo
+ * review policy and is read by anyone who can see the repo; this one holds a
+ * credential and is read by exactly one code path.
+ */
+export interface UserSettingsDoc {
+  _id?: string;
+  /** Auth.js user id — the same value as `session.user.id`. */
+  userId: string;
+  /** Absent means "use the platform default", which is the normal case. */
+  ai?: {
+    /** models.dev provider id, e.g. "openrouter". */
+    providerId: string;
+    /** Snapshotted from the catalogue at save time, never accepted from the browser. */
+    baseUrl: string;
+    model: string;
+    /** `v1.<iv>.<tag>.<ciphertext>` — see lib/crypto/secret-box. Never sent to a client. */
+    keyCiphertext: string;
+    /** Last four characters, so the UI can show which key is stored. */
+    keyLast4: string;
+    /**
+     * Model limits and prices as models.dev reported them when the user chose.
+     *
+     * Snapshotted rather than looked up at review time for two reasons: a
+     * review must never depend on a third-party HTTP call to start, and cost
+     * accounting should use the rate that applied when the tokens were spent,
+     * not whatever the catalogue says weeks later.
+     */
+    contextLimit?: number;
+    maxOutput?: number;
+    costPerMTokIn?: number;
+    costPerMTokOut?: number;
+    /** When the key last passed a live probe. */
+    verifiedAt: Date;
+    /**
+     * Set when a review gets 401/403 from this key.
+     *
+     * Without it, a revoked key produces a failed review on every single push
+     * and keeps hammering the user's provider with requests that cannot
+     * succeed. While set, reviews fail immediately with an explanation
+     * instead.
+     */
+    disabledAt?: Date;
+    lastError?: { message: string; at: Date };
+  };
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 async function db() {
   const client = await getMongoClient();
   return client.db(process.env.MONGODB_DB);
@@ -443,13 +514,17 @@ export async function findingFeedback(): Promise<Collection<FindingFeedbackDoc>>
   return (await db()).collection<FindingFeedbackDoc>("finding_feedback");
 }
 
+export async function userSettings(): Promise<Collection<UserSettingsDoc>> {
+  return (await db()).collection<UserSettingsDoc>("user_settings");
+}
+
 let indexesEnsured: Promise<void> | undefined;
 
 /** Idempotent — safe to call on every cold start. */
 export function ensureIndexes(): Promise<void> {
   if (!indexesEnsured) {
     indexesEnsured = (async () => {
-      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol, findingFeedbackCol] =
+      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol, findingFeedbackCol, userSettingsCol] =
         await Promise.all([
           installations(),
           repositories(),
@@ -457,6 +532,7 @@ export function ensureIndexes(): Promise<void> {
           reviews(),
           usage(),
           findingFeedback(),
+          userSettings(),
         ]);
 
       await Promise.all([
@@ -474,6 +550,9 @@ export function ensureIndexes(): Promise<void> {
         // rather than stacking duplicates that would each match separately
         // and make one opinion look like several.
         findingFeedbackCol.createIndex({ reviewId: 1, findingId: 1 }, { unique: true }),
+        // One settings document per user. Unique so the settings form's upsert
+        // cannot race itself into two rows, of which only one would ever be read.
+        userSettingsCol.createIndex({ userId: 1 }, { unique: true }),
       ]);
     })();
   }

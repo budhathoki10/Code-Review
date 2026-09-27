@@ -6,6 +6,16 @@ import { createReplyWorker } from "@/lib/queue/reply-worker-factory";
 import { getReviewQueue } from "@/lib/queue/review-queue";
 import { reconcileOrphanedReviews } from "@/lib/review/reconcile-orphaned";
 import { logger } from "@/lib/logger";
+import { secretsConfigured } from "@/lib/crypto/secret-box";
+
+// Checked once, loudly, at start. A worker that cannot decrypt stored keys
+// still runs every review on the platform model, so the failure is otherwise
+// invisible until someone wonders why their own provider is being ignored.
+if (!secretsConfigured()) {
+  logger.warn(
+    "SECRETS_ENCRYPTION_KEY is not set or is malformed — reviews cannot use anyone's own AI provider and will all run on the platform model",
+  );
+}
 
 // npm run worker......it creates a worker from review factory and wait for the job
 const worker = createReviewWorker();

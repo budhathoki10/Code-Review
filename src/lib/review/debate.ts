@@ -5,6 +5,7 @@ import { PRIMARY_MODEL, PRIMARY_THINKING, VERIFIER_MODEL, VERIFIER_THINKING, deb
 import { callStage } from "@/lib/ai/stage-call";
 import { SEVERITIES, type DebateTurn, type TrackedFinding } from "@/lib/review/stage-types";
 import { addUsage, EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Two reviewers arguing about evidence, not about each other.
@@ -120,6 +121,7 @@ export async function runDebate(
   disputed: TrackedFinding[],
   deadlineAt: number,
   maxRounds = 2,
+  credentials?: AiCredentials,
 ): Promise<DebateOutcome> {
   let usage = EMPTY_USAGE;
   const resolved: TrackedFinding[] = [];
@@ -134,7 +136,7 @@ export async function runDebate(
 
     const proposer = await callStage({
       stage: "debate_running",
-      model: debateStage(PRIMARY_MODEL, PRIMARY_THINKING),
+      model: debateStage(PRIMARY_MODEL, PRIMARY_THINKING, credentials),
       system: PROPOSER_SYSTEM,
       user: `${context}\n\nDISPUTED FINDINGS\n${renderDisputed(open, challengerTurns)}`,
       tool: TOOL,
@@ -148,7 +150,7 @@ export async function runDebate(
 
     const challenger = await callStage({
       stage: "debate_running",
-      model: debateStage(VERIFIER_MODEL, VERIFIER_THINKING),
+      model: debateStage(VERIFIER_MODEL, VERIFIER_THINKING, credentials),
       system: CHALLENGER_SYSTEM,
       user: `${context}\n\nDISPUTED FINDINGS\n${renderDisputed(open, proposerTurns)}`,
       tool: TOOL,

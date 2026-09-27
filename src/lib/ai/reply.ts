@@ -7,6 +7,7 @@ import type { ThreadMessage } from "@/lib/github/review-comments";
 import { DEFAULT_MODEL, thinkingKwargs } from "@/lib/ai/review";
 import { createChatCompletion } from "@/lib/ai/provider";
 import { parseToolArguments } from "@/lib/ai/tool-arguments";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Answering a question about one finding is a different job from producing a
@@ -80,6 +81,15 @@ export interface ReplyContext {
     repo: string;
     ref: string;
   };
+  /**
+   * Whose provider answers. Absent means the platform's own.
+   *
+   * A reply is part of the same conversation as the review that produced the
+   * finding, so it runs on the same model the owner chose — answering on a
+   * different one would bill the wrong account and could contradict the
+   * review in tone and judgement.
+   */
+  credentials?: AiCredentials;
 }
 
 function renderFinding(finding: FindingDoc): string {
@@ -213,7 +223,7 @@ export async function generateReplyAnswer(
 
   let providerAttempts = 0;
   const response = await createChatCompletion({
-    model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
+    model: ctx.credentials?.source === "byo" ? ctx.credentials.model : process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
     // A reply is one call with a developer waiting on it, so the reasoning
     // trace is pure latency here too — see thinkingKwargs in ai/review.ts.
     ...thinkingKwargs(),
@@ -228,6 +238,7 @@ export async function generateReplyAnswer(
     tool_choice: { type: "function", function: { name: "submit_answer" } },
   }, undefined, {
     operation: "review reply",
+    credentials: ctx.credentials,
     onProviderAttempt: () => { providerAttempts += 1; },
   });
 

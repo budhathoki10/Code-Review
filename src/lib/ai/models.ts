@@ -1,5 +1,6 @@
 import type OpenAI from "openai";
 import { envNumber } from "@/lib/env";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Which model plays which role, and whether it reasons.
@@ -18,6 +19,15 @@ import { envNumber } from "@/lib/env";
  * Defaults follow the specified architecture: ultra reviews, super verifies.
  * Set REVIEW_PRIMARY_MODEL / REVIEW_PRIMARY_THINKING to move off it.
  */
+
+/**
+ * The model every path falls back to when nothing else is configured.
+ *
+ * Lives here rather than in review.ts so that resolving "which model is this
+ * review using" does not have to import the entire chunked-review module.
+ * Re-exported from review.ts, which is where callers have always found it.
+ */
+export const DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
 
 export const PRIMARY_MODEL = process.env.REVIEW_PRIMARY_MODEL ?? "nvidia/nemotron-3-ultra-550b-a55b";
 export const VERIFIER_MODEL = process.env.REVIEW_VERIFIER_MODEL ?? "nvidia/nemotron-3-super-120b-a12b";
@@ -54,26 +64,52 @@ export interface StageModel {
   maxTokens: number;
   temperature: number;
   timeoutMs: number;
+  /**
+   * Whose provider runs this stage. Absent means the platform's own.
+   *
+   * Carried on the stage rather than passed beside it because `callStage`
+   * already receives exactly one object describing "how to make this call",
+   * and splitting model identity from the credentials that can serve it is
+   * how the two drift apart.
+   */
+  credentials?: AiCredentials;
 }
 
-function stage(model: string, thinking: boolean, prefix: string, defaultMaxTokens: number, defaultTemp: number): StageModel {
+function stage(
+  model: string,
+  thinking: boolean,
+  prefix: string,
+  defaultMaxTokens: number,
+  defaultTemp: number,
+  credentials?: AiCredentials,
+): StageModel {
+  const configured = envNumber(`${prefix}_MAX_TOKENS`, defaultMaxTokens);
   return {
-    model,
+    // A user's chosen model replaces whatever this stage would otherwise run.
+    model: credentials?.source === "byo" ? credentials.model : model,
     thinking,
-    maxTokens: envNumber(`${prefix}_MAX_TOKENS`, defaultMaxTokens),
+    // Never ask for more output than the model can produce. A request above
+    // the model's ceiling is rejected outright by some providers and silently
+    // clamped by others, and the silent case is the one that wastes a review.
+    maxTokens: credentials?.maxOutput ? Math.min(configured, credentials.maxOutput) : configured,
     temperature: envNumber(`${prefix}_TEMPERATURE`, defaultTemp),
     timeoutMs: envNumber(`${prefix}_TIMEOUT_MS`, 300_000),
+    credentials,
   };
 }
 
 /** Phase 1. Highest output budget: it produces the most text and reasons while doing it. */
-export const primaryStage = (): StageModel => stage(PRIMARY_MODEL, PRIMARY_THINKING, "REVIEW_PRIMARY", 16_000, 0.2);
+export const primaryStage = (credentials?: AiCredentials): StageModel =>
+  stage(PRIMARY_MODEL, PRIMARY_THINKING, "REVIEW_PRIMARY", 16_000, 0.2, credentials);
 /** Phase 2. Verifies and independently searches, so it needs room for both. */
-export const verifierStage = (): StageModel => stage(VERIFIER_MODEL, VERIFIER_THINKING, "REVIEW_VERIFIER", 12_000, 0.1);
+export const verifierStage = (credentials?: AiCredentials): StageModel =>
+  stage(VERIFIER_MODEL, VERIFIER_THINKING, "REVIEW_VERIFIER", 12_000, 0.1, credentials);
 /** Debate turns are narrow: one finding, one position, brief reasoning. */
-export const debateStage = (model: string, thinking: boolean): StageModel => stage(model, thinking, "REVIEW_DEBATE", 6_000, 0.1);
+export const debateStage = (model: string, thinking: boolean, credentials?: AiCredentials): StageModel =>
+  stage(model, thinking, "REVIEW_DEBATE", 6_000, 0.1, credentials);
 /** Arbitration is decisive and short. Temperature 0: the same evidence should reach the same verdict. */
-export const arbiterStage = (): StageModel => stage(ARBITER_MODEL, ARBITER_THINKING, "REVIEW_ARBITER", 8_000, 0);
+export const arbiterStage = (credentials?: AiCredentials): StageModel =>
+  stage(ARBITER_MODEL, ARBITER_THINKING, "REVIEW_ARBITER", 8_000, 0, credentials);
 
 /** Shared request shape, so no stage can silently diverge on the parameters that matter. */
 export function requestParams(

@@ -4,6 +4,7 @@ import { verifierStage } from "@/lib/ai/models";
 import { callStage } from "@/lib/ai/stage-call";
 import { SEVERITIES, type CandidateFinding, type Evidence, type VerificationVerdict } from "@/lib/review/stage-types";
 import type { TokenUsage } from "@/lib/db/usage";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Phase 2 — an independent reviewer, not a rubber stamp.
@@ -188,11 +189,12 @@ export async function runSecondaryReview(
   context: string,
   candidates: CandidateFinding[],
   deadlineAt: number,
+  credentials?: AiCredentials,
 ): Promise<SecondaryReviewResult> {
   const user = `${context}\n\nFINDINGS REPORTED BY THE FIRST REVIEWER (untrusted claims to be checked)\n${renderCandidates(candidates)}`;
   const result = await callStage({
     stage: "phase2_running",
-    model: verifierStage(),
+    model: verifierStage(credentials),
     system: SYSTEM,
     user,
     tool: TOOL,

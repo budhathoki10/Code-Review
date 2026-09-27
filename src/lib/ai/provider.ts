@@ -1,11 +1,71 @@
 import OpenAI from "openai";
+import { createHash } from "node:crypto";
 import { envNumber } from "@/lib/env";
 import { logger } from "@/lib/logger";
+import type { AiCredentials } from "@/lib/ai/credentials";
+import { ByoProviderError } from "@/lib/ai/credential-errors";
+
+// Re-exported so callers that catch provider failures keep a single import.
+export { ByoProviderError } from "@/lib/ai/credential-errors";
 
 export const DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
 
 let nvidiaClient: OpenAI | undefined;
 let openRouterClient: OpenAI | undefined;
+
+/**
+ * Clients for user-supplied endpoints, keyed by a hash of base URL and key.
+ *
+ * The platform clients can be singletons because there is exactly one of each.
+ * User-supplied ones cannot: one instance serves many users, each with their
+ * own endpoint, and building a fresh OpenAI client per call throws away the
+ * connection pool. Bounded because the cache is keyed by user input, and an
+ * unbounded map keyed by user input is a slow memory leak.
+ */
+const BYO_CLIENT_CACHE_LIMIT = 50;
+const byoClients = new Map<string, OpenAI>();
+
+/**
+ * A cache key that cannot leak the key it is derived from.
+ *
+ * Map keys end up in heap dumps and, sooner or later, in a log line someone
+ * added while debugging. A hash is just as unique and reveals nothing.
+ */
+function credentialCacheKey(baseUrl: string, apiKey: string): string {
+  return createHash("sha256").update(`${baseUrl}\u0000${apiKey}`).digest("hex");
+}
+
+/** A client for one user's own provider. Cached per (base URL, key) pair. */
+export function getByoClient(credentials: AiCredentials): OpenAI {
+  const { baseUrl, apiKey } = credentials;
+  if (!baseUrl || !apiKey) throw new Error("Bring-your-own credentials are missing a base URL or API key");
+
+  const cacheKey = credentialCacheKey(baseUrl, apiKey);
+  const cached = byoClients.get(cacheKey);
+  if (cached) return cached;
+
+  // Oldest-first eviction. Map preserves insertion order, so the first key is
+  // the least recently created — enough for a cache whose only job is to stop
+  // unbounded growth.
+  if (byoClients.size >= BYO_CLIENT_CACHE_LIMIT) {
+    const oldest = byoClients.keys().next();
+    if (!oldest.done) byoClients.delete(oldest.value);
+  }
+
+  const client = new OpenAI({
+    apiKey,
+    baseURL: baseUrl,
+    maxRetries: 0,
+    timeout: envNumber("BYO_REQUEST_TIMEOUT_MS", 120_000),
+  });
+  byoClients.set(cacheKey, client);
+  return client;
+}
+
+/** Test seam: drops cached user clients so a suite can rebuild them. */
+export function resetByoClients(): void {
+  byoClients.clear();
+}
 
 export function getClient(): OpenAI {
   if (!nvidiaClient) {
@@ -86,7 +146,12 @@ export interface ProviderCallContext {
   /** Used only to keep a fallback request inside the caller's review budget. */
   deadlineAt?: number;
   operation?: string;
-  onProviderAttempt?: (provider: "nvidia" | "openrouter") => void;
+  onProviderAttempt?: (provider: "nvidia" | "openrouter" | "byo") => void;
+  /**
+   * Whose provider to call. Absent means the platform's own NVIDIA
+   * deployment, which is what every call did before per-user models existed.
+   */
+  credentials?: AiCredentials;
 }
 
 function openRouterOptions(
@@ -117,6 +182,38 @@ export async function createChatCompletion(
   options?: OpenAI.RequestOptions,
   context: ProviderCallContext = {},
 ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+  const credentials = context.credentials;
+
+  // A user's own provider gets the request as-is and gets no failover. The
+  // operator's OpenRouter account is not a safety net for someone else's
+  // billing problem: quietly absorbing it would mean paying for their reviews
+  // indefinitely while they see nothing wrong.
+  if (credentials?.source === "byo") {
+    context.onProviderAttempt?.("byo");
+    try {
+      return await getByoClient(credentials).chat.completions.create(
+        { ...params, model: credentials.model },
+        { ...options, maxRetries: 0 },
+      );
+    } catch (error) {
+      const status = (error as { status?: number } | undefined)?.status;
+      const authFailure = status === 401 || status === 403;
+      logger.warn(
+        { operation: context.operation, status, model: credentials.model, ownerUserId: credentials.ownerUserId },
+        authFailure ? "user AI key was rejected" : "user AI provider failed",
+      );
+      throw new ByoProviderError(
+        authFailure
+          ? "Your API key was rejected by the provider."
+          : `Your AI provider did not complete the request${status ? ` (HTTP ${status})` : ""}.`,
+        credentials.ownerUserId,
+        status,
+        authFailure,
+        { cause: error },
+      );
+    }
+  }
+
   context.onProviderAttempt?.("nvidia");
   try {
     return await getClient().chat.completions.create(params, { ...options, maxRetries: 0 });

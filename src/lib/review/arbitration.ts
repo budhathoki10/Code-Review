@@ -5,6 +5,7 @@ import { arbiterStage } from "@/lib/ai/models";
 import { callStage } from "@/lib/ai/stage-call";
 import { SEVERITIES, type TrackedFinding } from "@/lib/review/stage-types";
 import { EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * The last word on findings two rounds of debate could not settle.
@@ -119,13 +120,14 @@ export async function runArbitration(
   context: string,
   unresolved: TrackedFinding[],
   deadlineAt: number,
+  credentials?: AiCredentials,
 ): Promise<ArbitrationOutcome> {
   if (unresolved.length === 0) return { resolved: [], usage: EMPTY_USAGE };
   logger.info({ disputed: unresolved.length }, "arbitration started");
 
   const result = await callStage({
     stage: "arbitration_running",
-    model: arbiterStage(),
+    model: arbiterStage(credentials),
     system: SYSTEM,
     user: `${context}\n\nDISPUTED FINDINGS AND THE POSITIONS TAKEN\n${unresolved.map(renderDispute).join("\n\n")}`,
     tool: TOOL,

@@ -2,7 +2,7 @@
 
 import { Fragment, forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { LayoutDashboard, FolderGit2, Search } from "lucide-react";
+import { LayoutDashboard, FolderGit2, Search, Settings } from "lucide-react";
 import { toneDotClasses } from "@/lib/ui";
 import { GitHubMark } from "@/components/github-mark";
 import type { RepoSummary } from "@/lib/db/repo-stats";
@@ -31,7 +31,7 @@ type Item = {
   label: string;
   sublabel?: string;
   href: string;
-  icon: "dashboard" | "repos" | "connect" | RepoSummary["health"];
+  icon: "dashboard" | "repos" | "settings" | "connect" | RepoSummary["health"];
   section: Section;
 };
 
@@ -65,6 +65,7 @@ export const CommandPalette = forwardRef<
     const navItems: Item[] = [
       { key: "nav-dashboard", label: "Dashboard", href: "/dashboard", icon: "dashboard", section: "Navigation" },
       { key: "nav-repos", label: "All repositories", href: "/dashboard/repos", icon: "repos", section: "Navigation" },
+      { key: "nav-settings", label: "Settings", sublabel: "Review model", href: "/dashboard/settings", icon: "settings", section: "Navigation" },
     ];
     const nav = navItems.filter((item) => fuzzyMatch(query, item.label));
 
@@ -180,8 +181,9 @@ export const CommandPalette = forwardRef<
                     >
                       {item.icon === "dashboard" && <LayoutDashboard className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />}
                       {item.icon === "repos" && <FolderGit2 className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />}
+                      {item.icon === "settings" && <Settings className="h-4 w-4 shrink-0 text-subtle" aria-hidden="true" />}
                       {item.icon === "connect" && <GitHubMark className="h-4 w-4 shrink-0 text-subtle" />}
-                      {item.icon !== "dashboard" && item.icon !== "repos" && item.icon !== "connect" && (
+                      {item.icon !== "dashboard" && item.icon !== "repos" && item.icon !== "settings" && item.icon !== "connect" && (
                         <span className={`shrink-0 ${toneDotClasses(HEALTH_TONE[item.icon])}`} aria-hidden="true" />
                       )}
                       <span className="min-w-0 flex-1 truncate">{item.label}</span>

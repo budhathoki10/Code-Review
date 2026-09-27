@@ -2,6 +2,7 @@ import type OpenAI from "openai";
 import { z } from "zod";
 import { logger } from "@/lib/logger";
 import { createChatCompletion } from "@/lib/ai/provider";
+import { ByoProviderError } from "@/lib/ai/credential-errors";
 import { addUsage, EMPTY_USAGE, usageFromResponse, type TokenUsage } from "@/lib/db/usage";
 import { requestParams, type StageModel } from "@/lib/ai/models";
 import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
@@ -28,6 +29,10 @@ import { parseToolArguments } from "@/lib/ai/tool-arguments";
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
 function isRetryable(error: unknown): boolean {
+  // A rejected key is rejected on every attempt. Retrying it wastes the
+  // review deadline and sends two more doomed requests to someone's provider.
+  if (error instanceof ByoProviderError) return !error.authFailure && RETRYABLE_STATUS.has(error.status ?? 0);
+
   const status = (error as { status?: number } | undefined)?.status;
   if (status !== undefined) return RETRYABLE_STATUS.has(status);
   const name = error instanceof Error ? `${error.name} ${error.constructor.name}` : "";
@@ -81,6 +86,7 @@ export async function callStage<T>({
         {
           deadlineAt,
           operation: `review stage: ${stage}`,
+          credentials: model.credentials,
           onProviderAttempt: () => { providerAttempts += 1; },
         },
       );

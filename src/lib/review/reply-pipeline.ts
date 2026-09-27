@@ -3,7 +3,8 @@ import { ObjectId } from "mongodb";
 import { generateReplyAnswer } from "@/lib/ai/reply";
 import { getBotLogin } from "@/lib/github/app";
 import { getReviewCommentThread, postReviewCommentReply } from "@/lib/github/review-comments";
-import { pullRequests, reviews, type FindingDoc, type ReviewDoc } from "@/lib/db/collections";
+import { pullRequests, repositories, reviews, type FindingDoc, type ReviewDoc } from "@/lib/db/collections";
+import { resolveAiCredentials, type AiCredentials } from "@/lib/ai/credentials";
 import { recordUsage } from "@/lib/db/usage";
 import type { ReplyJobData } from "@/lib/queue/reply-queue";
 
@@ -68,6 +69,7 @@ export async function runReplyPipeline(data: ReplyJobData, log: Logger): Promise
 
   let prTitle: string | undefined;
   let headSha: string | undefined;
+  let repositoryId: string | undefined;
   if (ObjectId.isValid(pullRequestId)) {
     const pullRequestsCol = await pullRequests();
     const prDoc = await pullRequestsCol.findOne({
@@ -75,6 +77,22 @@ export async function runReplyPipeline(data: ReplyJobData, log: Logger): Promise
     });
     prTitle = prDoc?.title;
     headSha = prDoc?.headSha;
+    repositoryId = prDoc?.repositoryId;
+  }
+
+  // The reply answers on whatever model reviewed the PR. A credential problem
+  // is not worth failing a reply over the way it fails a review: the person
+  // is waiting on one comment, and the settings page is where they will be
+  // told. Fall back to the platform model and log it.
+  let credentials: AiCredentials | undefined;
+  try {
+    const repositoryDoc = repositoryId && ObjectId.isValid(repositoryId)
+      ? await (await repositories()).findOne({ _id: new ObjectId(repositoryId) as unknown as string })
+      : undefined;
+    credentials = await resolveAiCredentials(repositoryDoc ?? undefined);
+  } catch (error) {
+    log.warn({ rootCommentId, err: error instanceof Error ? error.message : String(error) },
+      "could not resolve the owner's AI credentials for this reply — using the platform model");
   }
 // send to the ai for the comment 
   const { answer, usage } = await generateReplyAnswer({
@@ -88,6 +106,7 @@ export async function runReplyPipeline(data: ReplyJobData, log: Logger): Promise
     repo: headSha
       ? { installationId: githubInstallationId, owner, repo, ref: headSha }
       : undefined,
+    credentials,
   });
 // reply back to the comment
   const replyId = await postReviewCommentReply(

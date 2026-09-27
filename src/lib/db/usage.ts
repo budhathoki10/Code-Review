@@ -80,11 +80,27 @@ export async function recordUsage(reviewUsage: TokenUsage, countReview = true): 
 const INPUT_COST_PER_MTOK = Number(process.env.AI_INPUT_COST_PER_MTOK ?? 0);
 const OUTPUT_COST_PER_MTOK = Number(process.env.AI_OUTPUT_COST_PER_MTOK ?? 0);
 
-/** Approximate USD for one review's token usage. Returns 0 when no rates are configured. */
-export function estimateCost(usage: TokenUsage): number {
+/** Per-million-token rates for one specific model, overriding the configured defaults. */
+export interface TokenRates {
+  inputPerMTok?: number;
+  outputPerMTok?: number;
+}
+
+/**
+ * Approximate USD for one review's token usage. Returns 0 when no rates are
+ * configured.
+ *
+ * `rates` comes from the model the review actually ran on, which for a user's
+ * own provider is not the one the operator configured — and is usually a
+ * different price. Passing it keeps a per-review cost honest instead of
+ * pricing every review at the platform's rate whoever paid for it.
+ */
+export function estimateCost(usage: TokenUsage, rates?: TokenRates): number {
+  const inputRate = rates?.inputPerMTok ?? INPUT_COST_PER_MTOK;
+  const outputRate = rates?.outputPerMTok ?? OUTPUT_COST_PER_MTOK;
   const cost =
-    (usage.inputTokens / 1_000_000) * INPUT_COST_PER_MTOK +
-    (usage.outputTokens / 1_000_000) * OUTPUT_COST_PER_MTOK;
+    (usage.inputTokens / 1_000_000) * inputRate +
+    (usage.outputTokens / 1_000_000) * outputRate;
   // Rounded to a tenth of a cent — more precision than that is noise given
   // the provider reports token counts, not prices.
   return Math.round(cost * 10_000) / 10_000;

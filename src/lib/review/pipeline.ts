@@ -37,6 +37,8 @@ import { REVIEW_JOB_ATTEMPTS, type ReviewJobData } from "@/lib/queue/review-queu
 import { normalizeDisabledSeverities } from "@/lib/review/severity";
 import { envNumber } from "@/lib/env";
 import { runMultiStageReview } from "@/lib/review/multi-stage";
+import { disableCredentials, resolveAiCredentials } from "@/lib/ai/credentials";
+import { AiCredentialsError, ByoProviderError, findCredentialError } from "@/lib/ai/credential-errors";
 import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
@@ -99,7 +101,16 @@ async function loadPullRequestDoc(pullRequestId: string) {
   return pullRequestsCol.findOne({ _id: new ObjectId(pullRequestId) as unknown as string });
 }
 
-async function loadRepositoryConfig(pullRequestId: string): Promise<RepositoryDoc["config"] | undefined> {
+/**
+ * The repository a pull request belongs to.
+ *
+ * Returns the whole document rather than just `config`, which is all the
+ * pipeline needed until reviews could run on the owner's own AI credentials.
+ * Resolving those needs `installationId`, and throwing the document away here
+ * only to re-fetch it a moment later would double two queries on the hot path
+ * of every review.
+ */
+async function loadRepositoryForPullRequest(pullRequestId: string): Promise<RepositoryDoc | undefined> {
   if (!ObjectId.isValid(pullRequestId)) return undefined;
 
   const pullRequestsCol = await pullRequests();
@@ -112,7 +123,7 @@ async function loadRepositoryConfig(pullRequestId: string): Promise<RepositoryDo
   const repositoryDoc = await repositoriesCol.findOne({
     _id: new ObjectId(pullRequestDoc.repositoryId) as unknown as string,
   });
-  return repositoryDoc?.config;
+  return repositoryDoc ?? undefined;
 }
 
 /**
@@ -344,10 +355,57 @@ function buildCheckSummary(findings: FindingDoc[]): string {
  * it back to GitHub also succeeds, so a posting failure is logged but never
  * fails the job/retries the whole pipeline.
  */
+/**
+ * Records a review that could not run because the owner's AI key failed, and
+ * disables the key when the provider said it was the key's fault.
+ *
+ * Only 401 and 403 disable it. A 429 or a 500 is the provider having a bad
+ * minute and says nothing about whether the key is valid — disabling on those
+ * would lock someone out of their own tool over a transient blip.
+ */
+async function recordCredentialFailure(
+  data: ReviewJobData,
+  error: AiCredentialsError | ByoProviderError,
+  log: Logger,
+): Promise<void> {
+  const { reviewId, pullRequestId, headSha } = data;
+  const detail = error instanceof AiCredentialsError ? error.userFacing : error.message;
+  log.warn({ reviewId, err: error.message }, "review stopped — the repository owner's AI credentials could not be used");
+
+  if (error instanceof ByoProviderError && error.authFailure && error.ownerUserId) {
+    await disableCredentials(error.ownerUserId, error.message)
+      .catch((err) => log.warn({ reviewId, err }, "failed to disable the rejected AI key"));
+  }
+
+  const reviewsCol = await reviews();
+  await reviewsCol.updateOne(
+    { pullRequestId, headSha },
+    {
+      $set: {
+        status: "failed" as const,
+        stage: "failed" as const,
+        incomplete: { reason: "ai-credentials" as const, detail, at: new Date() },
+        error: { message: detail, attempts: 1, failedAt: new Date() },
+      },
+    },
+  );
+}
+
 export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promise<void> {
   try {
     await runReviewPipelineInner(data, log);
   } catch (error) {
+    // A problem with the owner's own AI key is terminal, not transient. No
+    // number of retries fixes a revoked key, and each one sends another
+    // doomed request to their provider — so this records the reason and
+    // returns rather than throwing, which would spend all three BullMQ
+    // attempts to reach the same place.
+    const credentialError = findCredentialError(error);
+    if (credentialError) {
+      await recordCredentialFailure(data, credentialError, log);
+      return;
+    }
+
     if (!(error instanceof GitHubRateLimitError)) throw error;
 
     // A rate limit means the review would be built from an incomplete
@@ -416,12 +474,22 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
 
   // first finding the most recent document
   // checking the col and also filter  in parallel 
-  const [repoConfig, existingReview, previousReview, pullRequestDoc] = await Promise.all([
-    loadRepositoryConfig(pullRequestId),
+  const [repositoryDoc, existingReview, previousReview, pullRequestDoc] = await Promise.all([
+    loadRepositoryForPullRequest(pullRequestId),
     reviewsCol.findOne({ pullRequestId, headSha }),
     reviewsCol.findOne({ pullRequestId, status: "completed", "aiCheckpoint.unreviewedFiles.0": { $exists: false }, "incomplete": { $exists: false }, coverageComplete: { $ne: false } }, { sort: { createdAt: -1 } }),
     loadPullRequestDoc(pullRequestId),
   ]);
+  const repoConfig = repositoryDoc?.config;
+
+  // Whose model this review runs on, decided once. Resolving it per stage
+  // would mean four Mongo lookups per call and, worse, a review that could
+  // change provider halfway through if the owner edited their settings while
+  // it ran.
+  const credentials = await resolveAiCredentials(repositoryDoc);
+  if (credentials.source === "byo") {
+    log.info({ reviewId, baseUrl: credentials.baseUrl, model: credentials.model }, "review is using the repository owner's own AI provider");
+  }
 
   // The PR's own lastReviewedSha is the authority on how far this PR has been
   // reviewed; the most recent completed review's headSha is the fallback for
@@ -797,6 +865,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
           onStage: setStage,
           resumePrimary,
           learnedRejections,
+          credentials,
           onPrimaryFindings: async (findings) => {
             await reviewsCol.updateOne(
               { pullRequestId, headSha },
@@ -880,6 +949,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         repoContext: { installationId: githubInstallationId, owner, repo, ref: headSha },
         riskContext,
         deadlineAt: discoveryDeadlineAt,
+        credentials,
         completedChunks: existingReview?.chunkCheckpoints,
         maxChunksPerAttempt: MAX_REVIEW_CHUNKS,
         onChunkComplete: async (key, result) => {
@@ -1251,14 +1321,18 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
     outputTokens: reviewUsage.outputTokens,
     totalTokens: reviewUsage.totalTokens,
     calls: reviewUsage.calls,
-    model: process.env.NVIDIA_MODEL ?? DEFAULT_MODEL,
+    model: credentials.model,
     durationMs: Date.now() - startedAt,
     filesSeen: diff.fileCount,
     filesFiltered: selection.skippedAsNoise.length + selection.triaged.length,
     filesReviewed: Math.max(0, selection.coveredCount - new Set([...unreviewedFiles, ...selection.truncatedFiles]).size),
     findingsProduced: allFindings.length,
     commentsPosted: posted.length,
-    estimatedCostUsd: estimateCost(reviewUsage),
+    estimatedCostUsd: estimateCost(reviewUsage, {
+      inputPerMTok: credentials.costPerMTokIn,
+      outputPerMTok: credentials.costPerMTokOut,
+    }),
+    byo: credentials.source === "byo",
   };
 
   // Written after posting so `commentsPosted` reflects what actually went

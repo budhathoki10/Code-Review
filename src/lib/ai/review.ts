@@ -11,6 +11,8 @@ import { anchorFindings } from "@/lib/review/finding-anchor";
 import { createHash } from "node:crypto";
 import { splitPatchSections } from "@/lib/review/patch-sections";
 import { createChatCompletion } from "@/lib/ai/provider";
+import { DEFAULT_MODEL } from "@/lib/ai/models";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 export { getClient } from "@/lib/ai/provider";
 
@@ -105,8 +107,8 @@ export function buildSharedParams(thinking?: boolean): SharedParams {
   };
 }
 
-/** Default model, overridden by NVIDIA_MODEL. */
-export const DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b";
+/** Default model, overridden by NVIDIA_MODEL. Defined in lib/ai/models. */
+export { DEFAULT_MODEL } from "@/lib/ai/models";
 
 /**
  * The model a chunk falls back to when the primary one will not answer.
@@ -217,6 +219,16 @@ async function callWithBackup(
    * so a dead endpoint is paid for once rather than once per chunk.
    */
   providerDown?: () => boolean,
+  /**
+   * The model to fall back to, or `primaryModel` for "there isn't one".
+   *
+   * A user who brought their own model brought exactly one. The operator's
+   * smaller NVIDIA model is not a substitute for it — different provider,
+   * different account, billed to the wrong person — so the BYO path passes
+   * the same model here and the equality checks below turn failover off by
+   * themselves.
+   */
+  backupModel: string = BACKUP_MODEL,
 ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
   const requestCeiling = envNumber("NVIDIA_REQUEST_TIMEOUT_MS", 120_000);
   let lastError: unknown;
@@ -234,7 +246,7 @@ async function callWithBackup(
     // attempt regardless: an endpoint refusing the large model is often still
     // serving the smaller one.
     const isLastTry = tryIndex === CHUNK_RETRY_DELAYS_MS.length;
-    const model = (failedOverToBackup || isLastTry) && BACKUP_MODEL !== primaryModel ? BACKUP_MODEL : primaryModel;
+    const model = (failedOverToBackup || isLastTry) && backupModel !== primaryModel ? backupModel : primaryModel;
     // No single attempt may hold most of what is left. The ceiling is a
     // per-request bound; this is the review's bound on it, and without it one
     // slow call plus its retry is the entire budget with nothing to show.
@@ -270,7 +282,7 @@ async function callWithBackup(
       // it is the same doomed call a second time: measured live, this burned
       // the entire review deadline on a backup stuck in thinking mode instead
       // of leaving time for the chunks still waiting.
-      if (modelDown && (model === BACKUP_MODEL || BACKUP_MODEL === primaryModel)) throw error;
+      if (modelDown && (model === backupModel || backupModel === primaryModel)) throw error;
 
       // A generic refusal clears in a moment, so it is worth a pause. An
       // unavailable model has already spent seconds-to-minutes proving it,
@@ -288,7 +300,7 @@ async function callWithBackup(
           model,
           status: (error as { status?: number })?.status,
           reason: modelDown ? (isTimeout(error) ? "timeout" : "model overloaded") : "refused",
-          nextModel: failedOverToBackup ? BACKUP_MODEL : primaryModel,
+          nextModel: failedOverToBackup ? backupModel : primaryModel,
           nextAttempt: tryIndex + 2,
           delayMs,
         },
@@ -549,10 +561,11 @@ async function runFindingsLoop(
   fileCache: Map<string, string>,
   deadlineAt?: number,
   providerDown?: () => boolean,
+  credentials?: AiCredentials,
 ): Promise<{ value: FindingsResult; usage: TokenUsage }> {
   const usageSink: TokenUsage[] = [];
   try {
-    return await runFindingsLoopInner(model, sharedParams, diffBlock, repoContext, usageSink, fileCache, deadlineAt, providerDown);
+    return await runFindingsLoopInner(model, sharedParams, diffBlock, repoContext, usageSink, fileCache, deadlineAt, providerDown, credentials);
   } catch (error) {
     // Tokens spent on rounds that ran before the failure were still billed.
     // Attaching them to the error is what lets the bisecting retry above
@@ -596,6 +609,7 @@ async function runFindingsLoopInner(
   fileCache: Map<string, string>,
   deadlineAt?: number,
   providerDown?: () => boolean,
+  credentials?: AiCredentials,
 ): Promise<{ value: FindingsResult; usage: TokenUsage }> {
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: FINDINGS_SYSTEM_PROMPT },
@@ -639,6 +653,7 @@ async function runFindingsLoopInner(
         }, { maxRetries: 0, timeout: attemptTimeoutMs, ...(signal ? { signal } : {}) }, {
           deadlineAt,
           operation: "review findings",
+          credentials,
           onProviderAttempt: () => {
             attemptsThisRound += 1;
             // Mirrored out before each provider attempt so a failed NVIDIA
@@ -650,6 +665,8 @@ async function runFindingsLoopInner(
       model,
       deadlineAt,
       providerDown,
+      // A user's own model has no operator-provided backup to fall over to.
+      credentials?.source === "byo" ? model : BACKUP_MODEL,
     );
     logger.info({ durationMs: Date.now() - callStartedAt, round, continuation: continuing, attempts: attemptsThisRound, finishReason: response.choices[0]?.finish_reason }, "finding model call completed");
     // usageFromResponse counts the attempt that answered; the ones that were
@@ -784,6 +801,11 @@ function buildDiffBlock(diffText: string, options?: GenerateReviewOptions): stri
  * existing retry handles it (see review-worker-factory.ts).
  */
 export interface GenerateReviewOptions {
+  /**
+   * Whose provider and model this review runs on. Absent means the
+   * platform's own, which is what every review did before per-user models.
+   */
+  credentials?: AiCredentials;
   maxChunksPerAttempt?: number;
   /** Completed sections from this exact review; keys include input and model settings. */
   completedChunks?: Record<string, ChunkCheckpoint>;
@@ -994,6 +1016,7 @@ async function runFindingsWithBisect(
       // threshold while this one is mid-backoff, and there is no reason to
       // keep sleeping and re-sending once it has.
       () => budget.providerFailures >= PROVIDER_FAILURE_THRESHOLD,
+      options?.credentials,
     );
     budget.providerFailures = 0;
     // The model's line number is an assertion, not an observation. Correct it
@@ -1091,7 +1114,9 @@ export async function generateChunkedReview(
     throw new Error("generateChunkedReview called with no chunks");
   }
 
-  const model = process.env.NVIDIA_MODEL ?? DEFAULT_MODEL;
+  const model = options?.credentials?.source === "byo"
+    ? options.credentials.model
+    : process.env.NVIDIA_MODEL ?? DEFAULT_MODEL;
   const sharedParams = buildSharedParams(options?.thinking);
   // Shared across every chunk, so a review with several failing chunks
   // can't multiply the retry cost by the number of chunks.
