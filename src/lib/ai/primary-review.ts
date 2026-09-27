@@ -5,6 +5,7 @@ import { callStage } from "@/lib/ai/stage-call";
 import type { CandidateFinding, Evidence } from "@/lib/review/stage-types";
 import { SEVERITIES } from "@/lib/review/stage-types";
 import type { TokenUsage } from "@/lib/db/usage";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Phase 1 — the deepest pass, and the one every later stage is bounded by.
@@ -130,8 +131,12 @@ export interface PrimaryReviewResult {
   attempts: number;
 }
 
-export async function runPrimaryReview(context: string, deadlineAt: number): Promise<PrimaryReviewResult> {
-  const model = primaryStage();
+export async function runPrimaryReview(
+  context: string,
+  deadlineAt: number,
+  credentials?: AiCredentials,
+): Promise<PrimaryReviewResult> {
+  const model = primaryStage(credentials);
   const result = await callStage({
     stage: "phase1_running",
     model,

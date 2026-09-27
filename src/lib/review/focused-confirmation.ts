@@ -5,6 +5,7 @@ import { arbiterStage } from "@/lib/ai/models";
 import { callStage } from "@/lib/ai/stage-call";
 import { SEVERITIES, type TrackedFinding } from "@/lib/review/stage-types";
 import { EMPTY_USAGE, type TokenUsage } from "@/lib/db/usage";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * A second opinion on the severe defects only the verifier saw.
@@ -98,6 +99,7 @@ export async function runFocusedConfirmation(
   context: string,
   findings: TrackedFinding[],
   deadlineAt: number,
+  credentials?: AiCredentials,
 ): Promise<FocusedOutcome> {
   if (findings.length === 0) return { resolved: [], usage: EMPTY_USAGE };
   logger.info({ count: findings.length }, "focused confirmation started");
@@ -123,7 +125,7 @@ export async function runFocusedConfirmation(
     // one reviewer saw and records an `arbitration` verdict on each, so it is
     // arbitration.
     stage: "arbitration_running",
-    model: arbiterStage(),
+    model: arbiterStage(credentials),
     system: SYSTEM,
     user: `${context}\n\nSEVERE FINDINGS AWAITING CONFIRMATION\n${rendered}`,
     tool: TOOL,

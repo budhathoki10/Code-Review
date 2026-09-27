@@ -15,6 +15,7 @@ import { buildTraceBlock, importCandidates } from "@/lib/review/symbol-trace";
 import { renderRejectionExamples, suppressLearnedRejections } from "@/lib/review/learned-rejections";
 import { ReviewStageError, toFindingDoc, type CandidateFinding, type ReviewStage } from "@/lib/review/stage-types";
 import type { FindingDoc, FindingFeedbackDoc } from "@/lib/db/collections";
+import type { AiCredentials } from "@/lib/ai/credentials";
 
 /**
  * Runs the whole pipeline: context, primary review, independent verification,
@@ -58,6 +59,15 @@ export interface MultiStageOptions {
    * which is every repository until someone clicks.
    */
   learnedRejections?: FindingFeedbackDoc[];
+  /**
+   * Whose provider and model every stage of this review runs on.
+   *
+   * Absent means the platform's own, which is what all five stages did before
+   * users could bring their own. Passed to each stage rather than read from
+   * the environment inside them, because the environment describes one global
+   * model and this describes one review's.
+   */
+  credentials?: AiCredentials;
 }
 
 export interface MultiStageResult {
@@ -91,7 +101,7 @@ export interface MultiStageResult {
 const MAX_TRACE_HOPS = 10;
 
 export async function runMultiStageReview(options: MultiStageOptions): Promise<MultiStageResult> {
-  const { files, repo, meta, deadlineAt, log } = options;
+  const { files, repo, meta, deadlineAt, log, credentials } = options;
   const reserveMs = options.reserveMs ?? 60_000;
   let usage = EMPTY_USAGE;
 
@@ -146,7 +156,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
     log.info({ findings: primaryFindings.length }, "reusing primary review from an earlier attempt");
   } else {
     await mark("phase1_running");
-    const primary = await runPrimaryReview(context.text, deadlineAt - reserveMs);
+    const primary = await runPrimaryReview(context.text, deadlineAt - reserveMs, credentials);
     usage = addUsage(usage, primary.usage);
     primaryFindings = primary.findings;
     // Persisted before anything downstream can fail, so a retry resumes here.
@@ -188,7 +198,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   }
 
   await mark("phase2_running");
-  const secondary = await runSecondaryReview(withTraces(primaryFindings), primaryFindings, deadlineAt - reserveMs);
+  const secondary = await runSecondaryReview(withTraces(primaryFindings), primaryFindings, deadlineAt - reserveMs, credentials);
   usage = addUsage(usage, secondary.usage);
   await mark("phase2_completed");
   log.info(
@@ -213,7 +223,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   const needsFocus = needsFocusedConfirmation(tracked);
   if (needsFocus.length > 0 && Date.now() < deadlineAt - reserveMs) {
     try {
-      const focused = await runFocusedConfirmation(withTraces(needsFocus.map((t) => t.candidate)), needsFocus, deadlineAt - reserveMs);
+      const focused = await runFocusedConfirmation(withTraces(needsFocus.map((t) => t.candidate)), needsFocus, deadlineAt - reserveMs, credentials);
       usage = addUsage(usage, focused.usage);
       focusedCount = needsFocus.length;
       const byId = new Map(focused.resolved.map((r) => [r.candidate.id, r]));
@@ -236,7 +246,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
   if (disputed.length > 0 && Date.now() < deadlineAt - reserveMs) {
     await mark("debate_running");
     try {
-      const debate = await runDebate(withTraces(disputed.map((t) => t.candidate)), disputed, deadlineAt - reserveMs / 2);
+      const debate = await runDebate(withTraces(disputed.map((t) => t.candidate)), disputed, deadlineAt - reserveMs / 2, undefined, credentials);
       usage = addUsage(usage, debate.usage);
       debatedCount = disputed.length;
       settled = [...settled, ...debate.resolved];
@@ -244,7 +254,7 @@ export async function runMultiStageReview(options: MultiStageOptions): Promise<M
       if (debate.unresolved.length > 0) {
         await mark("arbitration_running");
         try {
-          const arbitration = await runArbitration(withTraces(debate.unresolved.map((t) => t.candidate)), debate.unresolved, deadlineAt);
+          const arbitration = await runArbitration(withTraces(debate.unresolved.map((t) => t.candidate)), debate.unresolved, deadlineAt, credentials);
           usage = addUsage(usage, arbitration.usage);
           arbitratedCount = debate.unresolved.length;
           settled = [...settled, ...arbitration.resolved];

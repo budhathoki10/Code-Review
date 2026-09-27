@@ -307,6 +307,14 @@ export function DashboardShell({
                       </p>
                     )}
                     <SwitchAccountMenuItem />
+                    <Link
+                      href="/dashboard/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="block rounded-md px-2.5 py-2 text-sm text-muted transition-colors hover:bg-surface-hover hover:text-foreground"
+                      role="menuitem"
+                    >
+                      Settings
+                    </Link>
                     <a
                       href="https://github.com/settings/installations"
                       target="_blank"

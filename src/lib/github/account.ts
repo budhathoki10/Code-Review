@@ -67,3 +67,22 @@ export async function rememberGithubLogin(providerAccountId: string, login: stri
     { $set: { githubLogin: login } },
   );
 }
+
+/**
+ * The Auth.js user a GitHub account id belongs to — the inverse of
+ * `getGithubAccountIds`.
+ *
+ * Needed by the worker, which starts from a webhook and knows only the GitHub
+ * side of the relationship: installation -> githubUserId. Anything stored
+ * against the app's own user (their chosen model and API key) is unreachable
+ * without this hop.
+ *
+ * Returns the first match. The adapter enforces one account row per
+ * (provider, providerAccountId), so there cannot be a second.
+ */
+export async function getUserIdForGithubAccount(providerAccountId: string): Promise<string | undefined> {
+  if (!providerAccountId) return undefined;
+  const accounts = await githubAccountsCollection();
+  const account = await accounts.findOne({ provider: "github", providerAccountId });
+  return account ? String(account.userId) : undefined;
+}

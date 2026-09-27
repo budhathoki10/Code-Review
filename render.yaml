@@ -73,6 +73,10 @@ services:
       # verification/arbitration, and finding-thread replies.
       - key: OPENROUTER_API_KEY
         sync: false
+      # Encrypts users' own provider API keys at rest (dashboard > Settings).
+      # Must decode to 32 bytes. Unset turns the feature off entirely.
+      - key: SECRETS_ENCRYPTION_KEY
+        sync: false
       - key: OPENROUTER_BASE_URL
         value: https://openrouter.ai/api/v1
       - key: OPENROUTER_MODEL
