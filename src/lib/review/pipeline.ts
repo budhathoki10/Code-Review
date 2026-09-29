@@ -40,6 +40,7 @@ import { runMultiStageReview } from "@/lib/review/multi-stage";
 import { disableCredentials, resolveAiCredentials } from "@/lib/ai/credentials";
 import { AiCredentialsError, ByoProviderError, findCredentialError } from "@/lib/ai/credential-errors";
 import { ReviewStageError, type ReviewStage } from "@/lib/review/stage-types";
+import { notifyReviewOutcome } from "@/lib/push/delivery";
 
 const SEVERITY_ORDER: FindingDoc["severity"][] = ["info", "low", "medium", "high", "critical"];
 
@@ -389,6 +390,7 @@ async function recordCredentialFailure(
       },
     },
   );
+  await notifyReviewOutcome(data, "failed");
 }
 
 export async function runReviewPipeline(data: ReviewJobData, log: Logger): Promise<void> {
@@ -653,6 +655,7 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
         },
       },
     );
+    await notifyReviewOutcome(data, "completed");
 
     try {
       const body =
@@ -1353,4 +1356,5 @@ async function runReviewPipelineInner(data: ReviewJobData, log: Logger): Promise
   } else {
     log.info({ reviewId, ...metrics }, "review metrics");
   }
+  await notifyReviewOutcome(data, "completed");
 }

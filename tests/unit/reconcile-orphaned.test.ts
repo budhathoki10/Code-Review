@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { reviewsFindMock, reviewsUpdateOneMock, pullRequestsFindOneMock, repositoriesFindOneMock, completeCheckRunMock } = vi.hoisted(() => ({
   reviewsFindMock: vi.fn(),
@@ -17,6 +17,7 @@ vi.mock("@/lib/db/collections", () => ({
   repositories: vi.fn(async () => ({ findOne: repositoriesFindOneMock })),
 }));
 vi.mock("@/lib/github/checks", () => ({ completeCheckRun: completeCheckRunMock }));
+vi.mock("@/lib/push/delivery", () => ({ notifyReviewOutcome: vi.fn() }));
 vi.mock("@/lib/logger", () => ({
   logger: { child: () => ({ warn: vi.fn(), error: vi.fn() }) },
 }));
@@ -30,6 +31,10 @@ async function loadReconciler() {
 function fakeQueue(job: unknown) {
   return { getJob: vi.fn(async () => job) } as never;
 }
+
+beforeEach(() => {
+  reviewsUpdateOneMock.mockResolvedValue({ matchedCount: 1 });
+});
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -76,7 +81,7 @@ describe("reconcileOrphanedReviews", () => {
 
     expect(result.reconciled).toBe(1);
     expect(reviewsUpdateOneMock).toHaveBeenCalledWith(
-      { _id: "r1" },
+      { _id: "r1", status: "pending" },
       expect.objectContaining({ $set: expect.objectContaining({ status: "failed" }) }),
     );
     expect(completeCheckRunMock).toHaveBeenCalledWith(
@@ -100,6 +105,17 @@ describe("reconcileOrphanedReviews", () => {
 
     expect(result.reconciled).toBe(1);
     expect(reviewsUpdateOneMock).toHaveBeenCalledTimes(1);
+    expect(completeCheckRunMock).not.toHaveBeenCalled();
+  });
+
+  it("does not report a failure if the review completed after the stale query", async () => {
+    reviewsFindMock.mockReturnValue({
+      toArray: async () => [{ _id: "r3", pullRequestId: "507f1f77bcf86cd799439011", headSha: "ghi", status: "pending", createdAt: new Date(0) }],
+    });
+    reviewsUpdateOneMock.mockResolvedValue({ matchedCount: 0 });
+    const { reconcileOrphanedReviews } = await loadReconciler();
+
+    expect(await reconcileOrphanedReviews(fakeQueue(undefined))).toEqual({ reconciled: 0 });
     expect(completeCheckRunMock).not.toHaveBeenCalled();
   });
 

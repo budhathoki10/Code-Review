@@ -5,6 +5,7 @@ import { runReviewPipeline, ReviewIncompleteError } from "@/lib/review/pipeline"
 import { acquirePrLock } from "@/lib/queue/pr-lock";
 import { reviews } from "@/lib/db/collections";
 import { completeCheckRun } from "@/lib/github/checks";
+import { notifyReviewOutcome } from "@/lib/push/delivery";
 import { logger } from "@/lib/logger";
 import { envNumber } from "@/lib/env";
 
@@ -149,7 +150,7 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
 
     const reviewsCol = await reviews();
     const failedReview = await reviewsCol.findOneAndUpdate(
-      { pullRequestId: job.data.pullRequestId, headSha: job.data.headSha },
+      { pullRequestId: job.data.pullRequestId, headSha: job.data.headSha, status: "pending" },
       {
         $set: {
           status: "failed",
@@ -164,6 +165,7 @@ export function createReviewWorker(options: Partial<WorkerOptions> = {}): Worker
       { returnDocument: "after" },
     );
     log.error("job exhausted retries — review marked failed (dead letter)");
+    if (failedReview) await notifyReviewOutcome(job.data, "failed");
 
     // Close the check run the pipeline opened. Without this it stays
     // "in_progress" forever: the review is dead, every retry is spent, and
