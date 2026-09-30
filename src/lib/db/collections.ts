@@ -236,6 +236,8 @@ export interface ReviewMetrics {
 }
 
 export interface ReviewDoc {
+  /** Claimed before best-effort web push delivery, so a worker retry does not alert twice. */
+  pushNotifiedAt?: Date;
   /** Persist the reservation BEFORE calling the verifier so retries cannot spend again. */
   /**
    * One rating for the review as a whole, not per finding.
@@ -485,6 +487,15 @@ export interface UserSettingsDoc {
   updatedAt: Date;
 }
 
+/** One browser/device opted in by an authenticated user. */
+export interface PushSubscriptionDoc {
+  userId: string;
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 async function db() {
   const client = await getMongoClient();
   return client.db(process.env.MONGODB_DB);
@@ -518,13 +529,17 @@ export async function userSettings(): Promise<Collection<UserSettingsDoc>> {
   return (await db()).collection<UserSettingsDoc>("user_settings");
 }
 
+export async function pushSubscriptions(): Promise<Collection<PushSubscriptionDoc>> {
+  return (await db()).collection<PushSubscriptionDoc>("push_subscriptions");
+}
+
 let indexesEnsured: Promise<void> | undefined;
 
 /** Idempotent — safe to call on every cold start. */
 export function ensureIndexes(): Promise<void> {
   if (!indexesEnsured) {
     indexesEnsured = (async () => {
-      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol, findingFeedbackCol, userSettingsCol] =
+      const [installationsCol, repositoriesCol, pullRequestsCol, reviewsCol, usageCol, findingFeedbackCol, userSettingsCol, pushSubscriptionsCol] =
         await Promise.all([
           installations(),
           repositories(),
@@ -533,6 +548,7 @@ export function ensureIndexes(): Promise<void> {
           usage(),
           findingFeedback(),
           userSettings(),
+          pushSubscriptions(),
         ]);
 
       await Promise.all([
@@ -553,6 +569,8 @@ export function ensureIndexes(): Promise<void> {
         // One settings document per user. Unique so the settings form's upsert
         // cannot race itself into two rows, of which only one would ever be read.
         userSettingsCol.createIndex({ userId: 1 }, { unique: true }),
+        pushSubscriptionsCol.createIndex({ endpoint: 1 }, { unique: true }),
+        pushSubscriptionsCol.createIndex({ userId: 1 }),
       ]);
     })();
   }

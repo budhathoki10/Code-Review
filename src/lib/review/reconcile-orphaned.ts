@@ -5,6 +5,7 @@ import { completeCheckRun } from "@/lib/github/checks";
 import type { ReviewJobData } from "@/lib/queue/review-queue";
 import { logger } from "@/lib/logger";
 import { envNumber } from "@/lib/env";
+import { notifyReviewOutcome } from "@/lib/push/delivery";
 
 /**
  * A review can be left `status: "pending"` forever if its BullMQ job
@@ -41,8 +42,8 @@ export async function reconcileOrphanedReviews(queue: Queue<ReviewJobData>): Pro
 
     const log = logger.child({ reviewId: review._id, pullRequestId: review.pullRequestId, headSha: review.headSha });
 
-    await reviewsCol.updateOne(
-      { _id: review._id },
+    const updated = await reviewsCol.updateOne(
+      { _id: review._id, status: "pending" },
       {
         $set: {
           status: "failed",
@@ -55,10 +56,11 @@ export async function reconcileOrphanedReviews(queue: Queue<ReviewJobData>): Pro
         },
       },
     );
+    if (updated.matchedCount === 0) continue;
     reconciled += 1;
     log.warn("reconciled an orphaned pending review — marked failed");
 
-    if (review.checkRunId === undefined || review._id === undefined || !ObjectId.isValid(review.pullRequestId)) continue;
+    if (review._id === undefined || !ObjectId.isValid(review.pullRequestId)) continue;
 
     const pullRequestDoc = await (await pullRequests()).findOne({ _id: new ObjectId(review.pullRequestId) as unknown as string });
     if (!pullRequestDoc || !ObjectId.isValid(pullRequestDoc.repositoryId)) continue;
@@ -67,6 +69,16 @@ export async function reconcileOrphanedReviews(queue: Queue<ReviewJobData>): Pro
     if (!repositoryDoc) continue;
 
     const [owner, repo] = repositoryDoc.fullName.split("/");
+    await notifyReviewOutcome({
+      reviewId: String(review._id),
+      pullRequestId: review.pullRequestId,
+      headSha: review.headSha,
+      githubInstallationId: repositoryDoc.githubInstallationId,
+      owner,
+      repo,
+      prNumber: pullRequestDoc.githubPrNumber,
+    }, "failed");
+    if (review.checkRunId === undefined) continue;
     try {
       await completeCheckRun(repositoryDoc.githubInstallationId, owner, repo, review.checkRunId, {
         conclusion: "neutral",

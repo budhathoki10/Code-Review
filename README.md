@@ -16,6 +16,10 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Browser notifications
+
+Set `VAPID_SUBJECT`, `VAPID_PUBLIC_KEY`, and `VAPID_PRIVATE_KEY` in the web app and review worker environments, then restart both. Keep the private key out of source control. Sign in, open **Dashboard → Settings**, enable browser notifications, and press **Send test notification** to verify this device. The browser must allow notifications; production push requires HTTPS (localhost works for development). Alerts are sent when a review reaches a completed or failed state. A device can turn notifications off from the same settings page.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

@@ -5,6 +5,8 @@ import { getCatalog } from "@/lib/ai/catalog";
 import { secretsConfigured } from "@/lib/crypto/secret-box";
 import { DEFAULT_MODEL } from "@/lib/ai/models";
 import { AiProviderForm, type StoredAiSettings } from "./ai-provider-form";
+import { PushNotifications } from "./push-notifications";
+import { pushConfigured } from "@/lib/push/subscription";
 
 export const metadata = { title: "Settings" };
 
@@ -62,6 +64,7 @@ export default async function SettingsPage() {
           defaultModel={process.env.NVIDIA_MODEL ?? DEFAULT_MODEL}
         />
       </section>
+      <PushNotifications publicKey={pushConfigured() ? process.env.VAPID_PUBLIC_KEY : undefined} />
     </div>
   );
 }
