@@ -1,6 +1,6 @@
 # Large-PR verification runbook
 
-End-to-end verification for the large-PR pipeline (Phases 1–5 of `handlelargepr.md`).
+End-to-end verification for the large-PR pipeline (Phases 1–5 of `docs/notes/handlelargepr.md`).
 
 **Why this exists:** unit tests missed three real bugs in this area — a `paginate` call that returns one object per page rather than concatenated rows, an `@octokit/plugin-paginate-rest` that was never wired in so `octokit.paginate` did not exist at all, and a "diff unavailable" path that reported to the logs but never to the author. All three passed a green suite. Mocks encode what we *believe* GitHub does; this runbook checks what it *actually* does.
 
